@@ -208,6 +208,7 @@ Phones subscribe over server-sent events, one channel per language, with the las
 It also runs standalone as a terminal tool, which is the fastest way to check a microphone or tune segmentation; add `--no-translate` to test the audio path without a translation key.
 `review.py` translates a text file and writes the review document.
 `capture.py` is the audio layer, with one interface over both backends.
+`selftest.py` checks the software without a microphone or an API key, which is worth running after you change anything.
 `static/` holds the two web pages.
 
 Settings live in `config.toml` and secrets in `.env`.

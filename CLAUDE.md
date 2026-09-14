@@ -64,8 +64,16 @@ Translate a transcript offline and produce a document a native speaker can mark 
 python3 review.py --input transcript.txt --review review.md
 ```
 
-There is no build step and no linter configured.
-`python3 -m py_compile server.py pipeline.py capture.py review.py` is the only mechanical check available.
+Check the software itself, with no keys, no audio device, and no network:
+
+```
+python3 selftest.py             everything, in about four seconds
+python3 selftest.py pipeline    the shared loops, against both sinks
+python3 selftest.py session     a whole Session start and stop
+python3 selftest.py server      boot server.py and exercise the routes
+```
+
+There is no build step and no linter configured, so `selftest.py` and `python3 -m py_compile` are the mechanical checks there are.
 
 ## Architecture
 
@@ -170,14 +178,23 @@ Prefer concrete nouns over pronouns in anything a volunteer might read.
 
 ## Testing
 
-There is no test suite and no test runner.
-Verification here means running a real command against real audio or a real transcript.
+`selftest.py` is the whole suite, and it needs no keys, no audio device, and no network.
+It uses no test framework, only the standard library, and exits non-zero if anything fails.
+Run it after any change to the pipeline, the sinks, or the routes.
+
+It has three sections, and `python3 selftest.py <section>` runs one of them.
+`pipeline` drives the shared loops against both sinks with a fake recognizer and a fake translator, covering segmentation, the gap rule, revision in place under one `seq`, an unread language never reaching the model, and the English fallback on both failure and timeout.
+`session` swaps `capture.open_capture` and `websockets.connect` for fakes and runs a whole `Session` from start to stop, which is the section that catches the wiring between the two files coming apart; run against the code before the sink refactor it fails eleven checks and names the `NameError`.
+`server` boots `server.py` on a spare port, with a config path that does not exist so the checks do not depend on whatever `config.toml` says on this machine, and exercises every route.
+
+Adding a check means adding one `checks.check(label, condition, detail)` line.
+`FakeSocket`, `FakeSource`, and `FakeTranslator` are already there, and `FakeTranslator` takes `mode="fail"` and a `delay`, so the failure and timeout paths cost nothing to exercise.
+
+What `selftest.py` cannot tell you is whether the captions are any good.
+Recognition accuracy is decided by the microphone feed and can only be judged in the actual room.
+Translation quality needs a native speaker and `review.py`.
 
 The three-layer settings precedence was verified by resolving the example config with and without overrides.
-Logic changes to the segmenter or the activation rules should be exercised with a short inline script against real fragment timings before they are trusted; that is how the gap check and the language activation rules were verified.
-`Segmenter` needs no network and no keys, so it can be driven directly with synthetic `(text, speech_final, start, audio_end)` tuples.
-The shared loops can be driven the same way, and this is the cheapest real check available: `listen` needs only an object that is async-iterable over Deepgram-shaped JSON, `publish` needs only a sink, and a fake translator returning a marker string per language proves ordering, revision in place, and the English fallback without spending a cent.
-Swapping `capture.open_capture` and `websockets.connect` for fakes exercises a whole `Session` start and stop in process, which is what catches a break in the wiring between the two files.
 
 Latency claims should come from an actual run, not an estimate.
 `python3 pipeline.py --no-translate` tags each line with how far behind real time it arrived, and a full `pipeline.py` run prints translation median and p95 on exit.
