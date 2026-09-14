@@ -197,7 +197,7 @@ function showAlert(message) {
 }
 
 async function loadDevices() {
-  const { devices, error } = await api("/api/devices");
+  const { devices, configured, error } = await api("/api/devices");
   if (error) { showAlert("Could not list audio sources. " + error); return; }
   const select = el("device");
   select.innerHTML = "";
@@ -209,11 +209,22 @@ async function loadDevices() {
     if (device.monitor) marks.push("playback");
     if (device.detail) marks.push(device.detail);
     option.textContent = device.name + (marks.length ? "  (" + marks.join(", ") + ")" : "");
-    if (device.default) option.selected = true;
+    // The configured source wins over whatever the backend calls default.
+    // parec marks no device as default, so without this nothing is selected
+    // and the browser shows the first option, which on a PulseAudio machine
+    // is the playback monitor rather than the microphone.
+    if (configured ? device.name === configured : device.default) {
+      option.selected = true;
+    }
     select.appendChild(option);
   }
+  const missing = configured && !devices.some((d) => d.name === configured);
+  // The note, not showAlert: poll() rewrites the alert every two seconds
+  // from the session error, so a warning put there disappears on its own.
   el("deviceNote").textContent =
-    "Sources marked playback capture what this computer plays, "
+    (missing ? "The configured source " + configured + " is not listed, "
+             + "so the selection below is a guess. " : "")
+    + "Sources marked playback capture what this computer plays, "
     + "not what the microphone hears.";
 }
 

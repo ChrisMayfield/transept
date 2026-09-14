@@ -559,12 +559,16 @@ async def api_status(request):
 
 async def api_devices(request):
     """Input devices, so the operator picks from a list rather than typing."""
-    backend = request.app["session"].config["capture"]
+    config = request.app["session"].config
     try:
-        devices = capture.list_devices(backend)
+        devices = capture.list_devices(config["capture"])
     except capture.CaptureError as exc:
         return web.json_response({"devices": [], "error": str(exc)})
-    return web.json_response({"devices": devices})
+    # The page pre-selects the configured source, which has to be sent
+    # separately: the "default" flag on a device is whatever the backend
+    # considers default, and parec marks nothing at all.
+    return web.json_response({"devices": devices,
+                              "configured": config["device"]})
 
 
 async def read_body(request):

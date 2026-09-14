@@ -618,6 +618,44 @@ def check_authorization(checks):
                  not server.authorized(StubRequest("secret", query="wrong")))
 
 
+def check_device_listing(checks):
+    """The device list names the configured source, so the page selects it.
+
+    parec marks no device as default, so without this the operator page has
+    nothing to pre-select and the browser falls to the first option, which
+    on a PulseAudio machine is the playback monitor.
+    """
+
+    class StubRequest:
+        def __init__(self, config):
+            self.app = {"session": SimpleNamespace(config=config)}
+
+    def listed(backend):
+        return [{"name": "monitor", "detail": "", "monitor": True,
+                 "default": False},
+                {"name": "fake", "detail": "", "monitor": False,
+                 "default": False}]
+
+    def raises(backend):
+        raise capture.CaptureError("pactl failed")
+
+    checks.section("The device list")
+    request = StubRequest(fake_config())
+    original = server.capture.list_devices
+    try:
+        server.capture.list_devices = listed
+        payload = json.loads(asyncio.run(server.api_devices(request)).text)
+        checks.check("the device list names the configured source",
+                     payload.get("configured") == "fake", payload)
+        server.capture.list_devices = raises
+        payload = json.loads(asyncio.run(server.api_devices(request)).text)
+        checks.check("a backend that cannot list is reported, not raised",
+                     payload["devices"] == [] and "pactl" in payload["error"],
+                     payload)
+    finally:
+        server.capture.list_devices = original
+
+
 def check_server(checks):
     """Boot server.py for real and exercise every route.
 
@@ -626,6 +664,7 @@ def check_server(checks):
     happens to say on this machine.
     """
     check_authorization(checks)
+    check_device_listing(checks)
     checks.section("The running server")
     port = free_port()
     environment = dict(
