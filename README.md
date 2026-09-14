@@ -9,32 +9,48 @@ A second or two after that, the same sentence appears in French, Swahili, or wha
 Nothing is projected on a screen and readers install nothing.
 Each person opens a link and chooses their own language and their own text size.
 
+## How it works
+
+Audio goes from the sound card to [Deepgram](https://deepgram.com/) (Speech-to-text API) over a websocket.
+Deepgram returns finalized fragments, which often cut sentences in half, so a segmenter buffers them into whole sentences.
+It closes one when the recognizer reports an endpoint, when the text ends in terminal punctuation, when a silent gap opens, or when the ceiling expires.
+This matters more than it sounds: translating "on the heater" by itself produces nonsense in any language that needs a verb.
+
+Whole sentences go to the translation model, all languages in one call, running concurrently but published in source order.
+English publishes immediately, and translations arrive on their own channels a moment later.
+Phones subscribe over server-sent events, one channel per language, with the last sixty lines replayed on connect so somebody arriving late has context.
+
+**Source files:** `server.py` is the web server and session manager, and the only thing you run on a normal Sunday.
+`pipeline.py` is the same pipeline without the web layer, which is the fastest way to check a microphone or tune segmentation.
+`review.py` translates a text file offline, `record.py` keeps a session and turns it into a review document, `capture.py` is the audio layer, `selftest.py` checks the software without a microphone or an API key, and `static/` holds the two web pages.
+
+**Config files:** Settings live in `config.toml` and secrets in `.env`.
+Keeping them apart means your settings can be committed to your own fork and copied to a second room, while your keys never leave your machine.
+
 ## What you need
 
-It was built for a Sunday school class with hard-of-hearing members and members whose first language is not English, but nothing in it is specific to that setting.
-What it takes is a sound system, a laptop, and somebody willing to press a button before the meeting starts.
+Transept was built for a Sunday school class with hard-of-hearing members and members whose first language is not English, but nothing in it is specific to that setting.
+All it takes is a sound system, a laptop, and somebody willing to press a button before the meeting starts.
 
 - A computer running Linux, macOS, or Windows, with Python 3.11 or newer.
-  No GPU, because the heavy work happens in the cloud.
+  No GPU required, because the heavy work happens in the cloud.
 - An audio input, ideally a line out from the sound board.
   Recognition quality is decided almost entirely here, and a laptop microphone on a table is far worse than a board feed.
-- A key from [Deepgram](https://console.deepgram.com) for speech recognition.
+- A key from [console.deepgram.com](https://console.deepgram.com) for speech recognition.
 - A key for any provider with an OpenAI-compatible endpoint for translation.
-  Google AI Studio, Anthropic, OpenAI, a LiteLLM proxy, and a local Ollama install all work.
+  [Google AI Studio](https://aistudio.google.com/), [Claude Platform](https://platform.claude.com/), [OpenAI Platform](https://platform.openai.com/), a [LiteLLM](https://www.litellm.ai/) proxy, and a local [Ollama](https://ollama.com/) install all work.
 
-Capture goes through PortAudio by way of the `sounddevice` package, so the laptop already plugged into the chapel sound system for Zoom will generally work as is.
+Capture goes through PortAudio by way of the `sounddevice` package, so the laptop already plugged into the chapel sound system for Zoom should generally work as is.
+A second backend, `parec`, is available on Linux and is used by default.
 On Linux you may also need `sudo apt install libportaudio2`.
-A second backend, `parec`, is available on Linux only; set `backend = "parec"` under `[audio]` if PortAudio misbehaves on a particular machine.
 
-### What it costs
-
-Speech recognition runs about $0.50 per hour through Deepgram, and new accounts include free credit that covers a great deal of use.
+**What it costs (Sep 2026):** Speech recognition runs about $0.50 per hour through Deepgram, and new accounts include free credit that covers a great deal of use.
 Translation through a small fast model runs a few cents per hour, and only for languages somebody is actually reading, so a language nobody opens costs nothing at all.
 A weekly ninety-minute class costs well under a dollar.
 
 ## Setup
 
-```
+```sh
 git clone <this repository>
 cd transept
 python3 -m venv .venv && source .venv/bin/activate
@@ -45,18 +61,18 @@ cp config.example.toml config.toml  # everything else
 
 Then find your audio source:
 
-```
+```sh
 python3 server.py --list-devices
 ```
 
 Put the name in `config.toml` under `[audio]`, where a partial name is enough.
-Anything marked as playback captures what the computer is playing rather than what the microphone hears, which is the most common setup mistake.
+Note that anything marked as playback captures what the computer is playing rather than what the microphone hears.
 
 ## Before your first meeting
 
 **Check the audio, in the actual room, with the actual microphones.**
 
-```
+```sh
 python3 pipeline.py --no-translate
 ```
 
@@ -64,26 +80,26 @@ Talk into the microphone.
 Your words should appear within a fraction of a second, each line tagged with how far behind real time it arrived.
 If nothing appears, the problem is the audio source, not the software.
 
-**Fill in two files**, which is ten minutes well spent.
-`keyterms.txt` biases the speech recognizer toward words it would otherwise mishear: names of people who speak often, place names, vocabulary specific to your congregation.
+**(optional) Fill in two files:** `keyterms.txt` biases the speech recognizer toward words it would otherwise mishear: names of people who speak often, place names, vocabulary specific to your congregation.
 `glossary.txt` guides the translation model, and is for names, terms that have an official published rendering in your target languages, and set phrases a general model would translate too literally.
 Copy `keyterms.example.txt` and `glossary.example.txt` and edit.
-With `--correct-english` the glossary also cleans up recognition errors on the English channel, so a name the recognizer spelled wrong gets fixed for everyone.
+
+With the `--correct-english` option, the glossary also cleans up recognition errors on the English channel, so a name the recognizer spelled wrong gets fixed for everyone.
 
 Both files are easier to fill in after a real meeting than before one.
-If you turn on `record`, this writes you the worklist:
+If you turn on `record`, this generates a list of suggested edits:
 
-```
+```sh
 python3 record.py --session last --out review/sunday.md
 ```
 
 The document leads with names the correction introduced that were not in the audio, then the terms the recognizer missed and the glossary had to repair, which are exactly the ones to add to `keyterms.txt` so they come out right the first time.
 
-**Review a language before you offer it.**
+**(optional) Review a language before you offer it.**
 You cannot evaluate a translation you cannot read, and neither can anyone else in the room.
 Run a real transcript through `review.py` and have a native speaker mark up the result:
 
-```
+```sh
 python3 record.py --session last --plain sunday.txt   # if you record
 python3 review.py --input sunday.txt --review review.md
 ```
@@ -96,7 +112,7 @@ Settle with your speakers which variety of a language they actually use, because
 
 ## Running a meeting
 
-```
+```sh
 python3 server.py
 ```
 
@@ -122,14 +138,14 @@ The address is your machine's own name, `https://<machine>.<tailnet>.ts.net`, an
 Readers install nothing and need no account, since only the laptop runs Tailscale.
 Funnel has to be enabled once for your tailnet in Access Controls.
 
-```
+```sh
 tailscale funnel 8080
 ```
 
 **Cloudflare Tunnel** needs a domain whose DNS Cloudflare manages, which is roughly ten to fifteen dollars a year.
 Cloudflare's free Quick Tunnel needs no domain but mints a new random `trycloudflare.com` address every restart, so a printed QR code would stop working the first time the laptop reboots.
 
-```
+```sh
 cloudflared tunnel create chapel
 cloudflared tunnel route dns chapel captions.example.org
 ```
@@ -162,30 +178,12 @@ Lower it if unrelated turns are being glued together.
 
 `idle_stop_minutes` (10) stops a session that has heard nothing for that long.
 Somebody will eventually forget to press Stop, and recognition is billed by audio duration whether anyone is talking or not.
-Set a spend limit in the Deepgram console as a second line of defence.
+Set a spend limit in the Deepgram console as a second line of defense.
 
 `grace` (90 seconds) is how long a language keeps running after its last reader leaves, so a phone locking its screen does not restart the language.
 
 `reasoning_effort = "low"` is worth setting on models that think by default.
 Translation does not benefit from deliberation, and on one test it cut median latency from about two seconds to under one with no loss in quality.
-
-## How it works
-
-Audio goes from the sound card to Deepgram over a websocket.
-Deepgram returns finalized fragments, which often cut sentences in half, so a segmenter buffers them into whole sentences.
-It closes one when the recognizer reports an endpoint, when the text ends in terminal punctuation, when a silent gap opens, or when the ceiling expires.
-This matters more than it sounds: translating "on the heater" by itself produces nonsense in any language that needs a verb.
-
-Whole sentences go to the translation model, all languages in one call, running concurrently but published in source order.
-English publishes immediately, and translations arrive on their own channels a moment later.
-Phones subscribe over server-sent events, one channel per language, with the last sixty lines replayed on connect so somebody arriving late has context.
-
-`server.py` is the web server and session manager, and the only thing you run on a normal Sunday.
-`pipeline.py` is the same pipeline without the web layer, which is the fastest way to check a microphone or tune segmentation.
-`review.py` translates a text file offline, `record.py` keeps a session and turns it into a review document, `capture.py` is the audio layer, `selftest.py` checks the software without a microphone or an API key, and `static/` holds the two web pages.
-
-Settings live in `config.toml` and secrets in `.env`.
-Keeping them apart means your settings can be committed to your own fork and copied to a second room, while your keys never leave your machine.
 
 ## Privacy and accuracy
 
@@ -194,7 +192,7 @@ Both are commercial services with their own retention policies.
 This is worth raising with whoever leads the meeting before you deploy it, particularly in a setting where people say personal things out loud.
 
 By default nothing is stored on disk, so captions live in memory and disappear when the session stops.
-Turning on `record` in `config.toml` changes that, and it is a decision to make with whoever leads the meeting rather than on your own.
+Turning on `record` in `config.toml` changes that, and it is a decision to make with whoever leads the meeting.
 A recorded session keeps every English sentence, every translation, and how long each one took, in `sessions.db` next to the code.
 It is not encrypted, `.gitignore` keeps it out of your fork, and nothing is ever deleted automatically.
 The operator page says "Recording this session to disk" the whole time one is being kept, because the person at the laptop is the one who has to tell the room.
@@ -209,8 +207,8 @@ Tell people that.
 
 ## About the name
 
-The transept is the crossing arm of a church, the part that runs side to side.
-It also happens to begin like "translate."
+A *transept* is the section of a church that crosses the nave, giving the building its characteristic cross-shaped layout.
+The word also plays on *transcription* and *translation*, reflecting the tool's purpose of carrying spoken words across languages and delivering them to people wherever they are in the meeting.
 
 ## License
 

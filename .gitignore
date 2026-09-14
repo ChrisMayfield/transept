@@ -5,8 +5,9 @@
 glossary.txt
 keyterms.txt
 
-# config.toml is deliberately NOT ignored. Settings are worth committing to
-# your own fork so a second room can start from a known-good file.
+# Settings might be worth committing to your own fork so a second room
+# can start from a known-good file.
+config.toml
 
 # Recordings, transcripts, and review documents. A recorded session holds
 # every word said in the room, so it is more sensitive than the glossary.
