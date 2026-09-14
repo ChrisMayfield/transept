@@ -15,10 +15,6 @@ live pipeline, so what you review here is what a reader will see. Only the
 retry policy differs: waiting out a failure beats losing a line when nobody
 is waiting on the answer.
 
-Setup:
-    pip install -r requirements.txt
-    cp .env.example .env   and fill it in
-
 Usage:
     python3 review.py --input transcript.txt --model gemini-3.8-flash
     python3 review.py --input transcript.txt --languages "French,Swahili" \\
@@ -48,13 +44,7 @@ DECORATION_RE = re.compile(r"^(\s+\.\s|\s{5,}\S)")
 
 
 def read_lines(path, keep_prefix, limit):
-    """English sentences, one per line.
-
-    Accepts either a plain transcript or raw pipeline.py output. In the
-    second case the sentence prefix comes off and the fragment and
-    translation lines are dropped, so what reaches the model is the same
-    text a reader would have seen.
-    """
+    """English sentences, one per line, as __doc__ describes."""
     handle = open(path, encoding="utf-8") if path else sys.stdin
     try:
         lines = []

@@ -2,19 +2,13 @@
 """
 Live captioning and translation, terminal edition.
 
-Captures from a PipeWire source, streams to Deepgram for speech recognition,
-buffers finalized fragments into whole sentences, translates each sentence
-into every target language concurrently, and prints the result in source
-order.
+Captures audio, streams it to Deepgram for speech recognition, buffers
+finalized fragments into whole sentences, translates each sentence into every
+target language concurrently, and prints the result in source order.
 
 This is the same pipeline server.py runs, without the web layer. Use it to
 check a microphone feed, tune segmentation, or measure translation latency,
 because a terminal is a better place to see what is happening than a browser.
-
-Setup:
-    sudo apt install pulseaudio-utils
-    pip install -r requirements.txt
-    cp .env.example .env   and fill it in
 
 Usage:
     python3 pipeline.py --device <source> --model gemini-3.8-flash
@@ -201,12 +195,10 @@ class Segmenter:
     """Accumulates finalized ASR fragments into whole sentences.
 
     Deepgram finalizes text before the speaker finishes a sentence, so
-    translating each finalized result in isolation produces fragments like
-    "on the heater" with no subject. This holds fragments until one of four
-    things happens: a silent gap opens between fragments, the recognizer
-    reports an endpoint, the accumulated text ends in terminal punctuation,
-    or the ceiling expires so a long unbroken monologue does not stall the
-    translated channels forever.
+    translating each result in isolation produces fragments like "on the
+    heater" with no subject. Fragments are held until a silent gap opens,
+    the recognizer reports an endpoint, the text ends in terminal
+    punctuation, or the ceiling expires.
 
     The gap check is what stops an abandoned half-sentence from capturing
     whatever the next person says. Without it, "you all can see if it" waits
@@ -262,8 +254,7 @@ class Segmenter:
         The sequence number travels with the text rather than being read off
         the segmenter afterwards. One fragment can close two sentences, and
         both takes run before either unit is built, so a caller reading
-        self.seq later would stamp both with the second number and the Hub
-        would revise the first line away.
+        self.seq later would stamp both with the second number.
         """
         text = " ".join(self.parts).strip()
         self.parts = []
@@ -334,10 +325,10 @@ class Translator:
             "max_tokens": self.max_tokens,
         }
         if self.reasoning_effort:
-            # Translation is mechanical and does not benefit from deliberation.
-            # Gemini 3 models cannot disable thinking outright, but "low"
-            # floors the budget. Thinking tokens also count against
-            # max_tokens, which is what truncated responses earlier.
+            # Translation is mechanical and does not benefit from thinking.
+            # Gemini 3 cannot disable it outright, but "low" floors the
+            # budget. Thinking tokens count against max_tokens, which is
+            # what truncated responses earlier.
             body["reasoning_effort"] = self.reasoning_effort
         last_error = None
         for attempt in range(self.max_attempts):
@@ -355,10 +346,9 @@ class Translator:
                     parsed = parse_translations(
                         choice["message"]["content"], outputs)
                     return parsed, time.monotonic() - started
-            # IndexError covers an empty choices array, which a provider
-            # returns for a filtered or truncated response. Letting it escape
-            # kills the publisher task and, in server.py, the whole session,
-            # instead of falling back to English for one line.
+            # IndexError covers an empty choices array, which is what a
+            # filtered or truncated response looks like. Letting it escape
+            # kills the publisher task and, in server.py, the session.
             except (httpx.HTTPError, KeyError, IndexError, ValueError,
                     json.JSONDecodeError) as exc:
                 last_error = f"{type(exc).__name__}: {exc}"
@@ -491,8 +481,8 @@ def add_settings_arguments(parser, names):
 # pump feeding audio in, a listener segmenting results, and a publisher
 # emitting in source order. They differ only in where finished text goes, so
 # that difference lives behind a sink and the loops themselves are shared.
-# The loops were duplicated once and the copies drifted, until one of them
-# was building a Deepgram URL from names it had never imported.
+# Keep it that way: these loops were duplicated once and the copies drifted
+# until one was building a Deepgram URL from names it had never imported.
 #
 # A sink provides:
 #     fragment(text)          a raw recognition result arrived
@@ -601,10 +591,9 @@ async def publish(queue, sink, hold_seconds):
             task.cancel()
             sink.timed_out(unit, languages)
         except asyncio.CancelledError:
-            # The shield means this is our own cancellation, not the call's:
-            # the session is stopping. Publishing an English fallback now
-            # would push a line into every channel after the operator hit
-            # Stop, and count a failure that never happened.
+            # The shield means this is our own cancellation: the session is
+            # stopping. An English fallback here would reach every channel
+            # after the operator pressed Stop.
             task.cancel()
             raise
         except (RuntimeError, httpx.HTTPError) as exc:
@@ -621,14 +610,7 @@ def latency_summary(values):
 
 
 class TerminalSink:
-    """Prints the transcript as it forms, which is what pipeline.py is for.
-
-    A dim line starting with a middle dot is a raw recognition fragment,
-    printed as it arrives so the buffering is visible. A numbered block is a
-    completed sentence with its translations, tagged with the reason the
-    sentence closed. A line marked en* is the transcript after glossary
-    correction.
-    """
+    """Prints the transcript as it forms, in the format __doc__ describes."""
 
     def __init__(self, outputs, started, color):
         self.outputs = list(outputs)

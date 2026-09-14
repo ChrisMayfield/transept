@@ -13,11 +13,6 @@ Speech recognition runs continuously while a session is on. Translation runs
 per language, only while somebody is reading that language or the operator
 has forced it on, so an unread language costs nothing.
 
-Setup:
-    sudo apt install pulseaudio-utils
-    pip install -r requirements.txt
-    cp .env.example .env   and fill it in
-
 Usage:
     python3 server.py --model gemini-3.8-flash --reasoning-effort low \\
         --languages "French,Swahili,Spanish" --correct-english \\
@@ -53,9 +48,8 @@ from pipeline import (Segmenter, Translator, add_settings_arguments,
 STATIC = Path(__file__).parent / "static"
 HISTORY = 60
 RECONNECT_BACKOFF = [1, 2, 5, 10, 20]
-# A run that lasted this long counts as healthy, so the next drop starts the
-# backoff over. Without it, four blips early in a meeting mean the one an hour
-# later costs a twenty second silence.
+# Seconds a run must last to count as healthy and reset the backoff. Without
+# it, a few blips early in a meeting make a later one cost twenty seconds.
 HEALTHY_RUN = 60
 
 
@@ -377,9 +371,9 @@ class Session:
             self.stats["corrections"] += 1
             self.hub.publish("English", unit.seq, revised)
         for language in languages:
-            # parse_translations fills every requested language, empty when
-            # the model dropped one, so a default here would never be used.
-            # An empty caption is the stall the fallback exists to prevent.
+            # parse_translations fills every requested language, empty
+            # where the model dropped one, so a get() default never fires
+            # and the empty string is what has to trigger the fallback.
             self.hub.publish(language, unit.seq,
                              translations.get(language) or unit.text)
 
@@ -443,9 +437,8 @@ async def api_devices(request):
 async def read_body(request):
     """The posted JSON object, or an empty one.
 
-    A malformed or absent body is an operator page bug or a stray request,
-    not a server error: answering with the {"ok": false} shape the page
-    already handles beats a 500 traceback it renders as nothing at all.
+    A malformed or absent body is not a server error. The operator page
+    renders the {"ok": false} shape and renders a 500 traceback as nothing.
     """
     if not request.can_read_body:
         return {}

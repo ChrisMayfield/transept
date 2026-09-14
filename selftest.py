@@ -6,14 +6,10 @@ Needs no API keys, no audio device, and no network. A fake recognizer and a
 fake translator stand in where the real ones would go, so the whole thing
 runs in a few seconds and costs nothing.
 
-This is not a substitute for listening to a real room. Recognition accuracy
-is decided by the microphone feed and can only be judged there. What this
-catches is the wiring between pipeline.py and server.py coming apart, which
-is worth catching automatically because of how it failed last time: the two
-files carried separate copies of the same loops, one copy drifted until it
-referenced names it had never imported, and every session start raised
-NameError into a supervisor that caught it and retried forever. The operator
-page showed "reconnecting" and nothing else.
+This is not a substitute for listening to a real room, where recognition
+accuracy is decided. What it catches is the wiring between pipeline.py and
+server.py coming apart, which once put every session start into a NameError
+that a supervisor caught and retried forever.
 
 Usage:
     python3 selftest.py             everything
@@ -87,15 +83,12 @@ def asr_result(text, speech_final, start, duration):
 
 
 # Three sentences over four fragments, one for each way the buffer closes.
-# No fragment here ends in punctuation until the third sentence, which is the
-# point: the first sentence has to survive in the buffer until the silent gap
-# closes it. An earlier fixture punctuated the second fragment, so the gap
-# branch was never reached and the check below passed without testing it.
-#
-# The third fragment does double duty. It arrives after the gap and it ends a
-# sentence itself, so one fragment closes two sentences, which is the case
-# where a shared sequence number would make the Hub revise the first line
-# away instead of publishing it.
+# Nothing is punctuated until the third sentence on purpose: the first has to
+# survive in the buffer until the gap closes it. An earlier fixture punctuated
+# fragment two, so the gap branch was never reached under a check that claimed
+# to test it. The third fragment then does double duty, arriving after the gap
+# and ending a sentence itself, which is the case where one sequence number
+# for two units would make the Hub revise the first line away.
 FRAGMENTS = [
     asr_result("the meeting will start", False, 0.0, 1.0),
     asr_result("at nine o'clock", False, 1.0, 1.0),
@@ -186,8 +179,8 @@ class FakeTranslator:
                     for name in outputs}
         if self.mode == "empty":
             # What parse_translations returns when the model answered but
-            # left a language out of the JSON. The call succeeded, so no
-            # failure path runs and only the sink can save the reader.
+            # left a language out. The call succeeded, so no failure path
+            # runs and only the sink can save the reader.
             rendered = {name: ("" if name != "English" else rendered[name])
                         for name in rendered}
         return rendered, 0.5

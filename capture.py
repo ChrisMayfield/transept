@@ -2,14 +2,9 @@
 """
 Audio capture, one interface over two backends.
 
-sounddevice (PortAudio) works on Linux, macOS, and Windows and is what a
-congregation running this on whatever laptop is already plugged into the
-sound system will use.
-
-parec (PipeWire and PulseAudio) is Linux only. It stays because PortAudio
-through PipeWire's compatibility layer can be inconsistent about device
-names and buffer sizes, and having a second path means a machine where one
-misbehaves is not a dead end.
+sounddevice (PortAudio) works everywhere and is the default. parec is Linux
+only and stays as a second path, because PortAudio through PipeWire's
+compatibility layer can be inconsistent about device names and buffer sizes.
 
 Both deliver the same thing: 16 kHz mono signed 16-bit chunks, one per
 CHUNK_MS, which is what the speech recognizer expects.
@@ -143,11 +138,10 @@ class ParecCapture:
                 f"--rate={SAMPLE_RATE}", f"--channels={CHANNELS}",
                 "--latency-msec=50",
                 stdout=asyncio.subprocess.PIPE,
-                # Discarded rather than piped: nothing reads a stderr pipe,
-                # so enough diagnostics over a long meeting fill the buffer
-                # and parec blocks mid write. Audio then stops with no error
-                # and no end of stream, which is the one failure the session
-                # supervisor cannot see.
+                # Discarded, not piped: nothing drains a stderr pipe, so
+                # enough diagnostics fill the buffer and parec blocks mid
+                # write. Audio stops with no error and no end of stream,
+                # which is the one failure the supervisor cannot see.
                 stderr=asyncio.subprocess.DEVNULL,
             )
         except OSError as exc:
@@ -235,9 +229,9 @@ class SoundDeviceCapture:
                 return cls(stream, queue, state, rate, ratio)
             except Exception as exc:
                 last_error = exc
-                # RawInputStream opens the device and start() can still fail.
-                # Holding it would make the 48 kHz attempt fail as busy, and
-                # the operator would see only that second, misleading error.
+                # RawInputStream opens the device and start() can still
+                # fail. Holding it would make the 48 kHz attempt fail as
+                # busy, and the operator would see only that second error.
                 if stream is not None:
                     try:
                         stream.close()
