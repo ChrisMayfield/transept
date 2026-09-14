@@ -56,6 +56,8 @@
   }
 
   .note { font-size: .85rem; color: var(--quiet); margin: .5rem 0 0; }
+  /* Not a quiet note. Somebody in the room has to be told about this. */
+  #recording { color: #8a5300; font-weight: 600; }
   .alert {
     margin: 1rem 0; padding: .8rem 1rem; border-left: 3px solid var(--halt);
     background: #fff; color: var(--halt); font-size: .9rem;
@@ -120,6 +122,7 @@
 </div>
 
 <div id="alert"></div>
+<p class="note" id="recording" hidden></p>
 <p class="note" id="quiet"></p>
 
 <div style="margin-top:1.25rem">
@@ -222,6 +225,14 @@ function seconds(value) {
 }
 
 function render(status) {
+  const recording = el("recording");
+  recording.hidden = !status.recording;
+  if (status.recording) {
+    const dropped = status.dropped
+      ? ` ${status.dropped} line(s) were not written.` : "";
+    recording.textContent =
+      "Recording this session to disk. Tell the room." + dropped;
+  }
   const words = { stopped: "Stopped", starting: "Starting",
                   running: "Running", reconnecting: "Reconnecting" };
   const state = el("state");

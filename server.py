@@ -25,6 +25,7 @@ QR code or a bookmarked link keeps working from week to week.
 
 import argparse
 import asyncio
+import hashlib
 import io
 import json
 import os
@@ -40,7 +41,9 @@ except ImportError:
     sys.exit("Missing dependencies: pip install websockets httpx aiohttp")
 
 import capture
-from pipeline import (Segmenter, Translator, add_settings_arguments,
+import record
+from pipeline import (SYSTEM_PROMPT, Segmenter, Translator,
+                      add_settings_arguments,
                       build_asr_url, listen, load_config, load_env,
                       load_file_lines, load_glossary, publish, pump_audio,
                       resolve)
@@ -136,6 +139,12 @@ class Session:
         # the segmenter because a reconnect builds a new segmenter and the
         # numbering has to run on across the whole meeting.
         self.last_seq = 0
+        self.recorder = None
+        # Which stream a line came from, and when that stream began.
+        # audio_end is relative to the websocket, so both restart on every
+        # reconnect and the timeline only reassembles with the run beside it.
+        self.run = 0
+        self.run_started = None
         self.stats = {"units": 0, "translated": 0, "failures": 0,
                       "timeouts": 0, "reconnects": 0, "corrections": 0,
                       "skipped": 0, "latencies": []}
@@ -157,9 +166,11 @@ class Session:
                       "skipped": 0, "latencies": []}
         self.hub.clear()
         self.last_seq = 0
+        self.run = 0
         self.state = "starting"
         self.started_at = time.time()
         self.last_activity = time.monotonic()
+        await self._open_recorder()
         self.translator = Translator(
             self.config["llm_base"], self.config["llm_key"],
             self.config["model"], self.config["languages"],
@@ -189,7 +200,60 @@ class Session:
         if self.translator:
             await self.translator.close()
             self.translator = None
+        if self.recorder:
+            await self.recorder.close()
+            self.recorder = None
         return True, "Stopped."
+
+    async def _open_recorder(self):
+        """Start recording, or carry on without it.
+
+        A database that will not open is a note on the operator page, never
+        a refusal to start. The meeting matters more than the record of it.
+        """
+        if not self.config.get("record"):
+            return
+        config = self.config
+        header = (
+            self.started_at, config["device"], config["asr_model"],
+            config["model"], json.dumps(config["languages"]),
+            int(bool(config["correct_english"])),
+            json.dumps({name: config[name] for name in
+                        ("ceiling", "gap", "hold", "endpointing", "grace",
+                         "timeout", "max_tokens", "reasoning_effort")}),
+            # The glossary and keyterms verbatim, not a path and not a
+            # digest. Both files are gitignored and both get edited between
+            # meetings, so a path recorded here would not describe the text
+            # that produced these lines.
+            config["glossary"], json.dumps(config["keyterms"]),
+            hashlib.sha256(SYSTEM_PROMPT.encode()).hexdigest()[:12],
+        )
+        recorder = record.Recorder(config.get("database") or "sessions.db")
+        error = await recorder.open(header)
+        if error:
+            self.error = f"Not recording: {error}"
+            return
+        self.recorder = recorder
+
+    def recording(self):
+        """True while a session is being written to disk."""
+        return self.recorder is not None and self.recorder.session_id
+
+    def _record(self, method, **row):
+        """Hand one row to the recorder, and never let it reach the captions.
+
+        The Recorder is built not to raise, but the guard belongs here as
+        well, because these calls sit in the loop that drains the Deepgram
+        socket. A disk that has stopped answering costs the record of the
+        meeting and must not cost the meeting.
+        """
+        if self.recorder is None:
+            return
+        try:
+            getattr(self.recorder, method)(**row)
+        except Exception as exc:
+            self.error = f"Recording stopped: {type(exc).__name__}: {exc}"
+            self.recorder = None
 
     def active_languages(self):
         """Languages worth spending tokens on right now."""
@@ -268,6 +332,11 @@ class Session:
                           if self.last_activity and self.state != "stopped"
                           else 0),
             "skipped": self.stats["skipped"],
+            # On the page, not just in a config file somebody edited six
+            # weeks ago. The operator is the person who has to tell the room
+            # a transcript is being kept.
+            "recording": bool(self.recording()),
+            "dropped": self.recorder.dropped if self.recorder else 0,
             "languages": self.language_report(),
             "english_listeners": len(self.hub.subscribers["English"]),
             "median": (sorted(latencies)[len(latencies) // 2]
@@ -325,6 +394,8 @@ class Session:
             ) as socket:
                 self.state = "running"
                 self.error = None
+                self.run += 1
+                self.run_started = time.monotonic()
                 tasks = [
                     asyncio.create_task(pump_audio(source, socket)),
                     asyncio.create_task(
@@ -364,14 +435,42 @@ class Session:
         self.hub.publish("English", unit.seq, unit.text)
 
         languages = self.active_languages()
+        # Recording asks for the English correction whether or not anybody
+        # is reading that channel. Without it, a Sunday where everyone reads
+        # French stores no corrected line to compare against, and the two
+        # things the record exists for, the keyterms worklist and the check
+        # for an invented name, are both empty.
         wants_english = (self.config["correct_english"]
-                         and self.hub.wanted("English",
-                                             self.config["grace"]))
+                         and (self.recording()
+                              or self.hub.wanted("English",
+                                                 self.config["grace"])))
         outputs = (["English"] if wants_english else []) + languages
         if not outputs:
             # Nobody is reading a translated channel and English needs no
             # correction, so this sentence costs no model tokens at all.
             self.stats["skipped"] += 1
+        if self.recorder:
+            # What a reader actually waited: time since this stream opened,
+            # less how far into the stream the words were spoken.
+            lag = None
+            if self.run_started is not None:
+                lag = ((time.monotonic() - self.run_started)
+                       - unit.audio_end)
+                # A negative value means the stream clock and this clock
+                # disagree, which is not a measurement of anything a reader
+                # experienced. Better absent than reported.
+                lag = lag if lag >= 0 else None
+            self._record(
+                "line",
+                seq=unit.seq, run=self.run, at=time.time(),
+                audio_end=unit.audio_end, lag=lag,
+                confidence=unit.confidence,
+                heard=unit.text, reason=unit.reason,
+                # Set here rather than left for a completion method: when
+                # outputs is empty, publish sees task is None and skips, so
+                # none of translated, timed_out or failed ever runs.
+                outcome="skipped" if not outputs else "pending",
+                requested=list(outputs))
         return outputs
 
     def translated(self, unit, languages, translations, elapsed):
@@ -381,6 +480,19 @@ class Session:
         if revised and revised != unit.text:
             self.stats["corrections"] += 1
             self.hub.publish("English", unit.seq, revised)
+        if self.recorder:
+            self._record("correction",
+                         seq=unit.seq, english=revised or unit.text,
+                         latency=elapsed, outcome="translated")
+            for language in languages:
+                text = translations.get(language)
+                self._record(
+                    "translation",
+                    seq=unit.seq, language=language, text=text or unit.text,
+                    # An empty answer is not a failure anywhere else, so
+                    # this is the only place it can be told apart from a
+                    # translation the model actually produced.
+                    source="model" if text else "empty")
         for language in languages:
             # parse_translations fills every requested language, empty
             # where the model dropped one, so a get() default never fires
@@ -390,13 +502,13 @@ class Session:
 
     def timed_out(self, unit, languages):
         self.stats["timeouts"] += 1
-        self._fall_back_to_english(unit, languages)
+        self._fall_back_to_english(unit, languages, "timeout")
 
     def failed(self, unit, languages, error):
         self.stats["failures"] += 1
-        self._fall_back_to_english(unit, languages)
+        self._fall_back_to_english(unit, languages, "failure")
 
-    def _fall_back_to_english(self, unit, languages):
+    def _fall_back_to_english(self, unit, languages, source):
         """Show the English text rather than let a channel stall.
 
         A reader of a translated channel cannot hear the room, so a line they
@@ -404,6 +516,15 @@ class Session:
         """
         for language in languages:
             self.hub.publish(language, unit.seq, unit.text)
+        if self.recorder:
+            # Recorded as what the reader saw, not as an absence. A missing
+            # row would be indistinguishable from a language nobody had
+            # open, and the difference is the whole point of the table.
+            self._record("correction", seq=unit.seq, english=None,
+                         latency=None, outcome=source)
+            for language in languages:
+                self._record("translation", seq=unit.seq, language=language,
+                             text=unit.text, source=source)
 
 
 # -- web layer -------------------------------------------------------------
@@ -592,7 +713,7 @@ def main():
         "device", "capture", "model", "languages", "grace", "idle_stop",
         "glossary", "keyterms", "ceiling", "gap", "hold", "asr_model",
         "endpointing", "max_tokens", "timeout", "reasoning_effort",
-        "correct_english", "host", "port",
+        "correct_english", "host", "port", "record", "database",
     ])
     args = parser.parse_args()
 

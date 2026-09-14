@@ -53,6 +53,15 @@ gap = 0.6
 # Set to 0 to disable.
 idle_stop_minutes = 10
 
+# Keep a transcript of each session, so the glossary, the key terms, and the
+# prompt can be improved from what was actually said rather than from
+# memory. Off by default, and a decision to make with whoever leads the
+# meeting: what is kept is every English sentence, every translation, and
+# how long each took. See record.py, which turns one into a document worth
+# reading. Nothing is ever deleted automatically.
+record = false
+database = "sessions.db"
+
 [recognition]
 model = "nova-3"
 

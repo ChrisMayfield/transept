@@ -31,9 +31,10 @@ When a translation fails, times out, or comes back missing a language, the Engli
 python3 server.py                     the whole thing, and the entire weekly command
 python3 server.py --list-devices      find an audio source
 python3 pipeline.py --no-translate    check the audio path, no translation key needed
-python3 selftest.py [section]         lint, pipeline, session, server, or all four
+python3 selftest.py [section]         lint, pipeline, session, store, server
 ruff check .                          the linter alone, as selftest runs it
 python3 review.py --input t.txt --review review.md    offline translation review
+python3 record.py --session last --out review/sunday.md    read a session back
 ```
 
 Any setting may be overridden for a one-off, for example `python3 server.py --ceiling 6`.
@@ -56,6 +57,9 @@ It also runs standalone as a terminal tool, which is the fastest way to debug th
 `server.py` adds `Hub` (ring buffers and subscribers), `Session` (start, stop, supervise, reconnect), and the aiohttp routes.
 
 `review.py` is an offline tool sharing `Translator` and the prompt, differing only in retry policy: the live pipeline gets one fast retry because a meeting cannot wait, while review retries harder because nothing is waiting on the answer.
+
+`record.py` is both halves of persistence: the `Recorder` a `Session` writes through, and the command that reads a session back as a Markdown document.
+Recording is off unless `[session] record` is set, and nothing is ever deleted without `--purge`.
 
 ### One pipeline, two sinks
 
@@ -99,6 +103,16 @@ That is how a glossary-corrected English line replaces the raw one on phones alr
 `Segmenter._take` returns the sequence number alongside the text instead of leaving the caller to read `segmenter.seq`.
 One fragment can close two sentences, the gap check closing the buffered one and the fragment itself closing the next, and both takes run before either unit is built.
 A caller reading the counter afterwards stamps both with the second number, and `Hub.publish` then revises the first line away instead of publishing it.
+
+`Session.unit` asks for the English correction whenever a session is being recorded, not only when somebody is reading that channel.
+Without it, a Sunday where everyone reads French stores no corrected line, and the two things the record exists for, the keyterms worklist and the check for an invented name, are both empty.
+
+Every recorder call from `Session` goes through `_record`, which swallows anything the recorder raises and switches recording off.
+The `Recorder` is built not to raise and only ever puts a row on a queue, but these calls sit in the loop draining the Deepgram socket, so the guard belongs at the call site too.
+A disk that has stopped answering costs the record of the meeting and must not cost the meeting.
+
+`record.connect` passes `timeout=0`.
+On a locked database sqlite does not raise, it blocks in the busy handler for the full timeout first, and the default is five seconds, which no `except` can catch.
 
 `Session.translated` falls back to English on an empty string, not on a missing key.
 `parse_translations` fills every requested language, so a language the model dropped arrives as `""` and a `dict.get` default would never fire.
@@ -155,11 +169,14 @@ One sentence per line in Markdown files, so diffs isolate the sentence that chan
 `selftest.py` is the whole suite, and it needs no keys, no audio device, and no network.
 It uses no test framework, only the standard library, and exits non-zero if anything fails.
 Run it after any change to the pipeline, the sinks, or the routes.
-`python3 selftest.py <section>` runs one of `lint`, `pipeline`, `session`, or `server`.
+`python3 selftest.py <section>` runs one of `lint`, `pipeline`, `session`, `store`, or `server`.
 The `lint` section shells out to `ruff check .` and reports its output as one check, which is what keeps linting in the regular workflow when there is no CI to enforce it.
 
 Adding a check means adding one `checks.check(label, condition, detail)` line.
 `FakeSocket`, `FakeSource`, and `FakeTranslator` are already there, and `FakeTranslator` takes `mode="fail"`, `mode="empty"`, and a `delay`, so the failure, dropped language, and timeout paths cost nothing to exercise.
+
+The `store` section ends with a `Recorder` that raises on every method, asserted against the `Hub` buffers.
+An isolation wrapper with no test that exercises the raising path is a wrapper nobody knows works; this one was written before the guard existed and failed until it did.
 
 A fixture that cannot reach a branch hides a bug under a passing check.
 `FRAGMENTS` once punctuated its second fragment, so the buffer was always empty when the gap check ran and a sequence number collision lived for a release under a check whose label claimed to test the gap.
@@ -177,5 +194,4 @@ A manifest and service worker would add install friction and offline machinery t
 HTTPS is still required, because the screen wake lock needs a secure context, and a tunnel in front is the current answer.
 `public_url` exists because the bind address is not the address a phone can reach, and the QR endpoint renders that value rather than the listener.
 
-Nothing is persisted, so there is no transcript after a session ends.
 The operator token is thin security appropriate for a local network and nothing more.

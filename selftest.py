@@ -16,6 +16,7 @@ Usage:
     python3 selftest.py lint        ruff, with the rules in ruff.toml
     python3 selftest.py pipeline    the shared loops, against both sinks
     python3 selftest.py session     a whole Session start and stop
+    python3 selftest.py store       recording a session and reading it back
     python3 selftest.py server      boot server.py and exercise the routes
 
 Exits non-zero if any check fails.
@@ -29,6 +30,7 @@ import os
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -37,6 +39,7 @@ from types import SimpleNamespace
 
 import capture
 import pipeline
+import record
 import server
 
 HERE = Path(__file__).parent
@@ -511,7 +514,7 @@ async def check_session(checks):
         segmenter = pipeline.Segmenter(4.0, 0.6, start_seq=session.last_seq)
         for text in texts:
             for taken in segmenter.add(text, True, 0.0, 1.0):
-                seq, body, _, _ = taken
+                seq, body = taken[0], taken[1]
                 session.last_seq = max(session.last_seq, seq)
                 hub.publish("English", seq, body)
     english = [(entry["seq"], entry["text"])
@@ -731,6 +734,180 @@ def check_server(checks):
                  process.returncode is not None, process.returncode)
 
 
+# -- recording a session -----------------------------------------------------
+
+
+async def check_store(checks):
+    """Record a session to a real file, then read it back.
+
+    The last section here is the one that matters most. A disk that has
+    stopped answering must cost the record and nothing else, so a Recorder
+    that raises on every call has to leave the captions untouched.
+    """
+    checks.section("Recording a session to disk")
+    path = Path(tempfile.mkdtemp()) / "selftest.db"
+    translator = FakeTranslator()
+    session, hub = make_session(["French", "Swahili"], True,
+                                ["English", "French"])
+    session.config["record"] = True
+    session.config["database"] = str(path)
+    session.started_at = time.time()
+    session.run = 1
+    session.run_started = time.monotonic()
+    await session._open_recorder()
+    session.translator = translator
+    checks.check("the recorder opened", session.recording(), session.error)
+    await drive(session, translator)
+    await session.recorder.close()
+
+    handle = record.open_read_only(str(path))
+    stored = record.lines_of(handle, 1)
+    checks.check("every sentence was recorded once",
+                 [row["seq"] for row in stored] == [1, 2, 3],
+                 [row["seq"] for row in stored])
+    checks.check("the raw transcript was kept",
+                 stored[0]["heard"] == FIRST_SENTENCE, stored[0]["heard"])
+    checks.check("the correction filled the same row, not a second one",
+                 stored[0]["english"] == f"CORRECTED {FIRST_SENTENCE}",
+                 stored[0]["english"])
+    checks.check("the reason the sentence closed was kept",
+                 [row["reason"] for row in stored]
+                 == ["gap", "endpoint", "punctuation"],
+                 [row["reason"] for row in stored])
+    checks.check("the requested outputs were recorded",
+                 json.loads(stored[0]["requested"]) == ["English", "French"],
+                 stored[0]["requested"])
+    grouped = record.translations_of(handle, 1)
+    checks.check("the translation was stored against its language",
+                 grouped[1][0]["language"] == "French"
+                 and grouped[1][0]["text"] == f"<French> {FIRST_SENTENCE}",
+                 [dict(row) for row in grouped[1]])
+    checks.check("a translation the model produced is marked as its own",
+                 grouped[1][0]["source"] == "model", grouped[1][0]["source"])
+    checks.check("Swahili had no reader, so nothing was recorded for it",
+                 all(row["language"] != "Swahili"
+                     for rows in grouped.values() for row in rows), grouped)
+    handle.close()
+
+    checks.section("English is corrected for the record even with no reader")
+    path = Path(tempfile.mkdtemp()) / "noreader.db"
+    translator = FakeTranslator()
+    session, hub = make_session(["French"], True, ["French"])
+    session.config["record"] = True
+    session.config["database"] = str(path)
+    session.started_at = time.time()
+    await session._open_recorder()
+    session.translator = translator
+    await drive(session, translator)
+    await session.recorder.close()
+    checks.check("English was requested although nobody was reading it",
+                 all("English" in call["outputs"]
+                     for call in translator.calls), translator.calls)
+    handle = record.open_read_only(str(path))
+    stored = record.lines_of(handle, 1)
+    checks.check("so there is a corrected line to compare against",
+                 all(row["english"] for row in stored),
+                 [row["english"] for row in stored])
+    handle.close()
+
+    checks.section("A failed translation is recorded as what readers saw")
+    path = Path(tempfile.mkdtemp()) / "failed.db"
+    translator = FakeTranslator(mode="fail")
+    session, hub = make_session(["French"], False, ["French"])
+    session.config["record"] = True
+    session.config["database"] = str(path)
+    session.started_at = time.time()
+    await session._open_recorder()
+    session.translator = translator
+    await drive(session, translator)
+    await session.recorder.close()
+    handle = record.open_read_only(str(path))
+    grouped = record.translations_of(handle, 1)
+    rows = [row for rows in grouped.values() for row in rows]
+    checks.check("the fallback was stored, not left as a missing row",
+                 len(rows) == 3, len(rows))
+    checks.check("and it says why the reader saw English",
+                 all(row["source"] == "failure" for row in rows),
+                 [row["source"] for row in rows])
+    handle.close()
+
+    checks.section("A database that will not answer costs only the record")
+    translator = FakeTranslator()
+    session, hub = make_session(["French"], False, ["French"])
+    session.translator = translator
+
+    class BrokenRecorder:
+        session_id = 1
+        dropped = 0
+
+        def line(self, **row):
+            raise OSError("no space left on device")
+
+        def correction(self, **row):
+            raise OSError("no space left on device")
+
+        def translation(self, **row):
+            raise OSError("no space left on device")
+
+    session.recorder = BrokenRecorder()
+    raised = None
+    try:
+        await drive(session, translator)
+    except Exception as exc:
+        raised = exc
+    checks.check("the pipeline did not raise", raised is None, repr(raised))
+    french = [entry["text"] for entry in hub.buffers["French"]]
+    checks.check("every caption still reached the readers",
+                 french == [f"<French> {name}" for name in SENTENCES], french)
+
+    checks.section("Reading a recording back")
+    repair = record.changed_words("brother kalema will pray",
+                                  "Brother Kalema will pray")
+    checks.check("a recapitalized name is a term for keyterms.txt",
+                 repair == (["Kalema"], ["kalema"]), repair)
+    checks.check("but it is not reported as an invented name",
+                 record.changed_words("brother kalema will pray",
+                                      "Brother Kalema will pray",
+                                      fold=True)[0] == [], repair)
+    invented = record.changed_words("and then he read from the book",
+                                    "and then he read from Moroni",
+                                    fold=True)[0]
+    checks.check("a name with no counterpart in the audio is reported",
+                 invented == ["moroni"], invented)
+    opening = record.changed_words("we are reading today",
+                                   "We are reading today")
+    checks.check("capitalizing the first word is not a finding",
+                 opening == ([], []), opening)
+
+    report = Path(tempfile.mkdtemp()) / "review.md"
+    handle = record.open_read_only(str(path))
+    record.write_report(handle, record.resolve_session(handle, "last"),
+                        str(report))
+    handle.close()
+    written = report.read_text(encoding="utf-8")
+    for heading in ("## Names to check", "## Terms to add to keyterms.txt",
+                    "## How sentences closed", "## Latency",
+                    "## Where readers saw English instead", "## Transcript"):
+        checks.check(f"the report has its {heading.strip('# ')!r} section",
+                     heading in written, written[:120])
+    checks.check("the transcript carries a Comments block per line",
+                 written.count("> Comments:") == 3,
+                 written.count("> Comments:"))
+
+    checks.section("A database that cannot be opened does not stop a meeting")
+    session, hub = make_session(["French"], False, [])
+    session.config["record"] = True
+    # A directory that does not exist, which is what a mistyped path or an
+    # unplugged drive looks like on a Sunday morning.
+    session.config["database"] = "/nonexistent-directory/sessions.db"
+    session.started_at = time.time()
+    await session._open_recorder()
+    checks.check("recording is off", not session.recording(), session.error)
+    checks.check("and the operator is told why",
+                 bool(session.error) and "Not recording" in session.error,
+                 session.error)
+
+
 # -- the linter --------------------------------------------------------------
 
 
@@ -757,7 +934,7 @@ def check_lint(checks):
 # -- entry point -------------------------------------------------------------
 
 
-SECTIONS = ("lint", "pipeline", "session", "server")
+SECTIONS = ("lint", "pipeline", "session", "store", "server")
 
 
 def main():
@@ -774,6 +951,8 @@ def main():
         asyncio.run(check_pipeline(checks))
     if "session" in wanted:
         asyncio.run(check_session(checks))
+    if "store" in wanted:
+        asyncio.run(check_store(checks))
     if "server" in wanted:
         check_server(checks)
     return checks.report()

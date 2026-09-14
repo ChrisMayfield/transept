@@ -67,6 +67,10 @@ SETTINGS = [
     ("languages", "languages", "available", list, ["French", "Swahili"]),
     ("grace", "languages", "grace", float, 90.0),
     ("idle_stop", "session", "idle_stop_minutes", float, 10.0),
+    # Off by default. Recording a meeting is a decision a congregation makes,
+    # not something that should happen because nobody set anything.
+    ("record", "session", "record", bool, False),
+    ("database", "session", "database", str, "sessions.db"),
     ("glossary", "files", "glossary", str, "glossary.txt"),
     ("keyterms", "files", "keyterms", str, "keyterms.txt"),
     # Loopback by default: opening a service to a shared network should be
@@ -183,12 +187,17 @@ book names and formatting of the target language.\
 class Unit:
     """One sentence-ish span of English, ready to translate."""
 
-    def __init__(self, seq, text, audio_end, emitted_at, reason):
+    def __init__(self, seq, text, audio_end, emitted_at, reason,
+                 confidence=None):
         self.seq = seq
         self.text = text
         self.audio_end = audio_end
         self.emitted_at = emitted_at
         self.reason = reason
+        # Lowest recognizer confidence among the fragments that formed this
+        # sentence. The shakiest lines are where a mis-heard name lives, so
+        # this is what points at the next entry for keyterms.txt.
+        self.confidence = confidence
 
 
 class Segmenter:
@@ -211,13 +220,14 @@ class Segmenter:
         self.parts = []
         self.first_seen = None
         self.audio_end = 0.0
+        self.confidence = None
         # Counts on from where the last stream left off. A reconnect builds a
         # new segmenter, and a sequence number that restarted at 1 would make
         # the Hub and the reader page revise the opening lines of the meeting
         # instead of publishing the new ones.
         self.seq = start_seq
 
-    def add(self, text, speech_final, start, audio_end):
+    def add(self, text, speech_final, start, audio_end, confidence=None):
         """Feed one finalized fragment. Returns a list of units to emit.
 
         Two units can come out of one fragment: the gap check may close the
@@ -225,6 +235,8 @@ class Segmenter:
         """
         emits = []
         if self.parts and (start - self.audio_end) > self.gap:
+            # Before the new fragment is folded in, so the sentence that
+            # just closed keeps its own confidence rather than this one's.
             taken = self._take("gap")
             if taken:
                 emits.append(taken)
@@ -233,6 +245,9 @@ class Segmenter:
             self.first_seen = time.monotonic()
         self.parts.append(text)
         self.audio_end = audio_end
+        if confidence is not None:
+            self.confidence = (confidence if self.confidence is None
+                               else min(self.confidence, confidence))
 
         joined = " ".join(self.parts).strip()
         if speech_final or TERMINAL_PUNCTUATION.search(joined):
@@ -261,12 +276,14 @@ class Segmenter:
         self.seq later would stamp both with the second number.
         """
         text = " ".join(self.parts).strip()
+        confidence = self.confidence
         self.parts = []
         self.first_seen = None
+        self.confidence = None
         if not text:
             return None
         self.seq += 1
-        return self.seq, text, reason, self.audio_end
+        return self.seq, text, reason, self.audio_end, confidence
 
 
 
@@ -435,6 +452,8 @@ ARGUMENT_HELP = {
     "reasoning_effort": "low is usually right; translation needs no thinking",
     "correct_english": "fix recognition errors on the English channel using "
                        "the glossary",
+    "record": "keep a transcript of the session; see record.py",
+    "database": "where a recorded session is kept",
     "host": "address to bind",
     "port": "port to bind",
     "public_url": "the address readers use, for the QR code",
@@ -524,8 +543,9 @@ async def listen(socket, segmenter, translator, sink, queue):
     context = deque(maxlen=CONTEXT_UNITS)
 
     async def emit(taken):
-        seq, text, reason, audio_end = taken
-        unit = Unit(seq, text, audio_end, time.monotonic(), reason)
+        seq, text, reason, audio_end, confidence = taken
+        unit = Unit(seq, text, audio_end, time.monotonic(), reason,
+                    confidence)
         outputs = sink.unit(unit)
         task = None
         if outputs and translator is not None:
@@ -563,7 +583,9 @@ async def listen(socket, segmenter, translator, sink, queue):
             start = payload.get("start", 0.0)
             audio_end = start + payload.get("duration", 0.0)
             speech_final = payload.get("speech_final", False)
-            for taken in segmenter.add(text, speech_final, start, audio_end):
+            confidence = alternatives[0].get("confidence")
+            for taken in segmenter.add(text, speech_final, start, audio_end,
+                                       confidence):
                 await emit(taken)
     finally:
         ceiling_task.cancel()

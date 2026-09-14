@@ -70,13 +70,25 @@ If nothing appears, the problem is the audio source, not the software.
 Copy `keyterms.example.txt` and `glossary.example.txt` and edit.
 With `--correct-english` the glossary also cleans up recognition errors on the English channel, so a name the recognizer spelled wrong gets fixed for everyone.
 
+Both files are easier to fill in after a real meeting than before one.
+If you turn on `record`, this writes you the worklist:
+
+```
+python3 record.py --session last --out review/sunday.md
+```
+
+The document leads with names the correction introduced that were not in the audio, then the terms the recognizer missed and the glossary had to repair, which are exactly the ones to add to `keyterms.txt` so they come out right the first time.
+
 **Review a language before you offer it.**
 You cannot evaluate a translation you cannot read, and neither can anyone else in the room.
 Run a real transcript through `review.py` and have a native speaker mark up the result:
 
 ```
-python3 review.py --input transcript.txt --review review.md
+python3 record.py --session last --plain sunday.txt   # if you record
+python3 review.py --input sunday.txt --review review.md
 ```
+
+That pairing is also how to judge a change to the glossary or the prompt: export what the room actually said, edit, re-run, and compare against what shipped on the day.
 
 Ask reviewers for wrong meaning first and awkward phrasing second.
 Wrong meaning usually means a glossary entry is missing, and awkward phrasing usually means a different model would serve better.
@@ -170,7 +182,7 @@ Phones subscribe over server-sent events, one channel per language, with the las
 
 `server.py` is the web server and session manager, and the only thing you run on a normal Sunday.
 `pipeline.py` is the same pipeline without the web layer, which is the fastest way to check a microphone or tune segmentation.
-`review.py` translates a text file offline, `capture.py` is the audio layer, `selftest.py` checks the software without a microphone or an API key, and `static/` holds the two web pages.
+`review.py` translates a text file offline, `record.py` keeps a session and turns it into a review document, `capture.py` is the audio layer, `selftest.py` checks the software without a microphone or an API key, and `static/` holds the two web pages.
 
 Settings live in `config.toml` and secrets in `.env`.
 Keeping them apart means your settings can be committed to your own fork and copied to a second room, while your keys never leave your machine.
@@ -180,7 +192,13 @@ Keeping them apart means your settings can be committed to your own fork and cop
 Audio from your meeting is sent to Deepgram, and the resulting text is sent to your translation provider.
 Both are commercial services with their own retention policies.
 This is worth raising with whoever leads the meeting before you deploy it, particularly in a setting where people say personal things out loud.
-Nothing is stored on disk by this software, so captions live in memory and disappear when the session stops.
+
+By default nothing is stored on disk, so captions live in memory and disappear when the session stops.
+Turning on `record` in `config.toml` changes that, and it is a decision to make with whoever leads the meeting rather than on your own.
+A recorded session keeps every English sentence, every translation, and how long each one took, in `sessions.db` next to the code.
+It is not encrypted, `.gitignore` keeps it out of your fork, and nothing is ever deleted automatically.
+The operator page says "Recording this session to disk" the whole time one is being kept, because the person at the laptop is the one who has to tell the room.
+`python3 record.py --purge --older-than 30` is the only thing that deletes anything.
 
 The translation prompt forbids the model from inventing names, numbers, dates, or scripture references that are not in the source.
 This is deliberate and it matters: a reader of a translated channel cannot hear the room and has no way to catch a confident wrong name.
