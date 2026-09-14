@@ -37,19 +37,18 @@ import sys
 import time
 from collections import deque
 from pathlib import Path
-from urllib.parse import urlencode
 
 try:
-    import httpx
     import websockets
     from aiohttp import web
 except ImportError:
     sys.exit("Missing dependencies: pip install websockets httpx aiohttp")
 
 import capture
-from pipeline import (CONTEXT_UNITS, Segmenter, Translator, Unit,
-                      add_settings_arguments, load_config, load_env,
-                      load_file_lines, load_glossary, resolve)
+from pipeline import (Segmenter, Translator, add_settings_arguments,
+                      build_asr_url, listen, load_config, load_env,
+                      load_file_lines, load_glossary, publish, pump_audio,
+                      resolve)
 
 STATIC = Path(__file__).parent / "static"
 HISTORY = 60
@@ -309,17 +308,18 @@ class Session:
         queue = asyncio.Queue()
         try:
             async with websockets.connect(
-                self._asr_url(),
+                build_asr_url(config, config["keyterms"]),
                 additional_headers={
                     "Authorization": f"Token {config['deepgram_key']}"},
             ) as socket:
                 self.state = "running"
                 self.error = None
                 tasks = [
-                    asyncio.create_task(self._pump(source, socket)),
+                    asyncio.create_task(pump_audio(source, socket)),
                     asyncio.create_task(
-                        self._listen(socket, segmenter, queue)),
-                    asyncio.create_task(self._publish(queue)),
+                        listen(socket, segmenter, self.translator, self,
+                               queue)),
+                    asyncio.create_task(publish(queue, self, config["hold"])),
                 ]
                 try:
                     # Whichever leg finishes first ends the session. gather
@@ -339,134 +339,56 @@ class Session:
         finally:
             await source.close()
 
-    def _asr_url(self):
-        config = self.config
-        params = [
-            ("model", config["asr_model"]), ("language", "en"),
-            ("encoding", "linear16"), ("sample_rate", str(SAMPLE_RATE)),
-            ("channels", str(CHANNELS)), ("interim_results", "false"),
-            ("smart_format", "true"), ("punctuate", "true"),
-            ("endpointing", str(config["endpointing"])),
-        ]
-        params.extend(("keyterm", term) for term in config["keyterms"])
-        return "wss://api.deepgram.com/v1/listen?" + urlencode(params)
+    # -- sink: what the shared pipeline does with finished text ------------
 
-    async def _pump(self, source, socket):
-        """Feed captured audio to the recognizer until one end stops.
+    def fragment(self, text):
+        """Raw fragments are half sentences. Only whole ones reach a phone."""
 
-        Closing the stream on the way out matters: without it, a capture
-        device that dies mid-meeting leaves the websocket open, the reader
-        task waits forever on a socket that will never produce another
-        result, and the session sits in "running" with no audio and no
-        reconnect.
+    def unit(self, unit):
+        """Publish the English line and say which outputs are worth buying."""
+        self.stats["units"] += 1
+        self.last_activity = time.monotonic()
+        # The raw transcript goes out immediately either way.
+        self.hub.publish("English", unit.seq, unit.text)
+
+        languages = self.active_languages()
+        wants_english = (self.config["correct_english"]
+                         and self.hub.wanted("English",
+                                             self.config["grace"]))
+        outputs = (["English"] if wants_english else []) + languages
+        if not outputs:
+            # Nobody is reading a translated channel and English needs no
+            # correction, so this sentence costs no model tokens at all.
+            self.stats["skipped"] += 1
+        return outputs
+
+    def translated(self, unit, languages, translations, elapsed):
+        self.stats["translated"] += 1
+        self.stats["latencies"].append(round(elapsed, 2))
+        revised = translations.get("English")
+        if revised and revised != unit.text:
+            self.stats["corrections"] += 1
+            self.hub.publish("English", unit.seq, revised)
+        for language in languages:
+            self.hub.publish(language, unit.seq,
+                             translations.get(language, unit.text))
+
+    def timed_out(self, unit, languages):
+        self.stats["timeouts"] += 1
+        self._fall_back_to_english(unit, languages)
+
+    def failed(self, unit, languages, error):
+        self.stats["failures"] += 1
+        self._fall_back_to_english(unit, languages)
+
+    def _fall_back_to_english(self, unit, languages):
+        """Show the English text rather than let a channel stall.
+
+        A reader of a translated channel cannot hear the room, so a line they
+        cannot read beats a gap they cannot explain.
         """
-        try:
-            while True:
-                chunk = await source.read()
-                if not chunk:
-                    return
-                await socket.send(chunk)
-        finally:
-            try:
-                await socket.send(json.dumps({"type": "CloseStream"}))
-            except (websockets.ConnectionClosed, RuntimeError):
-                pass
-
-    async def _listen(self, socket, segmenter, queue):
-        context = deque(maxlen=CONTEXT_UNITS)
-
-        async def emit(taken):
-            text, reason, audio_end = taken
-            unit = Unit(segmenter.seq, text, audio_end, time.monotonic(),
-                        reason)
-            self.stats["units"] += 1
-            self.last_activity = time.monotonic()
-            # The raw transcript goes out immediately either way.
-            self.hub.publish("English", unit.seq, text)
-
-            languages = self.active_languages()
-            wants_english = (self.config["correct_english"]
-                             and self.hub.wanted("English",
-                                                 self.config["grace"]))
-            outputs = (["English"] if wants_english else []) + languages
-
-            task = None
-            if outputs:
-                task = asyncio.create_task(
-                    self.translator.translate(text, list(context), outputs))
-            else:
-                # Nobody is reading a translated channel and English needs no
-                # correction, so this sentence costs no model tokens at all.
-                self.stats["skipped"] += 1
-            context.append(text)
-            await queue.put((unit, task, languages))
-
-        async def watch_ceiling():
-            while True:
-                await asyncio.sleep(0.25)
-                taken = segmenter.check_ceiling()
-                if taken:
-                    await emit(taken)
-
-        ceiling = asyncio.create_task(watch_ceiling())
-        try:
-            async for message in socket:
-                if isinstance(message, bytes):
-                    continue
-                payload = json.loads(message)
-                if (payload.get("type") != "Results"
-                        or not payload.get("is_final")):
-                    continue
-                alternatives = payload.get("channel", {}).get("alternatives",
-                                                              [])
-                if not alternatives:
-                    continue
-                text = alternatives[0].get("transcript", "").strip()
-                if not text:
-                    continue
-                start = payload.get("start", 0.0)
-                audio_end = start + payload.get("duration", 0.0)
-                for taken in segmenter.add(
-                        text, payload.get("speech_final", False), start,
-                        audio_end):
-                    await emit(taken)
-        finally:
-            ceiling.cancel()
-            taken = segmenter.drain()
-            if taken:
-                await emit(taken)
-            await queue.put(None)
-
-    async def _publish(self, queue):
-        hold = self.config["hold"]
-        while True:
-            item = await queue.get()
-            if item is None:
-                return
-            unit, task, languages = item
-            if task is None:
-                continue
-            try:
-                translations, elapsed = await asyncio.wait_for(
-                    asyncio.shield(task), timeout=hold)
-                self.stats["translated"] += 1
-                self.stats["latencies"].append(round(elapsed, 2))
-                revised = translations.get("English")
-                if revised and revised != unit.text:
-                    self.stats["corrections"] += 1
-                    self.hub.publish("English", unit.seq, revised)
-                for language in languages:
-                    self.hub.publish(language, unit.seq,
-                                     translations.get(language, unit.text))
-            except asyncio.TimeoutError:
-                task.cancel()
-                self.stats["timeouts"] += 1
-                for language in languages:
-                    self.hub.publish(language, unit.seq, unit.text)
-            except (RuntimeError, asyncio.CancelledError, httpx.HTTPError):
-                self.stats["failures"] += 1
-                for language in languages:
-                    self.hub.publish(language, unit.seq, unit.text)
+        for language in languages:
+            self.hub.publish(language, unit.seq, unit.text)
 
 
 # -- web layer -------------------------------------------------------------

@@ -24,32 +24,49 @@ Usage:
     python3 review.py --input transcript.txt --languages "French,Swahili" \\
         --review review.md
 
-Input may be raw pipeline.py output; the timestamp prefix is stripped
-automatically unless --keep-prefix is given.
+Input may be a plain transcript or raw pipeline.py output. In the second
+case the sentence prefix comes off and the fragment and translation lines
+are dropped, unless --keep-prefix is given.
 """
 
 import argparse
 import asyncio
 import re
-import statistics
 import sys
 import os
 
-from pipeline import (Translator, add_settings_arguments, load_config,
-                      load_env, load_glossary, resolve)
+from pipeline import (CONTEXT_UNITS, Translator, add_settings_arguments,
+                      latency_summary, load_config, load_env, load_glossary,
+                      resolve)
 
-# Matches the "[  27.9s  lag  0.3s +]" prefix that pipeline.py prints.
-PREFIX_RE = re.compile(r"^\[\s*[\d.]+s\s+lag\s+[\d.-]+s\s+\S\]\s*")
+ANSI_RE = re.compile(r"\033\[[0-9;]*m")
+# pipeline.py prints a finished sentence as "[12] en (0.4s, endpoint): text".
+SENTENCE_RE = re.compile(r"^\[\d+\]\s+en\s+\([^)]*\):\s*")
+# Everything else it prints is decoration: a middle dot line is a raw
+# recognition fragment, and translations are indented under their sentence.
+DECORATION_RE = re.compile(r"^(\s+\.\s|\s{5,}\S)")
 
 
 def read_lines(path, keep_prefix, limit):
+    """English sentences, one per line.
+
+    Accepts either a plain transcript or raw pipeline.py output. In the
+    second case the sentence prefix comes off and the fragment and
+    translation lines are dropped, so what reaches the model is the same
+    text a reader would have seen.
+    """
     handle = open(path, encoding="utf-8") if path else sys.stdin
     try:
         lines = []
         for raw in handle:
-            text = raw.strip()
+            text = ANSI_RE.sub("", raw).rstrip()
             if not keep_prefix:
-                text = PREFIX_RE.sub("", text)
+                found = SENTENCE_RE.match(text)
+                if found:
+                    text = text[found.end():]
+                elif DECORATION_RE.match(text):
+                    continue
+            text = text.strip()
             if text:
                 lines.append(text)
     finally:
@@ -107,7 +124,7 @@ async def run(args, settings):
             except RuntimeError as exc:
                 failures += 1
                 print(f"[{index}] failed: {exc}", file=sys.stderr)
-                context = (context + [line])[-3:]
+                context = (context + [line])[-CONTEXT_UNITS:]
                 continue
             latencies.append(elapsed)
 
@@ -118,16 +135,13 @@ async def run(args, settings):
             print()
 
             rows.append({"source": line, "translations": translations})
-            context = (context + [line])[-3:]
+            context = (context + [line])[-CONTEXT_UNITS:]
     finally:
         await translator.close()
 
     if latencies:
-        ordered = sorted(latencies)
-        p95 = ordered[min(len(ordered) - 1, int(len(ordered) * 0.95))]
         print(f"{len(latencies)} translated, {failures} failed. "
-              f"median {statistics.median(latencies):.2f}s, p95 {p95:.2f}s",
-              file=sys.stderr)
+              f"{latency_summary(latencies)}", file=sys.stderr)
 
     if args.review and rows:
         write_review(args.review, settings["model"], translator.outputs, rows)
@@ -145,7 +159,7 @@ def main():
                         help="retries per line; higher than the live pipeline "
                              "because nothing is waiting on the answer")
     parser.add_argument("--keep-prefix", action="store_true",
-                        help="do not strip pipeline.py timestamps")
+                        help="take every input line verbatim")
     parser.add_argument("--config", default="config.toml")
     add_settings_arguments(parser, [
         "model", "languages", "glossary", "max_tokens", "timeout",

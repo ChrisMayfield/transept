@@ -153,7 +153,7 @@ With `--correct-english`, the glossary also cleans up recognition errors on the 
 ## Reviewing a language before you offer it
 
 You cannot evaluate a translation you cannot read, and neither can anyone else in the room.
-Before offering a language, run a real transcript through `translate_test.py` and have a native speaker mark it up:
+Before offering a language, run a real transcript through `review.py` and have a native speaker mark it up:
 
 ```
 python3 review.py --input transcript.txt --review review.md

@@ -473,16 +473,39 @@ def add_settings_arguments(parser, names):
                                 help=help_text)
 
 
-async def pump_audio(source, socket, stop):
-    """Captured audio to the recognizer."""
+# -- the pipeline ------------------------------------------------------------
+#
+# server.py and pipeline.py both run these three tasks over one websocket: a
+# pump feeding audio in, a listener segmenting results, and a publisher
+# emitting in source order. They differ only in where finished text goes, so
+# that difference lives behind a sink and the loops themselves are shared.
+# The loops were duplicated once and the copies drifted, until one of them
+# was building a Deepgram URL from names it had never imported.
+#
+# A sink provides:
+#     fragment(text)          a raw recognition result arrived
+#     unit(unit) -> outputs   a sentence closed; returns the output names
+#                             worth requesting, where an empty list means do
+#                             not call the model for this sentence at all
+#     translated(unit, languages, translations, elapsed)
+#     timed_out(unit, languages)
+#     failed(unit, languages, error)
+
+
+async def pump_audio(source, socket, stop=None):
+    """Captured audio to the recognizer, until either end stops.
+
+    Closing the stream on the way out matters: without it, a capture device
+    that dies mid-meeting leaves the websocket open, the reader task waits
+    forever on a socket that will never produce another result, and the
+    session sits in "running" with no audio and no reconnect.
+    """
     try:
-        while not stop.is_set():
+        while stop is None or not stop.is_set():
             chunk = await source.read()
             if not chunk:
-                break
+                return
             await socket.send(chunk)
-    except (asyncio.CancelledError, websockets.ConnectionClosed):
-        pass
     finally:
         try:
             await socket.send(json.dumps({"type": "CloseStream"}))
@@ -490,20 +513,23 @@ async def pump_audio(source, socket, stop):
             pass
 
 
-async def listen(socket, segmenter, queue, translator, started, color):
+async def listen(socket, segmenter, translator, sink, queue):
     """Read ASR results, segment them, and launch translations."""
     context = deque(maxlen=CONTEXT_UNITS)
-    dim, reset = (DIM, RESET) if color else ("", "")
 
     async def emit(taken):
         text, reason, audio_end = taken
         unit = Unit(segmenter.seq, text, audio_end, time.monotonic(), reason)
-        lag = (time.monotonic() - started) - audio_end
-        print(f"\n[{unit.seq}] en ({lag:.1f}s, {reason}): {text}")
-        task = (asyncio.create_task(translator.translate(text, list(context)))
-                if translator else None)
+        outputs = sink.unit(unit)
+        task = None
+        if outputs and translator is not None:
+            task = asyncio.create_task(
+                translator.translate(text, list(context), outputs))
+        # English among the outputs is a correction of the transcript, not a
+        # channel to fill; the publisher wants the translated names only.
+        languages = [name for name in outputs if name != "English"]
         context.append(text)
-        await queue.put((unit, task))
+        await queue.put((unit, task, languages))
 
     async def watch_ceiling():
         while True:
@@ -527,7 +553,7 @@ async def listen(socket, segmenter, queue, translator, started, color):
             if not text:
                 continue
 
-            print(f"{dim}  . {text}{reset}")
+            sink.fragment(text)
             start = payload.get("start", 0.0)
             audio_end = start + payload.get("duration", 0.0)
             for taken in segmenter.add(
@@ -541,8 +567,8 @@ async def listen(socket, segmenter, queue, translator, started, color):
         await queue.put(None)
 
 
-async def publish(queue, languages, stats, hold_seconds):
-    """Print translations in source order as each call completes.
+async def publish(queue, sink, hold_seconds):
+    """Hand translations to the sink in source order as calls complete.
 
     Calls run concurrently, but output is ordered, so a slow call delays the
     ones behind it rather than scrambling the transcript. The hold timeout
@@ -553,29 +579,79 @@ async def publish(queue, languages, stats, hold_seconds):
         item = await queue.get()
         if item is None:
             return
-        unit, task = item
+        unit, task, languages = item
         if task is None:
             continue
         try:
             translations, elapsed = await asyncio.wait_for(
                 asyncio.shield(task), timeout=hold_seconds)
-            stats["translate"].append(elapsed)
-            revised = translations.get("English")
-            if revised and revised != unit.text:
-                print(f"     en*: {revised}")
-            for lang in languages:
-                print(f"     {lang[:2].lower()}: "
-                      f"{translations.get(lang, '')}  (+{elapsed:.1f}s)")
         except asyncio.TimeoutError:
             task.cancel()
-            stats["timeouts"] += 1
-            for lang in languages:
-                print(f"     {lang[:2].lower()}: [slow] {unit.text}")
-        except (RuntimeError, asyncio.CancelledError) as exc:
-            stats["failures"] += 1
-            print(f"     !! translation failed: {exc}")
-            for lang in languages:
-                print(f"     {lang[:2].lower()}: [en] {unit.text}")
+            sink.timed_out(unit, languages)
+        except (RuntimeError, asyncio.CancelledError, httpx.HTTPError) as exc:
+            sink.failed(unit, languages, exc)
+        else:
+            sink.translated(unit, languages, translations, elapsed)
+
+
+def latency_summary(values):
+    """Median and p95 over a list of seconds, for an end of run report."""
+    ordered = sorted(values)
+    p95 = ordered[min(len(ordered) - 1, int(len(ordered) * 0.95))]
+    return f"median {statistics.median(ordered):.2f}s, p95 {p95:.2f}s"
+
+
+class TerminalSink:
+    """Prints the transcript as it forms, which is what pipeline.py is for.
+
+    A dim line starting with a middle dot is a raw recognition fragment,
+    printed as it arrives so the buffering is visible. A numbered block is a
+    completed sentence with its translations, tagged with the reason the
+    sentence closed. A line marked en* is the transcript after glossary
+    correction.
+    """
+
+    def __init__(self, outputs, started, color):
+        self.outputs = list(outputs)
+        self.started = started
+        self.dim, self.reset = (DIM, RESET) if color else ("", "")
+        self.latencies = []
+        self.failures = 0
+        self.timeouts = 0
+
+    def fragment(self, text):
+        print(f"{self.dim}  . {text}{self.reset}")
+
+    def unit(self, unit):
+        lag = (time.monotonic() - self.started) - unit.audio_end
+        print(f"\n[{unit.seq}] en ({lag:.1f}s, {unit.reason}): {unit.text}")
+        return self.outputs
+
+    def translated(self, unit, languages, translations, elapsed):
+        self.latencies.append(elapsed)
+        revised = translations.get("English")
+        if revised and revised != unit.text:
+            print(f"     en*: {revised}")
+        for name in languages:
+            print(f"     {name[:2].lower()}: "
+                  f"{translations.get(name, '')}  (+{elapsed:.1f}s)")
+
+    def timed_out(self, unit, languages):
+        self.timeouts += 1
+        for name in languages:
+            print(f"     {name[:2].lower()}: [slow] {unit.text}")
+
+    def failed(self, unit, languages, error):
+        self.failures += 1
+        print(f"     !! translation failed: {error}")
+        for name in languages:
+            print(f"     {name[:2].lower()}: [en] {unit.text}")
+
+    def summary(self):
+        if not self.latencies:
+            return None
+        return (f"{len(self.latencies)} translated, {self.failures} failed, "
+                f"{self.timeouts} too slow. {latency_summary(self.latencies)}")
 
 
 async def run(args, settings):
@@ -600,11 +676,9 @@ async def run(args, settings):
             settings["timeout"], settings["reasoning_effort"],
             settings["correct_english"])
 
-    languages = settings["languages"] if translator else []
     keyterms = load_file_lines(settings["keyterms"])
     segmenter = Segmenter(settings["ceiling"], settings["gap"])
     queue = asyncio.Queue()
-    stats = {"translate": [], "failures": 0, "timeouts": 0}
 
     try:
         source = await capture.open_capture(settings["device"],
@@ -615,10 +689,13 @@ async def run(args, settings):
     stop = asyncio.Event()
     install_stop_handler(stop)
 
-    describe = ", ".join(languages) if languages else "transcription only"
+    describe = (", ".join(translator.languages) if translator
+                else "transcription only")
     print(f"Listening on {settings['device']}. {describe}. Ctrl-C to stop.",
           file=sys.stderr)
     started = time.monotonic()
+    sink = TerminalSink(translator.outputs if translator else [], started,
+                        not args.no_color)
 
     try:
         async with websockets.connect(
@@ -627,33 +704,32 @@ async def run(args, settings):
         ) as socket:
             pump = asyncio.create_task(pump_audio(source, socket, stop))
             reader = asyncio.create_task(
-                listen(socket, segmenter, queue, translator, started,
-                       not args.no_color))
+                listen(socket, segmenter, translator, sink, queue))
             writer = asyncio.create_task(
-                publish(queue, languages, stats, settings["hold"]))
+                publish(queue, sink, settings["hold"]))
             await stop.wait()
             pump.cancel()
             try:
+                # Ctrl-C should still print the sentence left in the buffer
+                # and the translations already in flight, so the reader and
+                # the writer get a bounded chance to drain.
                 await asyncio.wait_for(asyncio.gather(reader, writer),
                                        timeout=settings["hold"] + 2)
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 reader.cancel()
                 writer.cancel()
+            finally:
+                # Collect the pump, so a socket that closed under it does not
+                # surface later as an unretrieved task exception.
+                await asyncio.gather(pump, return_exceptions=True)
     finally:
         await source.close()
         if translator:
             await translator.close()
 
-    if stats["translate"]:
-        ordered = sorted(stats["translate"])
-        p95 = ordered[min(len(ordered) - 1, int(len(ordered) * 0.95))]
-        print(
-            f"\n{len(stats['translate'])} translated, "
-            f"{stats['failures']} failed, {stats['timeouts']} too slow. "
-            f"median {statistics.median(stats['translate']):.2f}s, "
-            f"p95 {p95:.2f}s",
-            file=sys.stderr,
-        )
+    summary = sink.summary()
+    if summary:
+        print("\n" + summary, file=sys.stderr)
 
 
 def main():
