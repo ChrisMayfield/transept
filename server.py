@@ -62,7 +62,7 @@ class Hub:
         self.subscribers = {name: set() for name in self.channels}
         # When a channel last had somebody on it, so a language does not shut
         # off the instant a phone drops and reconnects.
-        self.last_seen = {name: None for name in self.channels}
+        self.last_seen = dict.fromkeys(self.channels)
 
     def publish(self, channel, seq, text):
         """Add a line, or revise one already sent under the same seq.
@@ -210,7 +210,6 @@ class Session:
         return True, f"{language} set to {mode}."
 
     def language_report(self):
-        grace = self.config["grace"]
         active = set(self.active_languages())
         return [{
             "name": language,
@@ -427,8 +426,9 @@ async def api_status(request):
 
 async def api_devices(request):
     """Input devices, so the operator picks from a list rather than typing."""
+    backend = request.app["session"].config["capture"]
     try:
-        devices = capture.list_devices(request.app["session"].config["capture"])
+        devices = capture.list_devices(backend)
     except capture.CaptureError as exc:
         return web.json_response({"devices": [], "error": str(exc)})
     return web.json_response({"devices": devices})
@@ -497,13 +497,13 @@ async def stream(request):
         # client dedupes on seq, so overlap with the live feed is harmless.
         for entry in list(hub.buffers[channel]):
             await response.write(
-                f"data: {json.dumps(entry)}\n\n".encode("utf-8"))
+                f"data: {json.dumps(entry)}\n\n".encode())
         while True:
             try:
                 entry = await asyncio.wait_for(queue.get(), timeout=15)
                 await response.write(
-                    f"data: {json.dumps(entry)}\n\n".encode("utf-8"))
-            except asyncio.TimeoutError:
+                    f"data: {json.dumps(entry)}\n\n".encode())
+            except TimeoutError:
                 # Phones and proxies drop idle connections; this keeps the
                 # socket warm through long silences.
                 await response.write(b": keepalive\n\n")

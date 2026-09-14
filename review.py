@@ -27,9 +27,9 @@ are dropped, unless --keep-prefix is given.
 
 import argparse
 import asyncio
+import os
 import re
 import sys
-import os
 
 from pipeline import (CONTEXT_UNITS, Translator, add_settings_arguments,
                       latency_summary, load_config, load_env, load_glossary,
@@ -80,7 +80,8 @@ def write_review(path, model, outputs, rows):
             out.write(f"## {index}\n\n")
             out.write(f"**Heard.** {row['source']}\n\n")
             for name in outputs:
-                out.write(f"**{name}.** {row['translations'].get(name, '')}\n\n")
+                text = row["translations"].get(name, "")
+                out.write(f"**{name}.** {text}\n\n")
                 out.write("> Comments:\n\n")
 
 
@@ -142,7 +143,8 @@ def main():
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--input", help="one sentence per line; omit for stdin")
+    parser.add_argument("--input",
+                        help="one sentence per line; omit for stdin")
     parser.add_argument("--review", help="write side-by-side Markdown here")
     parser.add_argument("--limit", type=int, help="only the first N lines")
     parser.add_argument("--attempts", type=int, default=4,

@@ -13,6 +13,7 @@ that a supervisor caught and retried forever.
 
 Usage:
     python3 selftest.py             everything
+    python3 selftest.py lint        ruff, with the rules in ruff.toml
     python3 selftest.py pipeline    the shared loops, against both sinks
     python3 selftest.py session     a whole Session start and stop
     python3 selftest.py server      boot server.py and exercise the routes
@@ -191,14 +192,16 @@ class FakeTranslator:
 
 def fake_config(**overrides):
     """A Session config carrying every key the pipeline reads."""
-    config = dict(
-        languages=["French", "Swahili"], grace=90.0, correct_english=True,
-        ceiling=4.0, gap=0.6, hold=8.0, device="fake", capture="auto",
-        asr_model="nova-3", endpointing=400, keyterms=["Kalema"],
-        glossary="", model="fake-model", max_tokens=2000, timeout=15.0,
-        reasoning_effort="low", idle_stop=0, public_url="",
-        deepgram_key="fake", llm_key="fake", llm_base="http://invalid/v1",
-    )
+    config = {
+        "languages": ["French", "Swahili"], "grace": 90.0,
+        "correct_english": True, "ceiling": 4.0, "gap": 0.6, "hold": 8.0,
+        "device": "fake", "capture": "auto", "asr_model": "nova-3",
+        "endpointing": 400, "keyterms": ["Kalema"], "glossary": "",
+        "model": "fake-model", "max_tokens": 2000, "timeout": 15.0,
+        "reasoning_effort": "low", "idle_stop": 0, "public_url": "",
+        "deepgram_key": "fake", "llm_key": "fake",
+        "llm_base": "http://invalid/v1",
+    }
     config.update(overrides)
     return config
 
@@ -641,7 +644,8 @@ def check_server(checks):
 
         status, body = request(port, "/qr.svg")
         checks.check("the QR endpoint explains a missing public_url",
-                     status == 404 and "public_url" in body, f"{status} {body}")
+                     status == 404 and "public_url" in body,
+                     f"{status} {body}")
 
         status, _ = request(port, "/stream/Klingon")
         checks.check("an unknown channel is a 404", status == 404, status)
@@ -696,24 +700,51 @@ def check_server(checks):
 
     checks.check("the startup banner prints the reader address",
                  f"http://127.0.0.1:{port}/" in output, output)
-    checks.check("binding to loopback says so, because a phone cannot reach it",
+    checks.check("binding to loopback says so, since a phone cannot reach it",
                  "Bound to this machine only" in output, output)
     checks.check("the server exited when asked",
                  process.returncode is not None, process.returncode)
 
 
+# -- the linter --------------------------------------------------------------
+
+
+def check_lint(checks):
+    """Run ruff over the project, using the rules in ruff.toml.
+
+    Linting lives here because there is no CI and no build step, so a check
+    nobody is reminded to run is a check nobody runs.
+    """
+    checks.section("Ruff")
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "ruff", "check", "."],
+            cwd=HERE, capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError) as exc:
+        checks.check("ruff is installed",
+                     False, f"{exc}. pip install -r requirements.txt")
+        return
+    output = (result.stdout + result.stderr).strip()
+    checks.check("ruff reports nothing", result.returncode == 0,
+                 output or f"exit {result.returncode}")
+
+
 # -- entry point -------------------------------------------------------------
 
 
+SECTIONS = ("lint", "pipeline", "session", "server")
+
+
 def main():
-    wanted = sys.argv[1:] or ["pipeline", "session", "server"]
-    unknown = [name for name in wanted
-               if name not in ("pipeline", "session", "server")]
+    wanted = sys.argv[1:] or list(SECTIONS)
+    unknown = [name for name in wanted if name not in SECTIONS]
     if unknown:
         sys.exit(f"Unknown section {unknown[0]!r}. "
-                 f"Choose from pipeline, session, server.")
+                 f"Choose from {', '.join(SECTIONS)}.")
 
     checks = Checks()
+    if "lint" in wanted:
+        check_lint(checks)
     if "pipeline" in wanted:
         asyncio.run(check_pipeline(checks))
     if "session" in wanted:

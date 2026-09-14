@@ -31,13 +31,14 @@ When a translation fails, times out, or comes back missing a language, the Engli
 python3 server.py                     the whole thing, and the entire weekly command
 python3 server.py --list-devices      find an audio source
 python3 pipeline.py --no-translate    check the audio path, no translation key needed
-python3 selftest.py [section]         pipeline, session, server, or all three
+python3 selftest.py [section]         lint, pipeline, session, server, or all four
+ruff check .                          the linter alone, as selftest runs it
 python3 review.py --input t.txt --review review.md    offline translation review
 ```
 
 Any setting may be overridden for a one-off, for example `python3 server.py --ceiling 6`.
 The entry points expose overlapping flag sets, built from `SETTINGS` by `add_settings_arguments`.
-There is no build step and no linter configured, so `selftest.py` and `python3 -m py_compile` are the mechanical checks there are.
+There is no build step and no CI, so `selftest.py` is the whole mechanical check, and it runs `ruff check` as its first section for that reason.
 
 ## Architecture
 
@@ -133,8 +134,13 @@ Every argparse default is `None` so `resolve` can distinguish an absent flag fro
 Secrets stay in `.env` and never move into `config.toml`.
 
 Standard library first, few dependencies.
-`websockets`, `httpx`, and `aiohttp` are the whole list, and adding a fourth needs a real reason.
-`sounddevice` and `segno` are optional at runtime, and both failures are caught and reported rather than raised.
+`websockets`, `httpx`, and `aiohttp` are the whole list at runtime, and adding a fourth needs a real reason.
+`sounddevice` and `segno` are optional, and both failures are caught and reported rather than raised.
+`ruff` is in `requirements.txt` as well, because a linter in a second file nobody installs is a linter nobody runs.
+
+`ruff.toml` selects E, W, F, UP, B, and C4 at a line length of 79, which is the layout this code already followed.
+Import sorting is deliberately not enabled, since ruff can only emit one import per line and the hanging indent style here is just as sorted and much shorter.
+Fix what ruff reports rather than adding `noqa`, and if a rule is wrong for this project, remove the rule and say why in `ruff.toml`.
 
 Comments explain why, not what.
 Where a line encodes a decision that was reached the hard way, say what would go wrong without it, and keep it to a sentence or two.
@@ -149,7 +155,8 @@ One sentence per line in Markdown files, so diffs isolate the sentence that chan
 `selftest.py` is the whole suite, and it needs no keys, no audio device, and no network.
 It uses no test framework, only the standard library, and exits non-zero if anything fails.
 Run it after any change to the pipeline, the sinks, or the routes.
-`python3 selftest.py <section>` runs one of `pipeline`, `session`, or `server`.
+`python3 selftest.py <section>` runs one of `lint`, `pipeline`, `session`, or `server`.
+The `lint` section shells out to `ruff check .` and reports its output as one check, which is what keeps linting in the regular workflow when there is no CI to enforce it.
 
 Adding a check means adding one `checks.check(label, condition, detail)` line.
 `FakeSocket`, `FakeSource`, and `FakeTranslator` are already there, and `FakeTranslator` takes `mode="fail"`, `mode="empty"`, and a `delay`, so the failure, dropped language, and timeout paths cost nothing to exercise.

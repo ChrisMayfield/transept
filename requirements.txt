@@ -9,3 +9,8 @@ sounddevice>=0.4.6
 # QR code for the reader address, shown on the operator page.
 # Pure Python, no dependencies of its own. Optional.
 segno>=1.6
+
+# The linter, configured in ruff.toml. Not needed to run a meeting, but
+# selftest.py runs it, so it is here rather than in a second file nobody
+# would remember to install.
+ruff>=0.15

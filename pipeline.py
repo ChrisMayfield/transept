@@ -558,8 +558,8 @@ async def listen(socket, segmenter, translator, sink, queue):
             sink.fragment(text)
             start = payload.get("start", 0.0)
             audio_end = start + payload.get("duration", 0.0)
-            for taken in segmenter.add(
-                    text, payload.get("speech_final", False), start, audio_end):
+            speech_final = payload.get("speech_final", False)
+            for taken in segmenter.add(text, speech_final, start, audio_end):
                 await emit(taken)
     finally:
         ceiling_task.cancel()
@@ -587,7 +587,7 @@ async def publish(queue, sink, hold_seconds):
         try:
             translations, elapsed = await asyncio.wait_for(
                 asyncio.shield(task), timeout=hold_seconds)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             task.cancel()
             sink.timed_out(unit, languages)
         except asyncio.CancelledError:
@@ -719,7 +719,7 @@ async def run(args, settings):
                 # the writer get a bounded chance to drain.
                 await asyncio.wait_for(asyncio.gather(reader, writer),
                                        timeout=settings["hold"] + 2)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
+            except (TimeoutError, asyncio.CancelledError):
                 reader.cancel()
                 writer.cancel()
             finally:

@@ -1,0 +1,17 @@
+# Linting for a project with no build step and no CI.
+# Run it with `ruff check .`, or let `python3 selftest.py` run it for you.
+
+line-length = 79
+target-version = "py311"
+
+[lint]
+# E, W   pycodestyle: the layout rules this code already follows
+# F      pyflakes: unused names, undefined names, shadowed imports
+# UP     pyupgrade: syntax left over from older Python
+# B      bugbear: mutable defaults, loop variable capture, bare except
+# C4     comprehensions: the slower or wordier way to build a dict or list
+#
+# I (import sorting) is deliberately absent. Ruff can only emit one import
+# per line, and the hanging indent style used here is just as sorted and
+# a good deal shorter.
+select = ["E", "W", "F", "UP", "B", "C4"]
