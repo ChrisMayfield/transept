@@ -498,6 +498,31 @@ async def check_session(checks):
         (capture.open_capture, server.websockets.connect,
          server.Translator) = original
 
+    checks.section("A reconnect keeps counting where the last stream ended")
+    # What the supervisor does: a fresh Segmenter per _run_once, one Hub for
+    # the whole meeting. A segmenter that restarted at 1 would make the Hub
+    # revise the opening lines, and reader.html would rewrite those lines in
+    # place and return without appending, so the feed stops growing while the
+    # operator page still shows units climbing.
+    hub = server.Hub(["French"])
+    session = server.Session(fake_config(languages=["French"]), hub)
+    for texts in (["first line of the meeting.", "second line."],
+                  ["something said after the reconnect."]):
+        segmenter = pipeline.Segmenter(4.0, 0.6, start_seq=session.last_seq)
+        for text in texts:
+            for taken in segmenter.add(text, True, 0.0, 1.0):
+                seq, body, _, _ = taken
+                session.last_seq = max(session.last_seq, seq)
+                hub.publish("English", seq, body)
+    english = [(entry["seq"], entry["text"])
+               for entry in hub.buffers["English"]]
+    checks.check("the line from before the drop is still there",
+                 english[0][1] == "first line of the meeting.", english)
+    checks.check("the line after the drop was added, not substituted",
+                 len(english) == 3, english)
+    checks.check("sequence numbers run on across the reconnect",
+                 [seq for seq, _ in english] == [1, 2, 3], english)
+
     checks.section("Reconnect backoff after a run that was working")
     hub = server.Hub(["French"])
     session = server.Session(fake_config(languages=["French"]), hub)

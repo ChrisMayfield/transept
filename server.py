@@ -132,6 +132,10 @@ class Session:
         self.overrides = {}
         self.task = None
         self.translator = None
+        # Highest sequence number published so far, kept here rather than in
+        # the segmenter because a reconnect builds a new segmenter and the
+        # numbering has to run on across the whole meeting.
+        self.last_seq = 0
         self.stats = {"units": 0, "translated": 0, "failures": 0,
                       "timeouts": 0, "reconnects": 0, "corrections": 0,
                       "skipped": 0, "latencies": []}
@@ -152,6 +156,7 @@ class Session:
                       "timeouts": 0, "reconnects": 0, "corrections": 0,
                       "skipped": 0, "latencies": []}
         self.hub.clear()
+        self.last_seq = 0
         self.state = "starting"
         self.started_at = time.time()
         self.last_activity = time.monotonic()
@@ -304,7 +309,13 @@ class Session:
         config = self.config
         source = await capture.open_capture(config["device"],
                                             config["capture"])
-        segmenter = Segmenter(config["ceiling"], config["gap"])
+        # Only the counter carries over. Reusing one segmenter would carry
+        # the buffered fragments and audio_end too, and audio_end is relative
+        # to the stream, so on the next stream the gap check would compare
+        # against a larger number, never fire, and glue the sentence stranded
+        # by the drop onto whatever the next person says.
+        segmenter = Segmenter(config["ceiling"], config["gap"],
+                              start_seq=self.last_seq)
         queue = asyncio.Queue()
         try:
             async with websockets.connect(
@@ -347,6 +358,7 @@ class Session:
     def unit(self, unit):
         """Publish the English line and say which outputs are worth buying."""
         self.stats["units"] += 1
+        self.last_seq = max(self.last_seq, unit.seq)
         self.last_activity = time.monotonic()
         # The raw transcript goes out immediately either way.
         self.hub.publish("English", unit.seq, unit.text)

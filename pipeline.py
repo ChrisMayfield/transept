@@ -205,13 +205,17 @@ class Segmenter:
     in the buffer and gets glued onto the following turn.
     """
 
-    def __init__(self, ceiling_seconds, gap_seconds):
+    def __init__(self, ceiling_seconds, gap_seconds, start_seq=0):
         self.ceiling = ceiling_seconds
         self.gap = gap_seconds
         self.parts = []
         self.first_seen = None
         self.audio_end = 0.0
-        self.seq = 0
+        # Counts on from where the last stream left off. A reconnect builds a
+        # new segmenter, and a sequence number that restarted at 1 would make
+        # the Hub and the reader page revise the opening lines of the meeting
+        # instead of publishing the new ones.
+        self.seq = start_seq
 
     def add(self, text, speech_final, start, audio_end):
         """Feed one finalized fragment. Returns a list of units to emit.
