@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Captions control</title>
+<style>
+  :root {
+    --ink: #16181d;
+    --paper: #fbfaf7;
+    --quiet: #5f6570;
+    --rule: #dedbd4;
+    --live: #1f5f5b;
+    --halt: #8c2f2a;
+    --warm: #7a5a1e;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 1.5rem 1.25rem 3rem;
+    background: var(--paper);
+    color: var(--ink);
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    max-width: 40rem;
+    margin-inline: auto;
+  }
+  h1 { font-size: 1.1rem; font-weight: 600; margin: 0 0 1.25rem; }
+
+  .state {
+    display: flex; align-items: baseline; gap: .6rem;
+    padding: 1rem 0 1.1rem;
+    border-top: 2px solid var(--ink);
+    border-bottom: 1px solid var(--rule);
+  }
+  .state b { font-size: 1.9rem; font-weight: 600; letter-spacing: -.01em; }
+  .state span { color: var(--quiet); font-size: .9rem; }
+  .running b { color: var(--live); }
+  .reconnecting b { color: var(--warm); }
+  .stopped b { color: var(--quiet); }
+
+  .controls { display: flex; gap: .6rem; margin: 1.25rem 0; }
+  button {
+    flex: 1; padding: 1.1rem; font: inherit; font-weight: 600;
+    border: 1px solid var(--ink); border-radius: 3px; cursor: pointer;
+    background: var(--ink); color: var(--paper);
+  }
+  button.secondary { background: transparent; color: var(--ink); }
+  button:disabled { opacity: .35; cursor: default; }
+  button:focus-visible { outline: 3px solid var(--live); outline-offset: 2px; }
+
+  label { display: block; font-size: .85rem; color: var(--quiet);
+          margin-bottom: .35rem; }
+  select {
+    width: 100%; padding: .7rem; font: inherit; background: #fff;
+    border: 1px solid var(--rule); border-radius: 3px; color: var(--ink);
+  }
+
+  .note { font-size: .85rem; color: var(--quiet); margin: .5rem 0 0; }
+  .alert {
+    margin: 1rem 0; padding: .8rem 1rem; border-left: 3px solid var(--halt);
+    background: #fff; color: var(--halt); font-size: .9rem;
+  }
+
+  dl { display: grid; grid-template-columns: repeat(3, 1fr);
+       gap: 1rem .75rem; margin: 1.5rem 0 0;
+       padding-top: 1.25rem; border-top: 1px solid var(--rule); }
+  dt { font-size: .78rem; color: var(--quiet); }
+  dd { margin: .15rem 0 0; font-size: 1.3rem; font-variant-numeric: tabular-nums; }
+
+  .share { display: none; gap: 1.25rem; align-items: center;
+           margin-top: 1.5rem; padding-top: 1.25rem;
+           border-top: 1px solid var(--rule); }
+  .share img { width: 8rem; height: 8rem; flex: none;
+               border: 1px solid var(--rule); border-radius: 3px;
+               background: #fff; }
+  .share div { min-width: 0; }
+  .share h2 { font-size: .85rem; font-weight: 600; color: var(--quiet);
+              margin: 0 0 .35rem; }
+  .share a { display: block; font-weight: 600; color: var(--ink);
+             overflow-wrap: anywhere; margin-bottom: .35rem; }
+
+  .langs { margin-top: 1.5rem; padding-top: 1.25rem;
+           border-top: 1px solid var(--rule); }
+  .langs h2 { font-size: .85rem; font-weight: 600; color: var(--quiet);
+              margin: 0 0 .75rem; }
+  .lang { display: flex; align-items: center; gap: .75rem;
+          padding: .55rem 0; border-bottom: 1px solid var(--rule); }
+  .lang .name { flex: 1; font-weight: 600; }
+  .lang .who { color: var(--quiet); font-size: .85rem;
+               font-variant-numeric: tabular-nums; }
+  .lang .live { width: .5rem; height: .5rem; border-radius: 50%;
+                background: var(--rule); flex: none; }
+  .lang .live.on { background: var(--live); }
+  .modes { display: flex; }
+  .modes button {
+    flex: none; padding: .35rem .6rem; font-size: .82rem; font-weight: 500;
+    background: transparent; color: var(--quiet);
+    border: 1px solid var(--rule); border-radius: 0; margin-left: -1px;
+  }
+  .modes button:first-child { border-radius: 3px 0 0 3px; }
+  .modes button:last-child { border-radius: 0 3px 3px 0; }
+  .modes button[aria-pressed="true"] {
+    background: var(--ink); color: var(--paper); border-color: var(--ink);
+    position: relative; z-index: 1;
+  }
+
+  .feed { margin-top: 1.75rem; padding-top: 1.25rem;
+          border-top: 1px solid var(--rule); }
+  .feed p { margin: 0 0 .5rem; color: var(--quiet); font-size: .92rem; }
+  .feed p:last-child { color: var(--ink); }
+  .empty { font-style: italic; }
+</style>
+</head>
+<body>
+<h1>Captions control</h1>
+
+<div class="state stopped" id="state">
+  <b id="stateWord">Stopped</b>
+  <span id="stateDetail"></span>
+</div>
+
+<div id="alert"></div>
+<p class="note" id="quiet"></p>
+
+<div style="margin-top:1.25rem">
+  <label for="device">Microphone feed</label>
+  <select id="device"></select>
+  <p class="note" id="deviceNote"></p>
+</div>
+
+<div class="controls">
+  <button id="start">Start captions</button>
+  <button id="stop" class="secondary">Stop</button>
+</div>
+
+<dl>
+  <dt>Sentences</dt><dd id="units">0</dd>
+  <dt>Listening</dt><dd id="listeners">0</dd>
+  <dt>Translation</dt><dd id="median">&ndash;</dd>
+  <dt>Fell back</dt><dd id="failures">0</dd>
+  <dt>Too slow</dt><dd id="timeouts">0</dd>
+  <dt>Reconnects</dt><dd id="reconnects">0</dd>
+  <dt>Untranslated</dt><dd id="skipped">0</dd>
+  <dt>Corrected</dt><dd id="corrections">0</dd>
+</dl>
+
+<div class="share" id="share">
+  <img id="qr" alt="QR code for the reader address">
+  <div>
+    <h2>Where people read</h2>
+    <a id="publicUrl" href="#"></a>
+    <p class="note">Point a camera at the code, or share the link. Print it
+      once and it keeps working.</p>
+  </div>
+</div>
+
+<div class="langs">
+  <h2>Languages</h2>
+  <div id="langs"></div>
+  <p class="note">On demand means a language runs only while somebody has it
+    open, so no one pays for a language nobody is reading.</p>
+</div>
+
+<div class="feed">
+  <p class="empty" id="feedEmpty">What the microphone hears will appear here.</p>
+  <div id="feed"></div>
+</div>
+
+<script>
+const token = new URLSearchParams(location.search).get("token") || "";
+const el = (id) => document.getElementById(id);
+
+async function api(path, method = "GET", body = null) {
+  const options = { method, headers: {} };
+  if (token) options.headers["X-Caption-Token"] = token;
+  if (body) {
+    options.headers["Content-Type"] = "application/json";
+    options.body = JSON.stringify(body);
+  }
+  const response = await fetch(path, options);
+  return response.json();
+}
+
+function showAlert(message) {
+  el("alert").innerHTML = message
+    ? `<div class="alert">${message}</div>` : "";
+}
+
+async function loadDevices() {
+  const { devices, error } = await api("/api/devices");
+  if (error) { showAlert("Could not list audio sources. " + error); return; }
+  const select = el("device");
+  select.innerHTML = "";
+  for (const device of devices) {
+    const option = document.createElement("option");
+    option.value = device.name;
+    const marks = [];
+    if (device.default) marks.push("default");
+    if (device.monitor) marks.push("playback");
+    if (device.detail) marks.push(device.detail);
+    option.textContent = device.name + (marks.length ? "  (" + marks.join(", ") + ")" : "");
+    if (device.default) option.selected = true;
+    select.appendChild(option);
+  }
+  el("deviceNote").textContent =
+    "Sources marked playback capture what this computer plays, "
+    + "not what the microphone hears.";
+}
+
+function seconds(value) {
+  if (!value) return "0m";
+  const total = Math.round(value);
+  return total < 60 ? total + "s"
+    : Math.floor(total / 60) + "m " + (total % 60) + "s";
+}
+
+function render(status) {
+  const words = { stopped: "Stopped", starting: "Starting",
+                  running: "Running", reconnecting: "Reconnecting" };
+  const state = el("state");
+  state.className = "state " + status.state;
+  el("stateWord").textContent = words[status.state] || status.state;
+  el("stateDetail").textContent = status.state === "running"
+    ? "on air for " + seconds(status.uptime)
+    : (status.state === "stopped" ? "nothing is being captured" : "");
+
+  showAlert(status.state !== "running" && status.error ? status.error : "");
+
+  // Warn before the idle watchdog acts, so a quiet stretch during a meeting
+  // is not mistaken for a crash when the session stops on its own.
+  const limit = (status.idle_stop || 0) * 60;
+  const quiet = status.quiet_for || 0;
+  el("quiet").textContent =
+    (status.state === "running" && limit > 0 && quiet > limit / 2)
+      ? "Nothing heard for " + seconds(quiet)
+        + ". Stopping on its own in " + seconds(limit - quiet) + "."
+      : "";
+
+  el("units").textContent = status.units;
+  el("failures").textContent = status.failures;
+  el("timeouts").textContent = status.timeouts;
+  el("reconnects").textContent = status.reconnects;
+  el("skipped").textContent = status.skipped || 0;
+  el("corrections").textContent = status.corrections || 0;
+  el("median").textContent = status.median ? status.median + "s" : "\u2013";
+  el("listeners").textContent = Object.values(status.listeners || {})
+    .reduce((total, count) => total + count, 0);
+
+  el("start").disabled = ["running", "starting"].includes(status.state);
+  el("stop").disabled = status.state === "stopped";
+
+  // The QR is fetched once. Its contents do not change between polls.
+  if (status.public_url && !el("qr").src) {
+    el("qr").src = "/qr.svg";
+    el("publicUrl").textContent = status.public_url;
+    el("publicUrl").href = status.public_url;
+    el("share").style.display = "flex";
+  }
+
+  renderLanguages(status.languages || []);
+
+  const lines = status.recent || [];
+  el("feedEmpty").style.display = lines.length ? "none" : "block";
+  el("feed").innerHTML = lines
+    .map((line) => `<p>${line.text.replace(/</g, "&lt;")}</p>`).join("");
+}
+
+const MODES = [["auto", "On demand"], ["on", "Always"], ["off", "Off"]];
+
+function renderLanguages(languages) {
+  const host = el("langs");
+  host.innerHTML = "";
+  for (const language of languages) {
+    const row = document.createElement("div");
+    row.className = "lang";
+
+    const live = document.createElement("span");
+    live.className = "live" + (language.active ? " on" : "");
+    live.title = language.active ? "Translating" : "Idle";
+
+    const name = document.createElement("span");
+    name.className = "name";
+    name.textContent = language.name;
+
+    const who = document.createElement("span");
+    who.className = "who";
+    who.textContent = language.listeners === 1
+      ? "1 reading" : language.listeners + " reading";
+
+    const modes = document.createElement("div");
+    modes.className = "modes";
+    for (const [value, label] of MODES) {
+      const button = document.createElement("button");
+      button.textContent = label;
+      button.setAttribute("aria-pressed", language.override === value);
+      button.onclick = async () => {
+        await api("/api/language", "POST",
+                  { language: language.name, mode: value });
+        poll();
+      };
+      modes.appendChild(button);
+    }
+
+    row.append(live, name, who, modes);
+    host.appendChild(row);
+  }
+}
+
+el("start").onclick = async () => {
+  el("start").disabled = true;
+  const result = await api("/api/start", "POST",
+                           { device: el("device").value });
+  if (!result.ok) showAlert(result.message);
+};
+
+el("stop").onclick = async () => {
+  el("stop").disabled = true;
+  await api("/api/stop", "POST");
+};
+
+async function poll() {
+  try { render(await api("/api/status")); }
+  catch (error) { showAlert("Lost contact with the server."); }
+}
+
+loadDevices();
+poll();
+setInterval(poll, 2000);
+</script>
+</body>
+</html>

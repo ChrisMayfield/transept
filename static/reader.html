@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Captions</title>
+<style>
+  :root {
+    --ink: #16181d;
+    --paper: #fbfaf7;
+    --quiet: #737a86;
+    --rule: #e3e0d9;
+    --live: #1f5f5b;
+    --size: 1.4rem;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink: #edeae4; --paper: #14161a; --quiet: #8b929d;
+            --rule: #2a2e35; --live: #5fb3aa; }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--paper); color: var(--ink);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    display: flex; flex-direction: column;
+  }
+
+  header {
+    position: sticky; top: 0; z-index: 2;
+    display: flex; align-items: center; gap: .75rem;
+    padding: calc(.6rem + env(safe-area-inset-top)) 1rem .6rem;
+    background: var(--paper); border-bottom: 1px solid var(--rule);
+  }
+  select {
+    font: inherit; font-size: .95rem; font-weight: 600; color: var(--ink);
+    background: transparent; border: 0; padding: .2rem 0; flex: 1;
+  }
+  .dot {
+    width: .5rem; height: .5rem; border-radius: 50%;
+    background: var(--quiet); flex: none;
+  }
+  .dot.on { background: var(--live); }
+  .sizes { display: flex; gap: .25rem; }
+  .sizes button {
+    font: inherit; font-size: .95rem; width: 2rem; height: 2rem;
+    border: 1px solid var(--rule); border-radius: 3px;
+    background: transparent; color: var(--ink); cursor: pointer;
+  }
+  button:focus-visible, select:focus-visible {
+    outline: 3px solid var(--live); outline-offset: 2px;
+  }
+
+  main {
+    flex: 1; overflow-y: auto;
+    padding: 1.25rem 1rem calc(4rem + env(safe-area-inset-bottom));
+    -webkit-overflow-scrolling: touch;
+  }
+  /* Older lines recede so the eye finds the current one without hunting. */
+  p {
+    margin: 0 0 1.1rem; max-width: 34rem;
+    font-size: var(--size); line-height: 1.45;
+    color: var(--quiet); transition: color .4s ease;
+  }
+  p:last-child { color: var(--ink); }
+  p.revised { animation: settle .5s ease; }
+  @keyframes settle { from { opacity: .45; } to { opacity: 1; } }
+  @media (prefers-reduced-motion: reduce) {
+    p { transition: none; }
+    p.revised { animation: none; }
+  }
+
+  .waiting {
+    color: var(--quiet); font-size: 1rem; font-style: italic; max-width: 28rem;
+  }
+  .resume {
+    position: fixed; left: 50%; transform: translateX(-50%);
+    bottom: calc(1.25rem + env(safe-area-inset-bottom));
+    padding: .6rem 1.1rem; border: 0; border-radius: 999px;
+    background: var(--ink); color: var(--paper); font: inherit;
+    font-size: .9rem; font-weight: 600; cursor: pointer; display: none;
+  }
+</style>
+</head>
+<body>
+<header>
+  <span class="dot" id="dot" title="Connection"></span>
+  <select id="channel" aria-label="Language"></select>
+  <div class="sizes">
+    <button id="smaller" aria-label="Smaller text">&minus;</button>
+    <button id="bigger" aria-label="Larger text">+</button>
+  </div>
+</header>
+
+<main id="feed">
+  <p class="waiting" id="waiting">Captions will appear here as people speak.</p>
+</main>
+
+<button class="resume" id="resume">Jump to newest</button>
+
+<script>
+const feed = document.getElementById("feed");
+const dot = document.getElementById("dot");
+const picker = document.getElementById("channel");
+const resume = document.getElementById("resume");
+
+let source = null;
+let seen = new Map();
+let pinned = true;
+let size = parseFloat(localStorage.getItem("captionSize") || "1.4");
+
+function applySize() {
+  document.documentElement.style.setProperty("--size", size + "rem");
+  localStorage.setItem("captionSize", String(size));
+}
+document.getElementById("bigger").onclick = () => {
+  size = Math.min(size + 0.15, 3); applySize();
+};
+document.getElementById("smaller").onclick = () => {
+  size = Math.max(size - 0.15, 0.9); applySize();
+};
+applySize();
+
+feed.addEventListener("scroll", () => {
+  const atBottom =
+    feed.scrollHeight - feed.scrollTop - feed.clientHeight < 60;
+  pinned = atBottom;
+  resume.style.display = atBottom ? "none" : "block";
+});
+resume.onclick = () => {
+  pinned = true;
+  resume.style.display = "none";
+  feed.scrollTop = feed.scrollHeight;
+};
+
+function addLine(entry) {
+  const waiting = document.getElementById("waiting");
+  if (waiting) waiting.remove();
+
+  // A line can arrive twice: once as transcribed, once corrected against
+  // the glossary. Same seq means replace the words, not add a line.
+  let line = seen.get(entry.seq);
+  if (line) {
+    if (line.textContent !== entry.text) {
+      line.textContent = entry.text;
+      line.classList.add("revised");
+    }
+    return;
+  }
+
+  line = document.createElement("p");
+  line.textContent = entry.text;
+  feed.appendChild(line);
+  seen.set(entry.seq, line);
+  while (feed.children.length > 120) {
+    const oldest = feed.firstChild;
+    for (const [key, node] of seen) {
+      if (node === oldest) { seen.delete(key); break; }
+    }
+    feed.removeChild(oldest);
+  }
+  if (pinned) feed.scrollTop = feed.scrollHeight;
+}
+
+function connect(channel) {
+  if (source) source.close();
+  seen = new Map();
+  feed.innerHTML =
+    '<p class="waiting" id="waiting">Captions will appear here as people speak.</p>';
+  localStorage.setItem("captionChannel", channel);
+  source = new EventSource("/stream/" + encodeURIComponent(channel));
+  source.onopen = () => dot.classList.add("on");
+  source.onerror = () => dot.classList.remove("on");
+  source.onmessage = (event) => {
+    dot.classList.add("on");
+    addLine(JSON.parse(event.data));
+  };
+}
+
+picker.onchange = () => connect(picker.value);
+
+// Keep the screen awake; reacquire after the phone is unlocked.
+async function keepAwake() {
+  if (!("wakeLock" in navigator)) return;
+  try { await navigator.wakeLock.request("screen"); } catch (error) { }
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") keepAwake();
+});
+keepAwake();
+
+fetch("/api/channels").then((r) => r.json()).then(({ channels }) => {
+  for (const name of channels) {
+    const option = document.createElement("option");
+    option.value = name;
+    option.textContent = name;
+    picker.appendChild(option);
+  }
+  const saved = localStorage.getItem("captionChannel");
+  picker.value = channels.includes(saved) ? saved : channels[0];
+  connect(picker.value);
+});
+</script>
+</body>
+</html>

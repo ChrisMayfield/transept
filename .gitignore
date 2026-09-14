@@ -1,0 +1,28 @@
+# Secrets
+.env
+
+# May include names of members. Keep these out of a public repository.
+glossary.txt
+keyterms.txt
+
+# config.toml is deliberately NOT ignored. Settings are worth committing to
+# your own fork so a second room can start from a known-good file.
+
+# Recordings, transcripts, and review documents
+*.wav
+*.flac
+transcript*.txt
+review*.md
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+*.swp

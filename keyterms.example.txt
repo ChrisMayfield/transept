@@ -1,0 +1,15 @@
+# Terms the speech recognizer should listen for, one per line.
+# These bias recognition toward words it would otherwise mishear:
+# names of people who speak often, place names, and vocabulary
+# specific to your congregation.
+#
+# Copy to keyterms.txt and edit. Keep the list to a few dozen entries;
+# a very long list dilutes the effect.
+
+Nephi
+Moroni
+Alma
+Gethsemane
+sacrament meeting
+ward council
+Relief Society

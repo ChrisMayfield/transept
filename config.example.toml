@@ -1,0 +1,78 @@
+# Copy to config.toml and edit. Secrets stay in .env; everything else
+# lives here so a weekly run is just `python3 server.py`.
+#
+# Anything here can be overridden on the command line for a one-off.
+
+[audio]
+# auto picks parec on Linux when available and sounddevice everywhere else.
+# Force one with "sounddevice" or "parec" if the other misbehaves.
+backend = "auto"
+# Run `python3 server.py --list-devices` to find this.
+# Anything marked playback captures what the computer plays, not the mic.
+# With sounddevice a partial name works, as does a numeric index.
+device = "alsa_input.usb-Focusrite_Scarlett_Solo-00.analog-stereo"
+# Milliseconds of silence that ends an utterance. Lower is snappier but
+# clips people who pause mid-sentence.
+endpointing = 400
+
+[languages]
+# What readers may choose from. A language costs nothing until somebody
+# opens it. Keep the list stable so bookmarks and printed cards keep working.
+available = ["French", "Swahili", "Spanish"]
+# Seconds a language keeps running after its last reader leaves, so a phone
+# locking its screen does not restart it.
+grace = 90
+
+[translation]
+model = "gemini-3.8-flash"
+# Translation does not benefit from deliberation. On models that think by
+# default this roughly halves latency.
+reasoning_effort = "low"
+# Use the glossary to fix recognition errors on the English channel too.
+correct_english = true
+# Raise if responses truncate; thinking tokens count against this.
+max_tokens = 2000
+# Seconds before a request is abandoned.
+timeout = 15
+# Seconds to wait for a translation before showing English instead.
+hold = 8
+
+[segmentation]
+# Seconds a half-finished sentence waits before being translated anyway.
+# Watch how often sentences close with reason "ceiling": a lot of them means
+# people are talking over each other.
+ceiling = 4.0
+# Silence that separates one person's abandoned sentence from the next
+# person's new one.
+gap = 0.6
+
+[session]
+# Stop by itself after this many minutes with nothing said, because
+# recognition is billed by audio duration and silence is audio. A session
+# left running after a meeting would stream an empty room for days.
+# Set to 0 to disable.
+idle_stop_minutes = 10
+
+[recognition]
+model = "nova-3"
+
+[files]
+glossary = "glossary.txt"
+keyterms = "keyterms.txt"
+
+[server]
+# Loopback only, which is the right default when a tunnel is in front:
+# readers reach the tunnel's HTTPS address, and the operator uses
+# http://127.0.0.1:8080/operator, which browsers treat as a secure context
+# so no certificate is needed on this machine.
+#
+# Change to "0.0.0.0" to let phones on the same wifi connect directly.
+# That works, but it is plain HTTP, so phone screens will go dark mid
+# sentence because the wake lock needs a secure context.
+host = "127.0.0.1"
+port = 8080
+
+# The address readers actually use, which is your tunnel's hostname, not the
+# address above. The operator page shows this as a QR code people can point a
+# camera at. Leave empty before a tunnel is set up.
+public_url = "https://chapel.your-tailnet.ts.net/"

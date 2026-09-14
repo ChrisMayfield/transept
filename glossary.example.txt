@@ -1,0 +1,14 @@
+# Guidance for the translation model, one entry per line.
+# Free text, inserted into the prompt as written.
+#
+# Use it for three things: names the recognizer mangles, terms with an
+# official rendering in your target languages, and anything a general
+# model would translate literally when your congregation uses a set phrase.
+#
+# Copy to glossary.txt and edit.
+
+Brother Sharpes is a member of this congregation. Keep the name as written.
+"sacrament meeting" is a set term. French: "réunion de Sainte-Cène".
+"ward" means a local congregation, not a hospital ward.
+Scripture references use the official published translation in each language.
+When a speaker's name is unclear in the audio, leave the English as-is.
