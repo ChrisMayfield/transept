@@ -182,8 +182,15 @@ async function api(path, method = "GET", body = null) {
 }
 
 function showAlert(message) {
-  el("alert").innerHTML = message
-    ? `<div class="alert">${message}</div>` : "";
+  // textContent, not innerHTML: the message carries exception text and
+  // PortAudio device names, and a name holding a < would render as markup.
+  const host = el("alert");
+  host.textContent = "";
+  if (!message) return;
+  const box = document.createElement("div");
+  box.className = "alert";
+  box.textContent = message;
+  host.appendChild(box);
 }
 
 async function loadDevices() {
@@ -261,8 +268,13 @@ function render(status) {
 
   const lines = status.recent || [];
   el("feedEmpty").style.display = lines.length ? "none" : "block";
-  el("feed").innerHTML = lines
-    .map((line) => `<p>${line.text.replace(/</g, "&lt;")}</p>`).join("");
+  const feed = el("feed");
+  feed.textContent = "";
+  for (const line of lines) {
+    const paragraph = document.createElement("p");
+    paragraph.textContent = line.text;
+    feed.appendChild(paragraph);
+  }
 }
 
 const MODES = [["auto", "On demand"], ["on", "Always"], ["off", "Off"]];

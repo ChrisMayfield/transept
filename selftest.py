@@ -36,6 +36,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from types import SimpleNamespace
 
 import capture
 import pipeline
@@ -85,17 +86,27 @@ def asr_result(text, speech_final, start, duration):
     })
 
 
-# Two fragments of one sentence, then a new sentence after a silent gap.
-# The gap is what stops an abandoned half sentence from swallowing the next
-# speaker's turn, so every run exercises it.
+# Three sentences over four fragments, one for each way the buffer closes.
+# No fragment here ends in punctuation until the third sentence, which is the
+# point: the first sentence has to survive in the buffer until the silent gap
+# closes it. An earlier fixture punctuated the second fragment, so the gap
+# branch was never reached and the check below passed without testing it.
+#
+# The third fragment does double duty. It arrives after the gap and it ends a
+# sentence itself, so one fragment closes two sentences, which is the case
+# where a shared sequence number would make the Hub revise the first line
+# away instead of publishing it.
 FRAGMENTS = [
     asr_result("the meeting will start", False, 0.0, 1.0),
-    asr_result("at nine o'clock.", False, 1.0, 1.0),
-    asr_result("Brother Kalema will pray", True, 5.0, 1.5),
+    asr_result("at nine o'clock", False, 1.0, 1.0),
+    asr_result("Brother Kalema will pray.", True, 5.0, 1.5),
+    asr_result("Please turn to page ten.", False, 6.5, 1.5),
 ]
 
-FIRST_SENTENCE = "the meeting will start at nine o'clock."
-SECOND_SENTENCE = "Brother Kalema will pray"
+FIRST_SENTENCE = "the meeting will start at nine o'clock"
+SECOND_SENTENCE = "Brother Kalema will pray."
+THIRD_SENTENCE = "Please turn to page ten."
+SENTENCES = [FIRST_SENTENCE, SECOND_SENTENCE, THIRD_SENTENCE]
 
 
 class FakeSocket:
@@ -173,6 +184,12 @@ class FakeTranslator:
         rendered = {name: (f"CORRECTED {text}" if name == "English"
                            else f"<{name}> {text}")
                     for name in outputs}
+        if self.mode == "empty":
+            # What parse_translations returns when the model answered but
+            # left a language out of the JSON. The call succeeded, so no
+            # failure path runs and only the sink can save the reader.
+            rendered = {name: ("" if name != "English" else rendered[name])
+                        for name in rendered}
         return rendered, 0.5
 
     async def close(self):
@@ -228,11 +245,17 @@ async def check_pipeline(checks):
     printed = captured.getvalue()
 
     checks.check("two fragments become one sentence",
-                 f"[1] en" in printed and FIRST_SENTENCE in printed, printed)
+                 "[1] en" in printed and FIRST_SENTENCE in printed, printed)
     checks.check("a silent gap closes the sentence before the next turn",
+                 ", gap): " + FIRST_SENTENCE in printed, printed)
+    checks.check("the next turn is a sentence of its own",
                  "[2] en" in printed and SECOND_SENTENCE in printed, printed)
+    checks.check("one fragment can close two sentences",
+                 ", gap): " in printed and ", endpoint): " in printed, printed)
+    checks.check("terminal punctuation closes a sentence too",
+                 ", punctuation): " + THIRD_SENTENCE in printed, printed)
     checks.check("raw fragments are printed as they arrive",
-                 printed.count("  . ") == 3, printed.count("  . "))
+                 printed.count("  . ") == 4, printed.count("  . "))
     checks.check("the corrected English shows as en*",
                  "en*: CORRECTED" in printed, printed)
     checks.check("the French line is printed",
@@ -245,8 +268,8 @@ async def check_pipeline(checks):
     checks.check("the second call carries the first sentence as context",
                  translator.calls[1]["context"] == [FIRST_SENTENCE],
                  translator.calls[1]["context"])
-    checks.check("the summary counts both calls",
-                 sink.summary().startswith("2 translated, 0 failed"),
+    checks.check("the summary counts every call",
+                 sink.summary().startswith("3 translated, 0 failed"),
                  sink.summary())
 
     checks.section("The same loops, publishing to a Hub, one French reader")
@@ -258,13 +281,17 @@ async def check_pipeline(checks):
     english = [entry["text"] for entry in hub.buffers["English"]]
     french = [entry["text"] for entry in hub.buffers["French"]]
 
-    checks.check("the English channel carries both sentences",
-                 len(english) == 2, english)
+    checks.check("the English channel carries every sentence",
+                 len(english) == 3, english)
     checks.check("the corrected English replaced the raw line",
                  english[0] == f"CORRECTED {FIRST_SENTENCE}", english)
     checks.check("the replacement reused the sequence number",
-                 [entry["seq"] for entry in hub.buffers["English"]] == [1, 2],
+                 [entry["seq"] for entry in hub.buffers["English"]]
+                 == [1, 2, 3],
                  [entry["seq"] for entry in hub.buffers["English"]])
+    checks.check("the sentence closed by the gap survived the one behind it",
+                 english[0].endswith(FIRST_SENTENCE)
+                 and english[1].endswith(SECOND_SENTENCE), english)
     checks.check("the replacement is flagged as revised",
                  all(entry["revised"] for entry in hub.buffers["English"]))
     checks.check("the French channel got its translations",
@@ -277,7 +304,7 @@ async def check_pipeline(checks):
                      for call in translator.calls), translator.calls)
     checks.check("the counters add up",
                  (session.stats["units"], session.stats["translated"],
-                  session.stats["corrections"]) == (2, 2, 2), session.stats)
+                  session.stats["corrections"]) == (3, 3, 3), session.stats)
 
     checks.section("Nobody reading, and English needs no correction")
     translator = FakeTranslator()
@@ -286,10 +313,10 @@ async def check_pipeline(checks):
     await drive(session, translator)
     checks.check("no model call was made at all", translator.calls == [],
                  translator.calls)
-    checks.check("both sentences counted as skipped",
-                 session.stats["skipped"] == 2, session.stats)
+    checks.check("every sentence counted as skipped",
+                 session.stats["skipped"] == 3, session.stats)
     checks.check("English is still published for whoever arrives later",
-                 len(hub.buffers["English"]) == 2,
+                 len(hub.buffers["English"]) == 3,
                  list(hub.buffers["English"]))
 
     checks.section("Translation failure falls back to English")
@@ -299,9 +326,9 @@ async def check_pipeline(checks):
     await drive(session, translator)
     french = [entry["text"] for entry in hub.buffers["French"]]
     checks.check("French shows the English text rather than a gap",
-                 french == [FIRST_SENTENCE, SECOND_SENTENCE], french)
-    checks.check("both counted as failures", session.stats["failures"] == 2,
-                 session.stats)
+                 french == SENTENCES, french)
+    checks.check("every sentence counted as a failure",
+                 session.stats["failures"] == 3, session.stats)
 
     checks.section("A translation slower than hold falls back too")
     translator = FakeTranslator(delay=0.4)
@@ -310,9 +337,78 @@ async def check_pipeline(checks):
     await drive(session, translator, hold=0.05)
     french = [entry["text"] for entry in hub.buffers["French"]]
     checks.check("French falls back to English on timeout",
-                 french == [FIRST_SENTENCE, SECOND_SENTENCE], french)
-    checks.check("both counted as timeouts", session.stats["timeouts"] == 2,
-                 session.stats)
+                 french == SENTENCES, french)
+    checks.check("every sentence counted as a timeout",
+                 session.stats["timeouts"] == 3, session.stats)
+
+    checks.section("A model answer that left a language out")
+    translator = FakeTranslator(mode="empty")
+    session, hub = make_session(["French"], False, ["French"])
+    session.translator = translator
+    await drive(session, translator)
+    french = [entry["text"] for entry in hub.buffers["French"]]
+    checks.check("an empty translation shows the English text, not a blank",
+                 french == SENTENCES, french)
+    checks.check("nothing was counted as a failure, because the call worked",
+                 session.stats["failures"] == 0, session.stats)
+
+    checks.section("A provider answer with no choices in it")
+    translator = pipeline.Translator(
+        base_url="http://invalid.invalid/v1", api_key="selftest",
+        model="fake-model", languages=["French"], glossary="",
+        max_tokens=100, timeout=1.0)
+    posts = []
+
+    async def empty_choices(url, json=None):
+        posts.append(url)
+        return SimpleNamespace(status_code=200, json=lambda: {"choices": []})
+
+    translator.client.post = empty_choices
+    try:
+        raised = None
+        try:
+            await translator.translate("hello", [], ["French"])
+        except BaseException as exc:
+            raised = exc
+    finally:
+        await translator.close()
+    checks.check("an empty choices array is a translation failure, "
+                 "not a crash the sink cannot catch",
+                 isinstance(raised, RuntimeError), repr(raised))
+    checks.check("it was retried like any other bad answer",
+                 len(posts) == 2, len(posts))
+
+    checks.section("Stopping the session mid translation")
+    translator = FakeTranslator(delay=5.0)
+    session, hub = make_session(["French"], False, ["French"])
+    session.translator = translator
+    queue = asyncio.Queue()
+    unit = pipeline.Unit(1, FIRST_SENTENCE, 1.0, 0.0, "gap")
+    task = asyncio.create_task(
+        translator.translate(FIRST_SENTENCE, [], ["French"]))
+    await queue.put((unit, task, ["French"]))
+    writer = asyncio.create_task(pipeline.publish(queue, session, 30.0))
+    # Long enough for the writer to reach the shielded wait, which is the
+    # only place the cancellation is interesting.
+    await asyncio.sleep(0.05)
+    writer.cancel()
+    # Bounded rather than a plain await: a writer that swallows its own
+    # cancellation goes straight back to waiting on the queue, and that
+    # should fail this check rather than hang the whole suite.
+    await asyncio.wait([writer], timeout=1.0)
+    checks.check("the writer ended cancelled rather than reporting a failure",
+                 writer.cancelled(), writer)
+    if not writer.done():
+        await queue.put(None)
+        await asyncio.wait([writer], timeout=1.0)
+    checks.check("no English fallback was pushed out after the stop",
+                 list(hub.buffers["French"]) == [],
+                 list(hub.buffers["French"]))
+    checks.check("stopping is not counted as a translation failure",
+                 session.stats["failures"] == 0, session.stats)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
 
 
 # -- a whole session, start to stop ------------------------------------------
@@ -380,14 +476,14 @@ async def check_session(checks):
         english = [entry["text"] for entry in hub.buffers["English"]]
         french = [entry["text"] for entry in hub.buffers["French"]]
         checks.check("English was published and then corrected in place",
-                     english == [f"CORRECTED {FIRST_SENTENCE}",
-                                 f"CORRECTED {SECOND_SENTENCE}"], english)
+                     english == [f"CORRECTED {name}" for name in SENTENCES],
+                     english)
         checks.check("French was published",
-                     french == [f"<French> {FIRST_SENTENCE}",
-                                f"<French> {SECOND_SENTENCE}"], french)
+                     french == [f"<French> {name}" for name in SENTENCES],
+                     french)
         status = session.status()
         checks.check("status reports what the operator page needs",
-                     status["state"] == "running" and status["units"] == 2
+                     status["state"] == "running" and status["units"] == 3
                      and status["median"] is not None, status)
         checks.check("nothing reconnected", session.stats["reconnects"] == 0,
                      session.stats["reconnects"])
@@ -405,6 +501,32 @@ async def check_session(checks):
     finally:
         (capture.open_capture, server.websockets.connect,
          server.Translator) = original
+
+    checks.section("Reconnect backoff after a run that was working")
+    hub = server.Hub(["French"])
+    session = server.Session(fake_config(languages=["French"]), hub)
+
+    async def fails_at_once():
+        raise RuntimeError("the far end hung up")
+
+    session._run_once = fails_at_once
+    session.state = "running"
+    # A long second step, so a backoff that keeps climbing across a healthy
+    # run stalls here and the count below stays low. HEALTHY_RUN of zero
+    # makes every run count as healthy without waiting a real minute.
+    backoff = (server.RECONNECT_BACKOFF, server.HEALTHY_RUN)
+    server.RECONNECT_BACKOFF, server.HEALTHY_RUN = [0.01, 5.0], 0
+    try:
+        supervisor = asyncio.create_task(session._supervise())
+        await asyncio.sleep(0.2)
+        supervisor.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await supervisor
+    finally:
+        server.RECONNECT_BACKOFF, server.HEALTHY_RUN = backoff
+    checks.check("a healthy run puts the backoff back to the short delay",
+                 session.stats["reconnects"] >= 5,
+                 session.stats["reconnects"])
 
 
 # -- the running server ------------------------------------------------------
@@ -560,6 +682,13 @@ def check_server(checks):
                                {"language": "Klingon", "mode": "on"})
         checks.check("an unknown language is refused",
                      json.loads(body)["ok"] is False, body)
+
+        # The operator page reads the {"ok": false} shape and shows the
+        # message. A 500 traceback reaches it as nothing at all.
+        status, body = request(port, "/api/language", "POST", body=None)
+        checks.check("a language request with no body is an answer, not a 500",
+                     status == 200 and json.loads(body)["ok"] is False,
+                     f"{status} {body}")
     finally:
         # A graceful exit can lag by up to the event stream keepalive, since
         # the handler for a reader who has walked away only finds out at its

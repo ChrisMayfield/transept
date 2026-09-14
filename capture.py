@@ -143,7 +143,12 @@ class ParecCapture:
                 f"--rate={SAMPLE_RATE}", f"--channels={CHANNELS}",
                 "--latency-msec=50",
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                # Discarded rather than piped: nothing reads a stderr pipe,
+                # so enough diagnostics over a long meeting fill the buffer
+                # and parec blocks mid write. Audio then stops with no error
+                # and no end of stream, which is the one failure the session
+                # supervisor cannot see.
+                stderr=asyncio.subprocess.DEVNULL,
             )
         except OSError as exc:
             raise CaptureError(f"Could not start parec: {exc}") from exc
@@ -220,6 +225,7 @@ class SoundDeviceCapture:
         last_error = None
         for rate, ratio in ((SAMPLE_RATE, 1), (FALLBACK_RATE,
                                                FALLBACK_RATE // SAMPLE_RATE)):
+            stream = None
             try:
                 stream = sd.RawInputStream(
                     samplerate=rate, channels=CHANNELS, dtype="int16",
@@ -229,6 +235,14 @@ class SoundDeviceCapture:
                 return cls(stream, queue, state, rate, ratio)
             except Exception as exc:
                 last_error = exc
+                # RawInputStream opens the device and start() can still fail.
+                # Holding it would make the 48 kHz attempt fail as busy, and
+                # the operator would see only that second, misleading error.
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except Exception:
+                        pass
         raise CaptureError(
             f"Could not open audio device {device!r}: {last_error}")
 

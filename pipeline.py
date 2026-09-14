@@ -257,13 +257,21 @@ class Segmenter:
         return self._take("drain") if self.parts else None
 
     def _take(self, reason):
+        """Closes the buffer and returns the unit, or None if it was empty.
+
+        The sequence number travels with the text rather than being read off
+        the segmenter afterwards. One fragment can close two sentences, and
+        both takes run before either unit is built, so a caller reading
+        self.seq later would stamp both with the second number and the Hub
+        would revise the first line away.
+        """
         text = " ".join(self.parts).strip()
         self.parts = []
         self.first_seen = None
         if not text:
             return None
         self.seq += 1
-        return text, reason, self.audio_end
+        return self.seq, text, reason, self.audio_end
 
 
 
@@ -347,7 +355,11 @@ class Translator:
                     parsed = parse_translations(
                         choice["message"]["content"], outputs)
                     return parsed, time.monotonic() - started
-            except (httpx.HTTPError, KeyError, ValueError,
+            # IndexError covers an empty choices array, which a provider
+            # returns for a filtered or truncated response. Letting it escape
+            # kills the publisher task and, in server.py, the whole session,
+            # instead of falling back to English for one line.
+            except (httpx.HTTPError, KeyError, IndexError, ValueError,
                     json.JSONDecodeError) as exc:
                 last_error = f"{type(exc).__name__}: {exc}"
             if attempt + 1 < self.max_attempts:
@@ -518,8 +530,8 @@ async def listen(socket, segmenter, translator, sink, queue):
     context = deque(maxlen=CONTEXT_UNITS)
 
     async def emit(taken):
-        text, reason, audio_end = taken
-        unit = Unit(segmenter.seq, text, audio_end, time.monotonic(), reason)
+        seq, text, reason, audio_end = taken
+        unit = Unit(seq, text, audio_end, time.monotonic(), reason)
         outputs = sink.unit(unit)
         task = None
         if outputs and translator is not None:
@@ -588,7 +600,14 @@ async def publish(queue, sink, hold_seconds):
         except asyncio.TimeoutError:
             task.cancel()
             sink.timed_out(unit, languages)
-        except (RuntimeError, asyncio.CancelledError, httpx.HTTPError) as exc:
+        except asyncio.CancelledError:
+            # The shield means this is our own cancellation, not the call's:
+            # the session is stopping. Publishing an English fallback now
+            # would push a line into every channel after the operator hit
+            # Stop, and count a failure that never happened.
+            task.cancel()
+            raise
+        except (RuntimeError, httpx.HTTPError) as exc:
             sink.failed(unit, languages, exc)
         else:
             sink.translated(unit, languages, translations, elapsed)
@@ -633,8 +652,11 @@ class TerminalSink:
         if revised and revised != unit.text:
             print(f"     en*: {revised}")
         for name in languages:
+            # An empty string means the model omitted that language, which
+            # parse_translations cannot distinguish from an empty answer.
             print(f"     {name[:2].lower()}: "
-                  f"{translations.get(name, '')}  (+{elapsed:.1f}s)")
+                  f"{translations.get(name) or '[en] ' + unit.text}"
+                  f"  (+{elapsed:.1f}s)")
 
     def timed_out(self, unit, languages):
         self.timeouts += 1

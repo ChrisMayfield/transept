@@ -137,6 +137,10 @@ Finalized results arrive 0.2 to 0.3 seconds behind the speaker, so interim hypot
 That is how a glossary-corrected English line replaces the raw one on phones already showing it.
 Clients key on `seq`, so duplicates are replacements, not new lines.
 
+`Segmenter._take` returns the sequence number alongside the text rather than leaving the caller to read `segmenter.seq`.
+One fragment can close two sentences, the gap check closing the buffered one and the fragment itself closing the next, and both takes run before either unit is built.
+A caller reading the counter afterwards stamps both with the second number, and `Hub.publish` then revises the first line away instead of publishing it.
+
 Translation output order is enforced even though calls run concurrently.
 A slow call delays the ones behind it rather than scrambling the transcript, and the `--hold` timeout bounds that delay.
 
@@ -183,12 +187,14 @@ It uses no test framework, only the standard library, and exits non-zero if anyt
 Run it after any change to the pipeline, the sinks, or the routes.
 
 It has three sections, and `python3 selftest.py <section>` runs one of them.
-`pipeline` drives the shared loops against both sinks with a fake recognizer and a fake translator, covering segmentation, the gap rule, revision in place under one `seq`, an unread language never reaching the model, and the English fallback on both failure and timeout.
+`pipeline` drives the shared loops against both sinks with a fake recognizer and a fake translator, covering segmentation, the gap rule, revision in place under one `seq`, an unread language never reaching the model, and the English fallback on failure, on timeout, and on an answer that left a language out.
+The `FRAGMENTS` fixture punctuates nothing until the third sentence on purpose, because a fixture whose fragments close themselves never reaches the gap branch at all, which is how a sequence number collision lived under a passing check that claimed to test the gap.
 `session` swaps `capture.open_capture` and `websockets.connect` for fakes and runs a whole `Session` from start to stop, which is the section that catches the wiring between the two files coming apart; run against the code before the sink refactor it fails eleven checks and names the `NameError`.
+It also drives `_supervise` with a `_run_once` that fails immediately and `HEALTHY_RUN` set to zero, which is how the reconnect backoff is checked for starting over after a run that was working.
 `server` boots `server.py` on a spare port, with a config path that does not exist so the checks do not depend on whatever `config.toml` says on this machine, and exercises every route.
 
 Adding a check means adding one `checks.check(label, condition, detail)` line.
-`FakeSocket`, `FakeSource`, and `FakeTranslator` are already there, and `FakeTranslator` takes `mode="fail"` and a `delay`, so the failure and timeout paths cost nothing to exercise.
+`FakeSocket`, `FakeSource`, and `FakeTranslator` are already there, and `FakeTranslator` takes `mode="fail"`, `mode="empty"`, and a `delay`, so the failure, dropped language, and timeout paths cost nothing to exercise.
 
 What `selftest.py` cannot tell you is whether the captions are any good.
 Recognition accuracy is decided by the microphone feed and can only be judged in the actual room.

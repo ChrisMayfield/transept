@@ -53,6 +53,10 @@ from pipeline import (Segmenter, Translator, add_settings_arguments,
 STATIC = Path(__file__).parent / "static"
 HISTORY = 60
 RECONNECT_BACKOFF = [1, 2, 5, 10, 20]
+# A run that lasted this long counts as healthy, so the next drop starts the
+# backoff over. Without it, four blips early in a meeting mean the one an hour
+# later costs a twenty second silence.
+HEALTHY_RUN = 60
 
 
 class Hub:
@@ -280,6 +284,7 @@ class Session:
         attempt = 0
         try:
             while True:
+                began = time.monotonic()
                 try:
                     await self._run_once()
                     # A clean return means the far end closed the stream.
@@ -291,6 +296,8 @@ class Session:
 
                 if self.state == "stopped":
                     return
+                if time.monotonic() - began >= HEALTHY_RUN:
+                    attempt = 0
                 delay = RECONNECT_BACKOFF[min(attempt,
                                               len(RECONNECT_BACKOFF) - 1)]
                 attempt += 1
@@ -370,8 +377,11 @@ class Session:
             self.stats["corrections"] += 1
             self.hub.publish("English", unit.seq, revised)
         for language in languages:
+            # parse_translations fills every requested language, empty when
+            # the model dropped one, so a default here would never be used.
+            # An empty caption is the stall the fallback exists to prevent.
             self.hub.publish(language, unit.seq,
-                             translations.get(language, unit.text))
+                             translations.get(language) or unit.text)
 
     def timed_out(self, unit, languages):
         self.stats["timeouts"] += 1
@@ -430,11 +440,27 @@ async def api_devices(request):
     return web.json_response({"devices": devices})
 
 
+async def read_body(request):
+    """The posted JSON object, or an empty one.
+
+    A malformed or absent body is an operator page bug or a stray request,
+    not a server error: answering with the {"ok": false} shape the page
+    already handles beats a 500 traceback it renders as nothing at all.
+    """
+    if not request.can_read_body:
+        return {}
+    try:
+        body = await request.json()
+    except (ValueError, json.JSONDecodeError):
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
 async def api_start(request):
     if not authorized(request):
         return web.json_response({"ok": False, "message": "Not authorized."},
                                  status=403)
-    body = await request.json() if request.can_read_body else {}
+    body = await read_body(request)
     ok, message = await request.app["session"].start(body.get("device"))
     return web.json_response({"ok": ok, "message": message})
 
@@ -451,7 +477,7 @@ async def api_language(request):
     if not authorized(request):
         return web.json_response({"ok": False, "message": "Not authorized."},
                                  status=403)
-    body = await request.json()
+    body = await read_body(request)
     ok, message = request.app["session"].set_override(
         body.get("language"), body.get("mode"))
     return web.json_response({"ok": ok, "message": message})
