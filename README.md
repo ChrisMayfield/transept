@@ -119,9 +119,10 @@ python3 server.py
 That is the whole weekly command, and everything it needs is in `config.toml` and `.env`.
 Any setting can still be overridden for a one-off, for example `python3 server.py --ceiling 6`.
 
-Two addresses are printed.
+Two addresses are printed, on two different ports.
 The operator opens the `/operator` one on the laptop, picks the audio source, and presses Start.
-It carries a token minted for that run, so copy it from the terminal each week rather than saving a bookmark.
+That port is bound to this machine only and cannot be reached from the network or through your tunnel, which is deliberate: the controls start and stop a session that costs money, and nobody outside the room needs them.
+The address carries a token minted for that run, so copy it from the terminal each week rather than saving a bookmark.
 Everyone else opens `/` on their phone and picks a language.
 
 The language list is fixed when the server starts, which keeps the reader URLs stable so a printed card or a saved bookmark keeps working week to week.

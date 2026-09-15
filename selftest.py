@@ -793,7 +793,7 @@ def check_server(checks):
     check_authorization(checks)
     check_device_listing(checks)
     checks.section("The running server")
-    port = free_port()
+    port, operator = free_port(), free_port()
     environment = dict(
         os.environ,
         DEEPGRAM_API_KEY="selftest",
@@ -804,14 +804,16 @@ def check_server(checks):
         [sys.executable, "-u", "server.py",
          "--config", "selftest-no-such-config.toml",
          "--model", "selftest-model", "--languages", "French,Swahili",
-         "--host", "127.0.0.1", "--port", str(port)],
+         "--host", "127.0.0.1", "--port", str(port),
+         "--operator-port", str(operator)],
         cwd=HERE, env=environment, stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT, text=True)
     lines, reader = drain(process)
     try:
-        if not wait_for_port(port, process):
-            checks.check(f"server.py came up on port {port}", False,
-                         "".join(lines))
+        if not wait_for_port(port, process) or not wait_for_port(
+                operator, process):
+            checks.check(f"server.py came up on ports {port} and {operator}",
+                         False, "".join(lines))
             return
 
         # Nothing reaches the operator routes without this, so it comes
@@ -826,7 +828,7 @@ def check_server(checks):
                      json.loads(body)["channels"] == ["English", "French",
                                                       "Swahili"], body)
 
-        status, body = request(port, "/api/status", token=TOKEN)
+        status, body = request(operator, "/api/status", token=TOKEN)
         state = json.loads(body)
         checks.check("status starts stopped", state["state"] == "stopped",
                      state["state"])
@@ -835,16 +837,27 @@ def check_server(checks):
                          for language in state["languages"]),
                      state["languages"])
 
-        for path, secret in (("/", None), ("/operator", TOKEN),
-                             ("/api/devices", TOKEN)):
-            status, _ = request(port, path, token=secret)
-            checks.check(f"{path} answers 200", status == 200, status)
+        status, _ = request(port, "/")
+        checks.check("/ answers 200 on the reader port", status == 200, status)
+        for path in ("/operator", "/api/devices"):
+            status, _ = request(operator, path, token=TOKEN)
+            checks.check(f"{path} answers 200 on the operator port",
+                         status == 200, status)
+
+        # The split is the security boundary, so this is the check that
+        # matters: the port a tunnel points at must not carry a route that
+        # can change anything, whether or not a token comes with it.
+        for path in ("/operator", "/api/status", "/api/devices",
+                     "/api/start", "/api/stop", "/api/language", "/qr.svg"):
+            status, _ = request(port, path, token=TOKEN)
+            checks.check(f"{path} is not served on the reader port",
+                         status == 404, status)
 
         # The token rule through real routing. Every other check of it calls
         # the handlers directly, so none of them would notice a route left
         # out of add_routes or a decorator that never ran.
         for path in ("/operator", "/api/status", "/api/devices"):
-            status, _ = request(port, path)
+            status, _ = request(operator, path)
             checks.check(f"{path} is refused without the token",
                          status == 403, status)
         for path in ("/", "/api/channels"):
@@ -852,7 +865,7 @@ def check_server(checks):
             checks.check(f"{path} stays open, as a reader needs it",
                          status == 200, status)
 
-        status, body = request(port, "/qr.svg")
+        status, body = request(operator, "/qr.svg")
         checks.check("the QR endpoint explains a missing public_url",
                      status == 404 and "public_url" in body,
                      f"{status} {body}")
@@ -866,27 +879,27 @@ def check_server(checks):
         checks.check("the event stream opens with a reconnect interval",
                      preamble.startswith("retry:"), repr(preamble))
 
-        status, body = request(port, "/api/start", "POST", {}, token=TOKEN)
+        status, body = request(operator, "/api/start", "POST", {}, token=TOKEN)
         checks.check("starting without a device is refused with a reason",
                      json.loads(body)["ok"] is False
                      and "audio source" in json.loads(body)["message"], body)
 
-        status, body = request(port, "/api/stop", "POST", {}, token=TOKEN)
+        status, body = request(operator, "/api/stop", "POST", {}, token=TOKEN)
         checks.check("stopping when idle is refused",
                      json.loads(body)["ok"] is False, body)
 
-        status, body = request(port, "/api/language", "POST",
+        status, body = request(operator, "/api/language", "POST",
                                {"language": "French", "mode": "on"},
                                token=TOKEN)
         checks.check("a language can be forced on", json.loads(body)["ok"],
                      body)
-        state = json.loads(request(port, "/api/status", token=TOKEN)[1])
+        state = json.loads(request(operator, "/api/status", token=TOKEN)[1])
         french = [item for item in state["languages"]
                   if item["name"] == "French"][0]
         checks.check("the override shows in status and makes it active",
                      french["override"] == "on" and french["active"], french)
 
-        status, body = request(port, "/api/language", "POST",
+        status, body = request(operator, "/api/language", "POST",
                                {"language": "Klingon", "mode": "on"},
                                token=TOKEN)
         checks.check("an unknown language is refused",
@@ -894,7 +907,7 @@ def check_server(checks):
 
         # The operator page reads the {"ok": false} shape and shows the
         # message. A 500 traceback reaches it as nothing at all.
-        status, body = request(port, "/api/language", "POST", body=None,
+        status, body = request(operator, "/api/language", "POST", body=None,
                                token=TOKEN)
         checks.check("a language request with no body is an answer, not a 500",
                      status == 200 and json.loads(body)["ok"] is False,
@@ -915,6 +928,8 @@ def check_server(checks):
 
     checks.check("the startup banner prints the reader address",
                  f"http://127.0.0.1:{port}/" in output, output)
+    checks.check("the banner sends the operator to the loopback port",
+                 f"http://127.0.0.1:{operator}/operator" in output, output)
     checks.check("the banner says the operator address is not a bookmark",
                  "changes" in output and "every restart" in output, output)
     checks.check("binding to loopback says so, since a phone cannot reach it",

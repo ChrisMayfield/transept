@@ -77,6 +77,7 @@ SETTINGS = [
     # a deliberate edit, not what happens when nobody sets anything.
     ("host", "server", "host", str, "127.0.0.1"),
     ("port", "server", "port", int, 8080),
+    ("operator_port", "server", "operator_port", int, 8081),
     ("public_url", "server", "public_url", str, ""),
 ]
 
@@ -455,7 +456,8 @@ ARGUMENT_HELP = {
     "record": "keep a transcript of the session; see record.py",
     "database": "where a recorded session is kept",
     "host": "address to bind",
-    "port": "port to bind",
+    "port": "port to bind, the one a tunnel points at",
+    "operator_port": "port for the operator controls, always loopback",
     "public_url": "the address readers use, for the QR code",
 }
 

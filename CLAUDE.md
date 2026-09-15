@@ -84,7 +84,11 @@ The `None` check in `translate` is explicit rather than a truthiness test, becau
 
 ### Web layer
 
-`/` is the reader page, `/operator` the controls, `/stream/<channel>` the SSE feed for one language, plus `/api/status`, `/api/devices`, `/api/channels`, `/api/start`, `/api/stop`, `/api/language`, and `/qr.svg`.
+Two listeners, sharing one `Hub` and one `Session`.
+`build_reader_app` serves `/`, `/stream/<channel>`, and `/api/channels` on the port a tunnel points at, and nothing on it can change anything.
+`build_operator_app` serves `/operator`, `/api/status`, `/api/devices`, `/api/start`, `/api/stop`, `/api/language`, and `/qr.svg` on `OPERATOR_HOST`, which is always `127.0.0.1`.
+A second listener rather than a check inside the handlers, because a check cannot tell the two audiences apart: the tunnel daemon runs on this machine and connects to the local port, so a public visitor and the operator at the keyboard both arrive from `127.0.0.1`.
+`serve` runs both under `AppRunner` because `web.run_app` serves one application.
 Both pages in `static/` are single files with inline CSS and JavaScript, no build step and no framework.
 Server strings reach both pages, including exception text and device names, so they build nodes and set `textContent` rather than assembling `innerHTML`.
 The reader page keeps chosen language and text size in `localStorage` and holds a screen wake lock, which is why HTTPS matters.
@@ -93,9 +97,9 @@ Request handlers share one event loop with the capture pipeline, so anything tha
 `api_devices` runs `pactl` under `asyncio.to_thread` for that reason, and a handler that shells out, touches the disk, or calls a third party belongs in a thread too.
 Twenty concurrent listings ran inline once, and a request that took 0.9 ms on an idle server took 209 ms behind them.
 
-Everything under `/api` is behind `authorized`, including the two routes that only read.
+Every route on the operator app is behind `authorized`, including the two that only read.
 `/api/status` carries the device name, the model, the raw exception text, and the last lines spoken, and `/api/devices` names the sound hardware and forks a process per request.
-The reader page needs neither, and with a tunnel in front the server is on the public internet rather than the local network the operator token was sized for.
+The token is the second layer rather than the only one, and it is what stops a page in any tab of the operator's browser from posting a cross-origin form at the loopback port.
 A refusal has to keep the shape the operator page destructures, which is `ok` and `message` for status and `devices` and `error` for the device list, or the page renders a blank panel instead of saying the token is wrong.
 
 ## Things that look wrong but are not
@@ -202,6 +206,9 @@ The reader view is a plain web page by choice, not an installable app.
 A manifest and service worker would add install friction and offline machinery that a live caption feed cannot use anyway.
 HTTPS is still required, because the screen wake lock needs a secure context, and a tunnel in front is the current answer.
 `public_url` exists because the bind address is not the address a phone can reach, and the QR endpoint renders that value rather than the listener.
+
+`operator_port` is a setting but the operator host is not, because the whole point of the second listener is that a tunnel cannot be pointed at it by mistake.
+A headless machine wants an SSH forward rather than a wider bind.
 
 The operator token is minted every run and printed with the address, never configured.
 A settable one invites a weak token and a forgotten one, and it buys only a stable bookmark, which a volunteer reading the address off the terminal each week does not need.

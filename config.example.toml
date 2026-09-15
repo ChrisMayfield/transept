@@ -81,6 +81,12 @@ keyterms = "keyterms.txt"
 host = "127.0.0.1"
 port = 8080
 
+# The operator controls live on a second listener, always on 127.0.0.1,
+# so that pointing a tunnel at the port above cannot expose them. Nothing
+# reaches the controls from the network: the volunteer uses this machine,
+# and a headless box wants an SSH forward rather than a wider bind.
+operator_port = 8081
+
 # The address readers actually use, which is your tunnel's hostname, not the
 # address above. The operator page shows this as a QR code people can point a
 # camera at. Leave empty before a tunnel is set up.

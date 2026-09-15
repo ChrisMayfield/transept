@@ -46,11 +46,16 @@ import capture
 import record
 from pipeline import (SYSTEM_PROMPT, Segmenter, Translator,
                       add_settings_arguments,
-                      build_asr_url, listen, load_config, load_env,
+                      build_asr_url, install_stop_handler, listen,
+                      load_config, load_env,
                       load_file_lines, load_glossary, publish, pump_audio,
                       resolve)
 
 STATIC = Path(__file__).parent / "static"
+# The operator listener never leaves this machine. Not a setting, because
+# the whole point of the second listener is that a tunnel cannot be
+# pointed at it by mistake.
+OPERATOR_HOST = "127.0.0.1"
 HISTORY = 60
 RECONNECT_BACKOFF = [1, 2, 5, 10, 20]
 # Seconds a run must last to count as healthy and reset the backoff. Without
@@ -715,30 +720,81 @@ async def api_channels(request):
     return web.json_response({"channels": request.app["hub"].channels})
 
 
-def build_app(config, token):
-    hub = Hub(config["languages"])
+def build_reader_app(hub, session):
+    """What a phone needs, and nothing else.
+
+    This is the app a tunnel points at, so every route on it is reachable
+    from the public internet and none of them can change anything.
+    """
     app = web.Application()
     app["hub"] = hub
-    app["token"] = token
-    app["session"] = Session(config, hub)
+    app["session"] = session
     app.add_routes([
         web.get("/", reader_page),
+        web.get("/api/channels", api_channels),
+        web.get("/stream/{channel}", stream),
+    ])
+    return app
+
+
+def build_operator_app(hub, session, token):
+    """The controls, served on their own listener.
+
+    A second listener rather than a check inside the handlers, because a
+    check cannot tell the two audiences apart: the tunnel daemon runs on
+    this machine and connects to the local port, so a visitor from the
+    public internet and the operator at the keyboard both arrive from
+    127.0.0.1. Keeping these routes on a port the tunnel does not know
+    about needs no trust in the tunnel at all.
+    """
+    app = web.Application()
+    app["hub"] = hub
+    app["session"] = session
+    app["token"] = token
+    app.add_routes([
         web.get("/operator", operator_page),
         web.get("/api/status", api_status),
         web.get("/api/devices", api_devices),
-        web.get("/api/channels", api_channels),
         web.post("/api/start", api_start),
         web.post("/api/stop", api_stop),
         web.post("/api/language", api_language),
-        web.get("/stream/{channel}", stream),
         web.get("/qr.svg", qr_code),
     ])
-
-    async def shutdown(app):
-        await app["session"].stop()
-
-    app.on_cleanup.append(shutdown)
     return app
+
+
+async def serve(config, token, settings):
+    """Run both listeners until Ctrl-C, then stop the session.
+
+    web.run_app serves one application, and these are two: the reader app
+    on the port a tunnel points at, and the operator app on loopback. They
+    share one Hub and one Session, so this is two doors onto one room
+    rather than two servers.
+    """
+    hub = Hub(config["languages"])
+    session = Session(config, hub)
+    listeners = (
+        (build_reader_app(hub, session), settings["host"], settings["port"]),
+        (build_operator_app(hub, session, token), OPERATOR_HOST,
+         settings["operator_port"]),
+    )
+    runners = []
+    try:
+        for app, host, port in listeners:
+            runner = web.AppRunner(app)
+            await runner.setup()
+            runners.append(runner)
+            await web.TCPSite(runner, host, port).start()
+        stop = asyncio.Event()
+        install_stop_handler(stop)
+        await stop.wait()
+    finally:
+        # Before the runners, because stopping the session closes the
+        # Deepgram socket and the translator, and those should shut down
+        # while the loop is still serving rather than after.
+        await session.stop()
+        for runner in runners:
+            await runner.cleanup()
 
 
 def main():
@@ -754,7 +810,8 @@ def main():
         "device", "capture", "model", "languages", "grace", "idle_stop",
         "glossary", "keyterms", "ceiling", "gap", "hold", "asr_model",
         "endpointing", "max_tokens", "timeout", "reasoning_effort",
-        "correct_english", "host", "port", "record", "database",
+        "correct_english", "host", "port", "operator_port", "record",
+        "database",
     ])
     args = parser.parse_args()
 
@@ -786,11 +843,10 @@ def main():
     # Per run also means a link that leaks, by screen share or a photo of
     # this terminal, stops working at the next restart.
     token = secrets.token_urlsafe(32)
-    app = build_app(config, token)
     reader = settings["public_url"] or (
         f"http://{settings['host']}:{settings['port']}/")
     print(f"Reader:   {reader}")
-    print(f"Operator: http://{settings['host']}:{settings['port']}"
+    print(f"Operator: http://{OPERATOR_HOST}:{settings['operator_port']}"
           f"/operator?token={token}")
     print("That address carries a token minted for this run, so it "
           "changes\nevery restart. Copy it rather than saving a bookmark.")
@@ -798,7 +854,10 @@ def main():
         print("Bound to this machine only. Readers reach it through your "
               "tunnel;\nset server.host to 0.0.0.0 to allow direct "
               "connections on this network.")
-    web.run_app(app, host=settings["host"], port=settings["port"], print=None)
+    try:
+        asyncio.run(serve(config, token, settings))
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == "__main__":
