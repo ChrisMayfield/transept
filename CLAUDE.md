@@ -89,6 +89,10 @@ Both pages in `static/` are single files with inline CSS and JavaScript, no buil
 Server strings reach both pages, including exception text and device names, so they build nodes and set `textContent` rather than assembling `innerHTML`.
 The reader page keeps chosen language and text size in `localStorage` and holds a screen wake lock, which is why HTTPS matters.
 
+Request handlers share one event loop with the capture pipeline, so anything that blocks in a handler stalls the caption fan-out to every phone in the room.
+`api_devices` runs `pactl` under `asyncio.to_thread` for that reason, and a handler that shells out, touches the disk, or calls a third party belongs in a thread too.
+Twenty concurrent listings ran inline once, and a request that took 0.9 ms on an idle server took 209 ms behind them.
+
 ## Things that look wrong but are not
 
 Segmentation exists because Deepgram finalizes text mid-sentence.

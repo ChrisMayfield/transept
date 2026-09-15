@@ -561,7 +561,12 @@ async def api_devices(request):
     """Input devices, so the operator picks from a list rather than typing."""
     config = request.app["session"].config
     try:
-        devices = capture.list_devices(config["capture"])
+        # In a thread, because list_devices shells out to pactl with a five
+        # second timeout and this coroutine shares its event loop with the
+        # captions. Called inline, one slow listing stalls the fan-out to
+        # every phone in the room for as long as pactl takes to answer.
+        devices = await asyncio.to_thread(capture.list_devices,
+                                          config["capture"])
     except capture.CaptureError as exc:
         return web.json_response({"devices": [], "error": str(exc)})
     # The page pre-selects the configured source, which has to be sent

@@ -639,6 +639,32 @@ def check_device_listing(checks):
     def raises(backend):
         raise capture.CaptureError("pactl failed")
 
+    def slow(backend):
+        # Stands in for pactl on a machine that has stopped answering.
+        time.sleep(0.2)
+        return []
+
+    async def ticks_while_listing(request):
+        """How many times the event loop got a turn during one listing.
+
+        Zero means api_devices ran the subprocess inline, which is how a
+        slow pactl freezes the caption fan-out to every phone in the room.
+        """
+        counted = 0
+
+        async def tick():
+            nonlocal counted
+            while True:
+                await asyncio.sleep(0.005)
+                counted += 1
+
+        ticker = asyncio.create_task(tick())
+        try:
+            await server.api_devices(request)
+        finally:
+            ticker.cancel()
+        return counted
+
     checks.section("The device list")
     request = StubRequest(fake_config())
     original = server.capture.list_devices
@@ -652,6 +678,11 @@ def check_device_listing(checks):
         checks.check("a backend that cannot list is reported, not raised",
                      payload["devices"] == [] and "pactl" in payload["error"],
                      payload)
+
+        server.capture.list_devices = slow
+        counted = asyncio.run(ticks_while_listing(request))
+        checks.check("a slow device listing leaves the event loop running",
+                     counted >= 5, f"{counted} turns during a 0.2s listing")
     finally:
         server.capture.list_devices = original
 
