@@ -5,18 +5,24 @@ Live captioning and translation server.
 Runs the capture pipeline behind an HTTP server, so a volunteer can start and
 stop it from a browser and listeners can read captions on their phones.
 
+Two listeners. The reader port carries the pages phones use, and is the
+one to point a tunnel at; the operator port stays on 127.0.0.1.
+
     /                   reader view with a language picker
-    /operator           start and stop controls, status, language toggles
     /stream/<channel>   server-sent events for one language
+    /operator           start and stop controls, status, language toggles
 
 Speech recognition runs continuously while a session is on. Translation runs
 per language, only while somebody is reading that language or the operator
 has forced it on, so an unread language costs nothing.
 
+The operator address is printed at startup with a token minted for that
+run; there is no way to set one.
+
 Usage:
     python3 server.py --model gemini-3.8-flash --reasoning-effort low \\
         --languages "French,Swahili,Spanish" --correct-english \\
-        --glossary glossary.txt --keyterms keyterms.txt --token <secret>
+        --glossary glossary.txt --keyterms keyterms.txt
 
 The language list is fixed when the server starts. Readers and the operator
 choose from it at runtime, but the set itself does not change, so a printed
@@ -52,9 +58,8 @@ from pipeline import (SYSTEM_PROMPT, Segmenter, Translator,
                       resolve)
 
 STATIC = Path(__file__).parent / "static"
-# The operator listener never leaves this machine. Not a setting, because
-# the whole point of the second listener is that a tunnel cannot be
-# pointed at it by mistake.
+# Not a setting: the point of the second listener is that a tunnel cannot
+# be pointed at it by mistake.
 OPERATOR_HOST = "127.0.0.1"
 HISTORY = 60
 RECONNECT_BACKOFF = [1, 2, 5, 10, 20]
@@ -68,9 +73,7 @@ class Hub:
 
     def __init__(self, languages, max_listeners=0):
         self.channels = ["English"] + list(languages)
-        # Nothing authenticates to open an event stream, so the count is
-        # bounded here rather than left to whatever the machine will bear.
-        self.max_listeners = max_listeners
+        self.max_listeners = max_listeners     # 0 means no cap
         self.refused = 0
         self.buffers = {name: deque(maxlen=HISTORY) for name in self.channels}
         self.subscribers = {name: set() for name in self.channels}
@@ -130,12 +133,7 @@ class Hub:
         return sum(len(queues) for queues in self.subscribers.values())
 
     def full(self):
-        """True once the listener cap is reached.
-
-        Every stream costs a task, a queue and a socket, and each published
-        line is written to all of them, so an unbounded count is a way for
-        one client to make the fan-out slower for the whole room.
-        """
+        """True once the listener cap is reached, across all channels."""
         return (self.max_listeners > 0
                 and self.listener_total() >= self.max_listeners)
 
@@ -279,15 +277,13 @@ class Session:
             self.error = f"Recording stopped: {type(exc).__name__}: {exc}"
             self.recorder = None
 
-    def _demand(self):
+    def demand(self):
         """(translated, capped): languages wanted, split by max_languages.
 
-        Demand is unauthenticated. One client can open every channel and
-        make every sentence cost the whole language list, in tokens and in
-        the latency that more output tokens adds for the people actually
-        reading. The cap keeps what the operator forced on, then what has
-        the most readers, so a stranger holding eight channels loses to
-        the two languages somebody is really reading.
+        Demand needs no authentication, so one client opening every channel
+        could otherwise make every sentence pay for the whole list. Ranking
+        puts operator overrides first and the most-read languages next, so
+        a stranger holding every channel loses to a language with readers.
         """
         grace = self.config["grace"]
         wanted = []
@@ -302,18 +298,14 @@ class Session:
             return wanted, []
         order = self.config["languages"]
         ranked = sorted(wanted, key=lambda name: (
-            self.overrides.get(name) != "on",
-            -len(self.hub.subscribers[name]),
-            order.index(name)))
+            self.overrides.get(name) != "on",      # forced on wins
+            -len(self.hub.subscribers[name]),      # then most readers
+            order.index(name)))                    # then config order
         keep = set(ranked[:cap])
-        # Both lists come back in configured order, which is the order the
-        # prompt names them in and the order the operator page shows.
+        # Both lists stay in configured order, which the prompt and the
+        # operator page both rely on.
         return ([name for name in wanted if name in keep],
                 [name for name in wanted if name not in keep])
-
-    def active_languages(self):
-        """Languages worth spending tokens on right now."""
-        return self._demand()[0]
 
     def set_override(self, language, mode):
         if language not in self.config["languages"]:
@@ -327,7 +319,7 @@ class Session:
         return True, f"{language} set to {mode}."
 
     def language_report(self):
-        translated, capped = self._demand()
+        translated, capped = self.demand()
         translated, capped = set(translated), set(capped)
         return [{
             "name": language,
@@ -488,7 +480,7 @@ class Session:
         # The raw transcript goes out immediately either way.
         self.hub.publish("English", unit.seq, unit.text)
 
-        languages, capped = self._demand()
+        languages, capped = self.demand()
         # Recording asks for the English correction whether or not anybody
         # is reading that channel. Without it, a Sunday where everyone reads
         # French stores no corrected line to compare against, and the two
@@ -526,9 +518,7 @@ class Session:
                 outcome="skipped" if not outputs else "pending",
                 requested=list(outputs))
         for language in capped:
-            # A language the cap dropped still gets the English line, the
-            # same as one whose translation failed. A gap is worse: a
-            # reader who cannot hear the room cannot tell it from silence.
+            # English rather than a gap, as with any failed translation.
             self.stats["capped"] += 1
             self.hub.publish(language, unit.seq, unit.text)
             self._record("translation", seq=unit.seq, language=language,
@@ -595,19 +585,14 @@ class Session:
 def authorized(request):
     """True if this request carries the token minted for this run.
 
-    There is deliberately no tokenless mode. The operator routes are meant
-    to be reached from the operator's own machine, but a page open in any
-    tab of the operator's browser can post a cross-origin form to
-    127.0.0.1 with no CORS preflight, and without a secret it can guess
-    that reaches Session.start and Session.stop.
+    No tokenless mode: loopback alone would still let a page in another
+    browser tab post a cross-origin form at these routes.
     """
     token = request.app["token"]
     supplied = (request.headers.get("X-Caption-Token")
                 or request.query.get("token") or "")
-    # Bytes and compare_digest rather than ==, which returns sooner for a
-    # token that shares a prefix. The encode is not decoration: given two
-    # str, compare_digest raises TypeError on anything outside ASCII, and
-    # a request can carry that, so == would become a 500 here.
+    # Bytes, because compare_digest on two str raises TypeError outside
+    # ASCII and a query string can carry that.
     return hmac.compare_digest(supplied.encode(), token.encode())
 
 
@@ -628,9 +613,8 @@ async def operator_page(request):
 async def api_status(request):
     """Everything the operator page shows, which is more than a reader sees.
 
-    Behind the token because it names the audio device and the model, and
-    carries the raw error text and the last lines spoken. The transcript is
-    public by design on the reader page; the rest of this is host detail.
+    Behind the token: it names the audio device and the model and carries
+    raw exception text.
     """
     if not authorized(request):
         return web.json_response({"ok": False, "message": "Not authorized."},
@@ -639,24 +623,17 @@ async def api_status(request):
 
 
 async def api_devices(request):
-    """Input devices, so the operator picks from a list rather than typing.
-
-    Behind the operator token like every other route under /api, because
-    listing devices runs a subprocess and names the sound hardware, and
-    neither is something a reader on the tunnel needs.
-    """
+    """Input devices, so the operator picks from a list rather than typing."""
     if not authorized(request):
-        # The devices-and-error shape the operator page already renders,
-        # not the ok-and-message shape of the other routes: the page
-        # destructures this answer and would throw on a missing list.
+        # The devices-and-error shape this route already returns, not the
+        # ok-and-message shape: the page destructures the list and would
+        # throw on a missing one.
         return web.json_response({"devices": [], "error": "Not authorized."},
                                  status=403)
     config = request.app["session"].config
     try:
-        # In a thread, because list_devices shells out to pactl with a five
-        # second timeout and this coroutine shares its event loop with the
-        # captions. Called inline, one slow listing stalls the fan-out to
-        # every phone in the room for as long as pactl takes to answer.
+        # In a thread: list_devices shells out to pactl with a five second
+        # timeout, and this loop is also feeding the captions.
         devices = await asyncio.to_thread(capture.list_devices,
                                           config["capture"])
     except capture.CaptureError as exc:
@@ -717,8 +694,8 @@ async def stream(request):
     if channel not in hub.channels:
         return web.Response(status=404, text="No such channel.")
     if hub.full():
-        # Refused before prepare, so this is an ordinary response a browser
-        # will retry rather than a stream that opens and then goes quiet.
+        # Before prepare, so this is an ordinary response a browser retries
+        # rather than a stream that opens and then says nothing.
         hub.refused += 1
         return web.Response(status=503, text="Too many readers just now.",
                             headers={"Retry-After": "10"})
@@ -784,8 +761,8 @@ async def api_channels(request):
 def build_reader_app(hub, session):
     """What a phone needs, and nothing else.
 
-    This is the app a tunnel points at, so every route on it is reachable
-    from the public internet and none of them can change anything.
+    A tunnel points here, so assume every route is public. None can change
+    anything, and none require the token.
     """
     app = web.Application()
     app["hub"] = hub
@@ -799,14 +776,12 @@ def build_reader_app(hub, session):
 
 
 def build_operator_app(hub, session, token):
-    """The controls, served on their own listener.
+    """The controls, on a listener the tunnel never sees.
 
-    A second listener rather than a check inside the handlers, because a
-    check cannot tell the two audiences apart: the tunnel daemon runs on
-    this machine and connects to the local port, so a visitor from the
-    public internet and the operator at the keyboard both arrive from
-    127.0.0.1. Keeping these routes on a port the tunnel does not know
-    about needs no trust in the tunnel at all.
+    A separate listener rather than a check in the handlers: the tunnel
+    daemon connects from this machine, so a public visitor and the
+    operator both arrive from 127.0.0.1 and no check can tell them apart.
+    Every route here goes through authorized as well.
     """
     app = web.Application()
     app["hub"] = hub
@@ -827,10 +802,8 @@ def build_operator_app(hub, session, token):
 async def serve(config, token, settings):
     """Run both listeners until Ctrl-C, then stop the session.
 
-    web.run_app serves one application, and these are two: the reader app
-    on the port a tunnel points at, and the operator app on loopback. They
-    share one Hub and one Session, so this is two doors onto one room
-    rather than two servers.
+    AppRunner rather than web.run_app, which takes a single application.
+    The two apps share one Hub and one Session: two doors, one room.
     """
     hub = Hub(config["languages"], config.get("max_listeners") or 0)
     session = Session(config, hub)
@@ -850,9 +823,8 @@ async def serve(config, token, settings):
         install_stop_handler(stop)
         await stop.wait()
     finally:
-        # Before the runners, because stopping the session closes the
-        # Deepgram socket and the translator, and those should shut down
-        # while the loop is still serving rather than after.
+        # Before the runners: stopping the session closes the Deepgram
+        # socket and the translator, which needs the loop still running.
         await session.stop()
         for runner in runners:
             await runner.cleanup()
@@ -865,14 +837,18 @@ def main():
         epilog="Any setting may live in config.toml instead, which is the "
                "point: a weekly run should be just `python3 server.py`.")
     parser.add_argument("--list-devices", action="store_true",
-                        help="show PipeWire sources and exit")
+                        help="list audio input devices and exit")
     parser.add_argument("--config", default="config.toml")
     add_settings_arguments(parser, [
-        "device", "capture", "model", "languages", "grace", "idle_stop",
-        "glossary", "keyterms", "ceiling", "gap", "hold", "asr_model",
-        "endpointing", "max_tokens", "timeout", "reasoning_effort",
-        "correct_english", "host", "port", "operator_port", "record",
-        "database", "max_languages", "max_listeners",
+        "capture", "device", "endpointing",
+        "languages", "grace", "max_languages",
+        "model", "reasoning_effort", "correct_english", "max_tokens",
+        "timeout", "hold",
+        "ceiling", "gap",
+        "idle_stop", "record", "database",
+        "asr_model",
+        "glossary", "keyterms",
+        "host", "port", "operator_port", "max_listeners",
     ])
     args = parser.parse_args()
 
@@ -898,11 +874,8 @@ def main():
     config["llm_key"] = llm_key
     config["llm_base"] = llm_base
 
-    # Minted every run rather than configured. A settable token invites a
-    # weak one and a forgotten one, and the volunteer never types this:
-    # the banner below prints the address with the token already in it.
-    # Per run also means a link that leaks, by screen share or a photo of
-    # this terminal, stops working at the next restart.
+    # Minted, never configured: the banner prints the address with the
+    # token in it, so a link that leaks expires at the next restart.
     token = secrets.token_urlsafe(32)
     reader = settings["public_url"] or (
         f"http://{settings['host']}:{settings['port']}/")

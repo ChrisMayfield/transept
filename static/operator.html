@@ -275,8 +275,7 @@ function render(status) {
   el("median").textContent = status.median ? status.median + "s" : "\u2013";
   const reading = Object.values(status.listeners || {})
     .reduce((total, count) => total + count, 0);
-  // Only once it has happened: a zero here would be one more number to
-  // read past every week for a cap that has never bitten.
+  // Only once it has happened, so a cap that never bites adds nothing.
   el("listeners").textContent = status.refused
     ? `${reading} (${status.refused} turned away)` : reading;
 
@@ -363,9 +362,8 @@ el("stop").onclick = async () => {
 async function poll() {
   try {
     const status = await api("/api/status");
-    // A refusal carries ok and message where a status carries state. Handed
-    // to render, it paints a blank page every two seconds rather than saying
-    // the token is missing or wrong.
+    // A refusal carries ok and message where a status carries state;
+    // render would paint a blank panel instead of saying the token is wrong.
     if (status.ok === false) { showAlert(status.message); return; }
     render(status);
   } catch (error) { showAlert("Lost contact with the server."); }

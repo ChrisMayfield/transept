@@ -121,8 +121,8 @@ Any setting can still be overridden for a one-off, for example `python3 server.p
 
 Two addresses are printed, on two different ports.
 The operator opens the `/operator` one on the laptop, picks the audio source, and presses Start.
-That port is bound to this machine only and cannot be reached from the network or through your tunnel, which is deliberate: the controls start and stop a session that costs money, and nobody outside the room needs them.
-The address carries a token minted for that run, so copy it from the terminal each week rather than saving a bookmark.
+That port is bound to this machine only, so the controls cannot be reached from the network or through your tunnel.
+Its address carries a token minted for that run, so copy it from the terminal each week rather than saving a bookmark.
 Everyone else opens `/` on their phone and picks a language.
 
 The language list is fixed when the server starts, which keeps the reader URLs stable so a printed card or a saved bookmark keeps working week to week.
@@ -131,7 +131,8 @@ Listing a language does not mean paying for it.
 ## Getting it onto phones
 
 The intended setup is a tunnel, which gives a fixed HTTPS address that works whether phones are on wifi or cellular.
-The server binds to `127.0.0.1` by default to suit this: readers arrive through the tunnel, and the operator uses `http://127.0.0.1:8080/operator` on the machine itself, which browsers treat as a secure context without a certificate.
+The server binds to `127.0.0.1` by default to suit this: readers arrive through the tunnel, and the operator uses `http://127.0.0.1:8081/operator` on the machine itself, which browsers treat as a secure context without a certificate.
+Point the tunnel at the reader port only, which is what the commands below do; the operator port is not meant to leave the laptop.
 
 Two tunnels are worth considering, and the difference is whether you want to own a domain.
 

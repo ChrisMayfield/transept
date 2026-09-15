@@ -154,8 +154,10 @@ def main():
                         help="take every input line verbatim")
     parser.add_argument("--config", default="config.toml")
     add_settings_arguments(parser, [
-        "model", "languages", "glossary", "max_tokens", "timeout",
-        "reasoning_effort", "correct_english",
+        "languages",
+        "model", "reasoning_effort", "correct_english", "max_tokens",
+        "timeout",
+        "glossary",
     ])
     args = parser.parse_args()
     asyncio.run(run(args, resolve(args, load_config(args.config))))

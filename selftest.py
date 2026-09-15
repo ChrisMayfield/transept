@@ -371,15 +371,15 @@ async def check_pipeline(checks):
     hub.subscribe("Kurdish")            # two real readers
     hub.subscribe("Spanish")
     checks.check("the languages with the most readers keep the slots",
-                 session.active_languages() == ["Spanish", "Kurdish"],
-                 session.active_languages())
+                 session.demand()[0] == ["Spanish", "Kurdish"],
+                 session.demand())
 
     # An operator override outranks reader counts, since it is the one
     # deliberate signal in the room.
     session.set_override("French", "on")
     checks.check("a language forced on keeps its slot regardless",
-                 "French" in session.active_languages(),
-                 session.active_languages())
+                 "French" in session.demand()[0],
+                 session.demand())
 
     checks.section("Translation failure falls back to English")
     translator = FakeTranslator(mode="fail")
@@ -671,12 +671,11 @@ def sse_preamble(port, channel, size=13, timeout=5.0):
 
 
 def drain(process):
-    """Collect the server's output in the background, returning the list.
+    """(lines, thread): collect the server's output in the background.
 
-    One reader has to own the stream. Calling readline here and
-    communicate later loses the lines in between: readline fills the
-    buffered reader from the pipe, communicate reads the raw descriptor,
-    and whatever is sitting in the buffer never reaches either caller.
+    One reader has to own the stream. readline here plus communicate later
+    loses the lines between them, since readline buffers from the pipe and
+    communicate reads the raw descriptor.
     """
     lines = []
     thread = threading.Thread(
@@ -689,9 +688,8 @@ def drain(process):
 def operator_address(lines, timeout=10.0):
     """The operator address once the banner prints it.
 
-    The token is minted per run, so the banner is the only place the
-    address holding it exists. Reading it here is also exactly what the
-    volunteer does, which is why the address is worth checking at all.
+    The token is minted per run, so the banner is the only place to get
+    it, and reading it here is what the volunteer does.
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -722,24 +720,18 @@ def check_authorization(checks):
                  not server.authorized(StubRequest("secret", query="wrong")))
 
     def refuses(query):
-        # A raise is a 500 on a route a stranger can reach, so the failure
-        # this reports has to be a refusal rather than an exception.
+        # Report a raise as a failed check, not as a crashed run.
         try:
             return not server.authorized(StubRequest("secret", query=query))
         except TypeError:
             return False
 
-    # This guards the encode in authorized, not the constant-time
-    # comparison: compare_digest given two str raises TypeError on anything
-    # outside ASCII, which a stranger can put in a query string and which
-    # would answer 500 rather than 403. Reverting to == also passes, since
-    # == was never the unsafe part.
+    # Guards the encode, not the constant-time comparison: reverting to ==
+    # also passes this, since == was never the unsafe part.
     checks.check("a token outside ASCII is refused rather than raising",
                  refuses("caf\u00e9"))
 
-    # The rule is worth only as much as the routes that apply it. Status
-    # names the audio device and the model and carries the raw error text
-    # and the last lines spoken, so it is not a reader's to read.
+    # The rule is worth only as much as the routes that apply it.
     session = make_session(["French"], True, [])[0]
     refused = asyncio.run(server.api_status(
         StubRequest("secret", session=session)))
@@ -747,9 +739,8 @@ def check_authorization(checks):
     checks.check("status without the token is refused",
                  refused.status == 403 and payload["ok"] is False,
                  f"{refused.status} {payload}")
-    # The operator page polls this every two seconds and reads ok and
-    # message off a refusal. Without the message it shows a blank page and
-    # never says the token is the problem.
+    # The page polls this every two seconds and reads ok and message off
+    # a refusal; without the message it shows a blank panel.
     checks.check("a refused status says why, for the page to show",
                  payload.get("message"), payload)
     allowed = asyncio.run(server.api_status(
@@ -769,7 +760,7 @@ def check_device_listing(checks):
     """
 
     class StubRequest:
-        """Authorized unless supplied is withheld; there is no open mode."""
+        """Authorized unless supplied is withheld; no tokenless mode."""
 
         def __init__(self, config, supplied="secret"):
             self.app = {"session": SimpleNamespace(config=config),
@@ -792,10 +783,9 @@ def check_device_listing(checks):
         return []
 
     async def ticks_while_listing(request):
-        """How many times the event loop got a turn during one listing.
+        """How many turns the event loop got during one listing.
 
-        Zero means api_devices ran the subprocess inline, which is how a
-        slow pactl freezes the caption fan-out to every phone in the room.
+        Zero means api_devices ran the subprocess inline.
         """
         counted = 0
 
@@ -826,9 +816,6 @@ def check_device_listing(checks):
                      payload["devices"] == [] and "pactl" in payload["error"],
                      payload)
 
-        # Listing devices runs a subprocess and names the sound hardware,
-        # so it sits behind the token like the rest of /api. A reader on
-        # the tunnel reaching it is an unauthenticated fork per request.
         server.capture.list_devices = listed
         locked = StubRequest(fake_config(), supplied=None)
         response = asyncio.run(server.api_devices(locked))
@@ -836,9 +823,8 @@ def check_device_listing(checks):
         checks.check("listing devices without the token is refused",
                      response.status == 403 and payload["devices"] == [],
                      f"{response.status} {payload}")
-        # The operator page destructures devices, configured and error out
-        # of this answer, so a refusal has to carry the same shape or the
-        # page throws on the missing list and shows nothing at all.
+        # The page destructures the list, so a refusal needs the same
+        # shape or it throws before it can show the message.
         checks.check("a refused listing still tells the operator page why",
                      "error" in payload, payload)
         opened = StubRequest(fake_config())
@@ -887,8 +873,7 @@ def check_server(checks):
                          False, "".join(lines))
             return
 
-        # Nothing reaches the operator routes without this, so it comes
-        # first and everything below depends on the banner being usable.
+        # Everything below needs this, so a bad banner fails here first.
         address = operator_address(lines)
         TOKEN = address.split("token=", 1)[-1] if "token=" in address else ""
         checks.check("the banner prints an operator address with a token",
@@ -915,9 +900,8 @@ def check_server(checks):
             checks.check(f"{path} answers 200 on the operator port",
                          status == 200, status)
 
-        # The split is the security boundary, so this is the check that
-        # matters: the port a tunnel points at must not carry a route that
-        # can change anything, whether or not a token comes with it.
+        # The split is the boundary: the tunnelled port must carry no
+        # route that can change anything, token or not.
         for path in ("/operator", "/api/status", "/api/devices",
                      "/api/start", "/api/stop", "/api/language", "/qr.svg"):
             status, _ = request(port, path, token=TOKEN)

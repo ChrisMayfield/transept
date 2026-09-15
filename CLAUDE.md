@@ -78,39 +78,36 @@ Task lifecycle is deliberately not shared, because the two really do differ.
 ### Translation is demand-driven
 
 Recognition runs continuously while a session is on, but a language is translated only while somebody is reading it.
-`Session.active_languages` decides from operator overrides plus `Hub.wanted`, which honors `grace` so a phone locking its screen does not shut a language off.
+`Session.demand` decides from operator overrides plus `Hub.wanted`, which honors `grace` so a phone locking its screen does not shut a language off.
 `Translator.translate` takes an explicit `outputs` list for exactly this reason, and an empty list means no model call at all, counted in `stats["skipped"]`.
 The `None` check in `translate` is explicit rather than a truthiness test, because an empty list silently expanding to every language would bill for what nobody is reading.
 
-Demand is unauthenticated, so `max_languages` caps how many run at once.
-One client opening every channel otherwise makes every sentence cost the whole language list, in tokens and in the latency that more output tokens adds for the people actually reading.
-`_demand` keeps what the operator forced on, then what has the most readers, so a stranger holding eight channels loses to the two languages somebody is really reading.
-A language the cap drops gets the English line, never a gap, the same as one whose translation failed.
-The default is 0, no cap, because showing English to a real reader is worse than the tokens a cap saves, and the operator who knows the room is the one who should decide.
+Demand is unauthenticated, so `max_languages` caps how many run at once: without it one client opening every channel makes every sentence pay for the whole list, in tokens and in the latency more output adds for real readers.
+`demand` keeps the languages the operator forced on, then the ones with the most readers, and returns the rest as capped.
+A capped language gets the English line rather than a gap, and the default is 0 because showing English to a real reader is worse than the tokens a cap saves.
 
 ### Web layer
 
-Two listeners, sharing one `Hub` and one `Session`.
+Two listeners share one `Hub` and one `Session`.
 `build_reader_app` serves `/`, `/stream/<channel>`, and `/api/channels` on the port a tunnel points at, and nothing on it can change anything.
 `build_operator_app` serves `/operator`, `/api/status`, `/api/devices`, `/api/start`, `/api/stop`, `/api/language`, and `/qr.svg` on `OPERATOR_HOST`, which is always `127.0.0.1`.
-A second listener rather than a check inside the handlers, because a check cannot tell the two audiences apart: the tunnel daemon runs on this machine and connects to the local port, so a public visitor and the operator at the keyboard both arrive from `127.0.0.1`.
-`serve` runs both under `AppRunner` because `web.run_app` serves one application.
+A check inside the handlers could not replace this, because the tunnel daemon connects from this machine, so a visitor from the public internet arrives from `127.0.0.1` exactly as the operator does.
+`serve` runs both under `AppRunner`, since `web.run_app` takes one application.
+
+Every operator route is behind `authorized`, including the two that only read: `/api/status` carries the device, the model, the raw exception text and the last lines spoken, and `/api/devices` names the sound hardware and forks a process per request.
+The token also stops a page in another tab of the operator's browser from posting a cross-origin form at the loopback port, which needs no CORS preflight and would otherwise reach `Session.start`.
+A refusal has to keep the shape the operator page destructures, `ok` and `message` for status and `devices` and `error` for the device list, or the page renders a blank panel instead of saying the token is wrong.
+
+Handlers share their event loop with the capture pipeline, so anything that blocks in one stalls the caption fan-out to every phone in the room.
+`api_devices` runs `pactl` under `asyncio.to_thread` for that reason, and a handler that shells out, touches the disk, or calls a third party belongs in a thread too.
+
+`max_listeners` bounds how many event streams the `Hub` holds, since nothing authenticates to open one and each costs a task, a queue, a socket, and a write on every published line.
+Past the cap `stream` answers 503 with a `Retry-After` before `prepare`, and `Hub.refused` reaches the operator page.
+A reader who leaves holds its slot until the next keepalive write fails, up to 15 seconds, which is why the default is generous rather than tight.
+
 Both pages in `static/` are single files with inline CSS and JavaScript, no build step and no framework.
 Server strings reach both pages, including exception text and device names, so they build nodes and set `textContent` rather than assembling `innerHTML`.
 The reader page keeps chosen language and text size in `localStorage` and holds a screen wake lock, which is why HTTPS matters.
-
-`max_listeners` bounds how many event streams the `Hub` holds at once, because nothing authenticates to open one and each costs a task, a queue, a socket, and a write on every published line.
-Past the cap `stream` answers 503 with a `Retry-After` before `prepare`, so a browser retries rather than holding a stream that never speaks, and `Hub.refused` reaches the operator page.
-A reader who leaves keeps its slot for up to the 15 second keepalive, since the handler only learns the phone is gone when its next write fails, which is why the default is 500 rather than something tight.
-
-Request handlers share one event loop with the capture pipeline, so anything that blocks in a handler stalls the caption fan-out to every phone in the room.
-`api_devices` runs `pactl` under `asyncio.to_thread` for that reason, and a handler that shells out, touches the disk, or calls a third party belongs in a thread too.
-Twenty concurrent listings ran inline once, and a request that took 0.9 ms on an idle server took 209 ms behind them.
-
-Every route on the operator app is behind `authorized`, including the two that only read.
-`/api/status` carries the device name, the model, the raw exception text, and the last lines spoken, and `/api/devices` names the sound hardware and forks a process per request.
-The token is the second layer rather than the only one, and it is what stops a page in any tab of the operator's browser from posting a cross-origin form at the loopback port.
-A refusal has to keep the shape the operator page destructures, which is `ok` and `message` for status and `devices` and `error` for the device list, or the page renders a blank panel instead of saying the token is wrong.
 
 ## Things that look wrong but are not
 
@@ -217,11 +214,9 @@ A manifest and service worker would add install friction and offline machinery t
 HTTPS is still required, because the screen wake lock needs a secure context, and a tunnel in front is the current answer.
 `public_url` exists because the bind address is not the address a phone can reach, and the QR endpoint renders that value rather than the listener.
 
-`operator_port` is a setting but the operator host is not, because the whole point of the second listener is that a tunnel cannot be pointed at it by mistake.
+`operator_port` is a setting; the operator host is not, because the point of the second listener is that a tunnel cannot be pointed at it by mistake.
 A headless machine wants an SSH forward rather than a wider bind.
 
-The operator token is minted every run and printed with the address, never configured.
-A settable one invites a weak token and a forgotten one, and it buys only a stable bookmark, which a volunteer reading the address off the terminal each week does not need.
-There is no tokenless mode, and `authorized` has no branch that grants access without one.
-Loopback is not a substitute: a page open in any tab of the operator's browser can post a cross-origin form to `127.0.0.1` with no CORS preflight, and against a tokenless server that request reaches `Session.start` and `Session.stop`.
-The token does still travel in the query string on the first load, which puts it in browser history, and stripping it from the address bar is not a client-side fix while `/operator` itself is gated on it.
+The operator token is minted every run and printed with the address, never configured, and there is no tokenless mode.
+A settable token invites a weak or forgotten one and buys only a stable bookmark, which a volunteer reading the address off the terminal does not need.
+It still travels in the query string on that first load, so it reaches browser history, and stripping it from the address bar is not a client-side fix while `/operator` itself is gated on it.

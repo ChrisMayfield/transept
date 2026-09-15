@@ -50,30 +50,38 @@ from capture import CHANNELS, SAMPLE_RATE
 
 # Every setting, in one place: attribute, config.toml section and key, type,
 # and built-in default. Precedence is command line, then config.toml, then
-# the default here. Adding a setting means adding one row.
+# the default here. Adding a setting means adding one row. The order here
+# follows config.example.toml, so the two can be read side by side.
 SETTINGS = [
+    ("capture", "audio", "backend", str, "auto"),
     ("device", "audio", "device", str, None),
     ("endpointing", "audio", "endpointing", int, 400),
-    ("capture", "audio", "backend", str, "auto"),
-    ("asr_model", "recognition", "model", str, "nova-3"),
-    ("ceiling", "segmentation", "ceiling", float, 4.0),
-    ("gap", "segmentation", "gap", float, 0.6),
+
+    ("languages", "languages", "available", list, ["French", "Swahili"]),
+    ("grace", "languages", "grace", float, 90.0),
+    ("max_languages", "languages", "max_active", int, 0),
+
     ("model", "translation", "model", str, None),
     ("reasoning_effort", "translation", "reasoning_effort", str, None),
     ("correct_english", "translation", "correct_english", bool, False),
     ("max_tokens", "translation", "max_tokens", int, 2000),
     ("timeout", "translation", "timeout", float, 15.0),
     ("hold", "translation", "hold", float, 8.0),
-    ("languages", "languages", "available", list, ["French", "Swahili"]),
-    ("grace", "languages", "grace", float, 90.0),
-    ("max_languages", "languages", "max_active", int, 0),
+
+    ("ceiling", "segmentation", "ceiling", float, 4.0),
+    ("gap", "segmentation", "gap", float, 0.6),
+
     ("idle_stop", "session", "idle_stop_minutes", float, 10.0),
     # Off by default. Recording a meeting is a decision a congregation makes,
     # not something that should happen because nobody set anything.
     ("record", "session", "record", bool, False),
     ("database", "session", "database", str, "sessions.db"),
+
+    ("asr_model", "recognition", "model", str, "nova-3"),
+
     ("glossary", "files", "glossary", str, "glossary.txt"),
     ("keyterms", "files", "keyterms", str, "keyterms.txt"),
+
     # Loopback by default: opening a service to a shared network should be
     # a deliberate edit, not what happens when nobody sets anything.
     ("host", "server", "host", str, "127.0.0.1"),
@@ -436,28 +444,28 @@ def build_asr_url(settings, keyterms):
 
 
 ARGUMENT_HELP = {
-    "device": "audio input device name; see --list-devices",
     "capture": "auto, sounddevice, or parec",
-    "model": "translation model, e.g. gemini-3.8-flash",
-    "languages": "comma separated language names",
-    "glossary": "file of names and terms for the translation model",
-    "keyterms": "file of terms to bias speech recognition toward",
-    "ceiling": "seconds to hold fragments before forcing a sentence",
-    "gap": "seconds of silence that closes the buffered sentence",
-    "hold": "seconds to wait for a translation before showing English",
-    "grace": "seconds a language runs on after its last reader leaves",
-    "idle_stop": "minutes of silence before the session stops itself; "
-                 "0 disables",
-    "asr_model": "Deepgram model name",
+    "device": "audio input device name; see --list-devices",
     "endpointing": "milliseconds of silence that ends an utterance",
-    "max_tokens": "raise if responses truncate; thinking counts against this",
-    "timeout": "seconds before a translation request is abandoned",
+    "languages": "comma separated language names",
+    "grace": "seconds a language runs on after its last reader leaves",
+    "max_languages": "most languages to translate at once, 0 for no cap",
+    "model": "translation model, e.g. gemini-3.8-flash",
     "reasoning_effort": "low is usually right; translation needs no thinking",
     "correct_english": "fix recognition errors on the English channel using "
                        "the glossary",
+    "max_tokens": "raise if responses truncate; thinking counts against this",
+    "timeout": "seconds before a translation request is abandoned",
+    "hold": "seconds to wait for a translation before showing English",
+    "ceiling": "seconds to hold fragments before forcing a sentence",
+    "gap": "seconds of silence that closes the buffered sentence",
+    "idle_stop": "minutes of silence before the session stops itself; "
+                 "0 disables",
     "record": "keep a transcript of the session; see record.py",
     "database": "where a recorded session is kept",
-    "max_languages": "most languages to translate at once, 0 for no cap",
+    "asr_model": "Deepgram model name",
+    "glossary": "file of names and terms for the translation model",
+    "keyterms": "file of terms to bias speech recognition toward",
     "host": "address to bind",
     "port": "port to bind, the one a tunnel points at",
     "operator_port": "port for the operator controls, always loopback",
@@ -781,9 +789,13 @@ def main():
     parser.add_argument("--no-color", action="store_true")
     parser.add_argument("--config", default="config.toml")
     add_settings_arguments(parser, [
-        "device", "capture", "model", "languages", "glossary", "keyterms",
-        "ceiling", "gap", "hold", "asr_model", "endpointing", "max_tokens",
-        "timeout", "reasoning_effort", "correct_english",
+        "capture", "device", "endpointing",
+        "languages",
+        "model", "reasoning_effort", "correct_english", "max_tokens",
+        "timeout", "hold",
+        "ceiling", "gap",
+        "asr_model",
+        "glossary", "keyterms",
     ])
     args = parser.parse_args()
 

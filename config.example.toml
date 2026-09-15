@@ -22,15 +22,11 @@ available = ["French", "Swahili", "Spanish"]
 # Seconds a language keeps running after its last reader leaves, so a phone
 # locking its screen does not restart it.
 grace = 90
-
-# Most languages to translate at once, 0 for no cap. Demand decides which
-# languages run, and nobody has to authenticate to create demand: one
-# client opening every channel makes every sentence cost the whole list,
-# in tokens and in the latency more output adds for everyone. With a cap,
-# the languages an operator forced on come first, then the ones with the
-# most readers, and the rest show English until a slot frees. Leave it 0
-# unless you have a reason: showing English to a real reader is worse
-# than the tokens it saves.
+# Most languages to translate at once, 0 for no cap. Nobody authenticates
+# to open a channel, so without a cap one client can make every sentence
+# pay for the whole list. Languages over the cap show English instead,
+# which is why the default is off: that is worse for a real reader than
+# the tokens it saves.
 max_active = 0
 
 [translation]
@@ -82,7 +78,7 @@ keyterms = "keyterms.txt"
 [server]
 # Loopback only, which is the right default when a tunnel is in front:
 # readers reach the tunnel's HTTPS address, and the operator uses
-# http://127.0.0.1:8080/operator, which browsers treat as a secure context
+# http://127.0.0.1:8081/operator, which browsers treat as a secure context
 # so no certificate is needed on this machine.
 #
 # Change to "0.0.0.0" to let phones on the same wifi connect directly.
@@ -91,18 +87,14 @@ keyterms = "keyterms.txt"
 host = "127.0.0.1"
 port = 8080
 
-# The operator controls live on a second listener, always on 127.0.0.1,
-# so that pointing a tunnel at the port above cannot expose them. Nothing
-# reaches the controls from the network: the volunteer uses this machine,
-# and a headless box wants an SSH forward rather than a wider bind.
+# The operator controls listen separately, always on 127.0.0.1, so that
+# pointing a tunnel at the port above cannot expose them. A headless
+# machine wants an SSH forward rather than a wider bind here.
 operator_port = 8081
 
-# Most event streams to hold at once, 0 for no cap. Every reader costs a
-# task, a queue and a socket, and each line is written to all of them, so
-# an unbounded count lets one client slow the fan-out for the whole room.
-# 500 is far more phones than a room holds and costs about 6 MB; the
-# refused get a 503 and their browsers retry. Raise it if you really have
-# that many readers, since a phone turned away sees no captions at all.
+# Most event streams to hold at once, 0 for no cap. Nothing authenticates
+# to open one, and 500 is far more phones than a room holds. Anyone past
+# the cap gets a 503 and their browser retries.
 max_listeners = 500
 
 # The address readers actually use, which is your tunnel's hostname, not the
