@@ -452,12 +452,14 @@ def _fallbacks(page, grouped):
     if not counts:
         page.write("Every requested translation arrived.\n\n")
         return
-    page.write("| language | timed out | failed | model dropped it |\n")
-    page.write("|---|---|---|---|\n")
+    page.write("| language | timed out | failed | model dropped it "
+               "| over the cap |\n")
+    page.write("|---|---|---|---|---|\n")
     for language, by_source in sorted(counts.items()):
         page.write(f"| {language} | {by_source.get('timeout', 0)} "
                    f"| {by_source.get('failure', 0)} "
-                   f"| {by_source.get('empty', 0)} |\n")
+                   f"| {by_source.get('empty', 0)} "
+                   f"| {by_source.get('capped', 0)} |\n")
     page.write("\n")
 
 

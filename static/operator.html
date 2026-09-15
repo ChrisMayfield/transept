@@ -93,6 +93,7 @@
   .lang .live { width: .5rem; height: .5rem; border-radius: 50%;
                 background: var(--rule); flex: none; }
   .lang .live.on { background: var(--live); }
+  .lang .live.capped { background: var(--warm); }
   .modes { display: flex; }
   .modes button {
     flex: none; padding: .35rem .6rem; font-size: .82rem; font-weight: 500;
@@ -309,8 +310,10 @@ function renderLanguages(languages) {
     row.className = "lang";
 
     const live = document.createElement("span");
-    live.className = "live" + (language.active ? " on" : "");
-    live.title = language.active ? "Translating" : "Idle";
+    live.className = "live" + (language.active ? " on" : "")
+      + (language.capped ? " capped" : "");
+    live.title = language.active ? "Translating"
+      : language.capped ? "Over the language cap, showing English" : "Idle";
 
     const name = document.createElement("span");
     name.className = "name";
@@ -318,8 +321,9 @@ function renderLanguages(languages) {
 
     const who = document.createElement("span");
     who.className = "who";
-    who.textContent = language.listeners === 1
-      ? "1 reading" : language.listeners + " reading";
+    who.textContent = (language.listeners === 1
+      ? "1 reading" : language.listeners + " reading")
+      + (language.capped ? ", English only" : "");
 
     const modes = document.createElement("div");
     modes.className = "modes";

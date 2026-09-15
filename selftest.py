@@ -203,6 +203,7 @@ def fake_config(**overrides):
         "endpointing": 400, "keyterms": ["Kalema"], "glossary": "",
         "model": "fake-model", "max_tokens": 2000, "timeout": 15.0,
         "reasoning_effort": "low", "idle_stop": 0, "public_url": "",
+        "max_languages": 0,
         "deepgram_key": "fake", "llm_key": "fake",
         "llm_base": "http://invalid/v1",
     }
@@ -210,11 +211,12 @@ def fake_config(**overrides):
     return config
 
 
-def make_session(languages, correct_english, readers):
+def make_session(languages, correct_english, readers, **overrides):
     """A Session and its Hub, with the named channels already subscribed."""
     hub = server.Hub(languages)
     session = server.Session(
-        fake_config(languages=languages, correct_english=correct_english), hub)
+        fake_config(languages=languages, correct_english=correct_english,
+                    **overrides), hub)
     for channel in readers:
         hub.subscribe(channel)
     return session, hub
@@ -318,6 +320,50 @@ async def check_pipeline(checks):
     checks.check("English is still published for whoever arrives later",
                  len(hub.buffers["English"]) == 3,
                  list(hub.buffers["English"]))
+
+    checks.section("The language cap")
+    everything = ["French", "Swahili", "Spanish", "Kurdish"]
+    translator = FakeTranslator()
+    # One client holding every channel, which needs no authentication and
+    # is what the cap exists for.
+    session, hub = make_session(everything, False, everything,
+                                max_languages=2)
+    session.translator = translator
+    await drive(session, translator)
+    checks.check("only the capped number of languages was ever requested",
+                 all(len(call["outputs"]) <= 2
+                     for call in translator.calls),
+                 [call["outputs"] for call in translator.calls])
+    checks.check("the languages over the cap still show English, not a gap",
+                 all([entry["text"] for entry in hub.buffers[name]]
+                     == SENTENCES for name in everything[2:]),
+                 {name: list(hub.buffers[name]) for name in everything[2:]})
+    checks.check("the cap is counted, so the operator can see it bite",
+                 session.stats["capped"] == 3 * 2, session.stats)
+    report = {row["name"]: row for row in session.language_report()}
+    checks.check("the report marks which languages the cap dropped",
+                 [name for name in everything if report[name]["capped"]]
+                 == everything[2:], report)
+
+    # A reader beats a stranger: the two languages with the most readers
+    # win the slots, whatever order the language list is in.
+    hub = server.Hub(everything)
+    session = server.Session(
+        fake_config(languages=everything, max_languages=2), hub)
+    for channel in everything:
+        hub.subscribe(channel)          # the stranger, on all four
+    hub.subscribe("Kurdish")            # two real readers
+    hub.subscribe("Spanish")
+    checks.check("the languages with the most readers keep the slots",
+                 session.active_languages() == ["Spanish", "Kurdish"],
+                 session.active_languages())
+
+    # An operator override outranks reader counts, since it is the one
+    # deliberate signal in the room.
+    session.set_override("French", "on")
+    checks.check("a language forced on keeps its slot regardless",
+                 "French" in session.active_languages(),
+                 session.active_languages())
 
     checks.section("Translation failure falls back to English")
     translator = FakeTranslator(mode="fail")

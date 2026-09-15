@@ -66,6 +66,7 @@ SETTINGS = [
     ("hold", "translation", "hold", float, 8.0),
     ("languages", "languages", "available", list, ["French", "Swahili"]),
     ("grace", "languages", "grace", float, 90.0),
+    ("max_languages", "languages", "max_active", int, 0),
     ("idle_stop", "session", "idle_stop_minutes", float, 10.0),
     # Off by default. Recording a meeting is a decision a congregation makes,
     # not something that should happen because nobody set anything.
@@ -455,6 +456,7 @@ ARGUMENT_HELP = {
                        "the glossary",
     "record": "keep a transcript of the session; see record.py",
     "database": "where a recorded session is kept",
+    "max_languages": "most languages to translate at once, 0 for no cap",
     "host": "address to bind",
     "port": "port to bind, the one a tunnel points at",
     "operator_port": "port for the operator controls, always loopback",

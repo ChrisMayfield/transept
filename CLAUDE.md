@@ -82,6 +82,12 @@ Recognition runs continuously while a session is on, but a language is translate
 `Translator.translate` takes an explicit `outputs` list for exactly this reason, and an empty list means no model call at all, counted in `stats["skipped"]`.
 The `None` check in `translate` is explicit rather than a truthiness test, because an empty list silently expanding to every language would bill for what nobody is reading.
 
+Demand is unauthenticated, so `max_languages` caps how many run at once.
+One client opening every channel otherwise makes every sentence cost the whole language list, in tokens and in the latency that more output tokens adds for the people actually reading.
+`_demand` keeps what the operator forced on, then what has the most readers, so a stranger holding eight channels loses to the two languages somebody is really reading.
+A language the cap drops gets the English line, never a gap, the same as one whose translation failed.
+The default is 0, no cap, because showing English to a real reader is worse than the tokens a cap saves, and the operator who knows the room is the one who should decide.
+
 ### Web layer
 
 Two listeners, sharing one `Hub` and one `Session`.

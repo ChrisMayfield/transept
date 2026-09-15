@@ -23,6 +23,16 @@ available = ["French", "Swahili", "Spanish"]
 # locking its screen does not restart it.
 grace = 90
 
+# Most languages to translate at once, 0 for no cap. Demand decides which
+# languages run, and nobody has to authenticate to create demand: one
+# client opening every channel makes every sentence cost the whole list,
+# in tokens and in the latency more output adds for everyone. With a cap,
+# the languages an operator forced on come first, then the ones with the
+# most readers, and the rest show English until a slot frees. Leave it 0
+# unless you have a reason: showing English to a real reader is worse
+# than the tokens it saves.
+max_active = 0
+
 [translation]
 model = "gemini-3.8-flash"
 # Translation does not benefit from deliberation. On models that think by

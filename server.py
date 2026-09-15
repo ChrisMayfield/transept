@@ -154,7 +154,7 @@ class Session:
         self.run_started = None
         self.stats = {"units": 0, "translated": 0, "failures": 0,
                       "timeouts": 0, "reconnects": 0, "corrections": 0,
-                      "skipped": 0, "latencies": []}
+                      "skipped": 0, "capped": 0, "latencies": []}
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -170,7 +170,7 @@ class Session:
         self.error = None
         self.stats = {"units": 0, "translated": 0, "failures": 0,
                       "timeouts": 0, "reconnects": 0, "corrections": 0,
-                      "skipped": 0, "latencies": []}
+                      "skipped": 0, "capped": 0, "latencies": []}
         self.hub.clear()
         self.last_seq = 0
         self.run = 0
@@ -262,17 +262,41 @@ class Session:
             self.error = f"Recording stopped: {type(exc).__name__}: {exc}"
             self.recorder = None
 
-    def active_languages(self):
-        """Languages worth spending tokens on right now."""
+    def _demand(self):
+        """(translated, capped): languages wanted, split by max_languages.
+
+        Demand is unauthenticated. One client can open every channel and
+        make every sentence cost the whole language list, in tokens and in
+        the latency that more output tokens adds for the people actually
+        reading. The cap keeps what the operator forced on, then what has
+        the most readers, so a stranger holding eight channels loses to
+        the two languages somebody is really reading.
+        """
         grace = self.config["grace"]
-        active = []
+        wanted = []
         for language in self.config["languages"]:
             override = self.overrides.get(language)
             if override == "off":
                 continue
             if override == "on" or self.hub.wanted(language, grace):
-                active.append(language)
-        return active
+                wanted.append(language)
+        cap = self.config.get("max_languages") or 0
+        if cap <= 0 or len(wanted) <= cap:
+            return wanted, []
+        order = self.config["languages"]
+        ranked = sorted(wanted, key=lambda name: (
+            self.overrides.get(name) != "on",
+            -len(self.hub.subscribers[name]),
+            order.index(name)))
+        keep = set(ranked[:cap])
+        # Both lists come back in configured order, which is the order the
+        # prompt names them in and the order the operator page shows.
+        return ([name for name in wanted if name in keep],
+                [name for name in wanted if name not in keep])
+
+    def active_languages(self):
+        """Languages worth spending tokens on right now."""
+        return self._demand()[0]
 
     def set_override(self, language, mode):
         if language not in self.config["languages"]:
@@ -286,12 +310,14 @@ class Session:
         return True, f"{language} set to {mode}."
 
     def language_report(self):
-        active = set(self.active_languages())
+        translated, capped = self._demand()
+        translated, capped = set(translated), set(capped)
         return [{
             "name": language,
             "listeners": len(self.hub.subscribers[language]),
             "override": self.overrides.get(language, "auto"),
-            "active": language in active,
+            "active": language in translated,
+            "capped": language in capped,
         } for language in self.config["languages"]]
 
     async def _watch_idle(self):
@@ -339,6 +365,8 @@ class Session:
                           if self.last_activity and self.state != "stopped"
                           else 0),
             "skipped": self.stats["skipped"],
+            "capped": self.stats["capped"],
+            "max_languages": self.config.get("max_languages") or 0,
             # On the page, not just in a config file somebody edited six
             # weeks ago. The operator is the person who has to tell the room
             # a transcript is being kept.
@@ -441,7 +469,7 @@ class Session:
         # The raw transcript goes out immediately either way.
         self.hub.publish("English", unit.seq, unit.text)
 
-        languages = self.active_languages()
+        languages, capped = self._demand()
         # Recording asks for the English correction whether or not anybody
         # is reading that channel. Without it, a Sunday where everyone reads
         # French stores no corrected line to compare against, and the two
@@ -478,6 +506,14 @@ class Session:
                 # none of translated, timed_out or failed ever runs.
                 outcome="skipped" if not outputs else "pending",
                 requested=list(outputs))
+        for language in capped:
+            # A language the cap dropped still gets the English line, the
+            # same as one whose translation failed. A gap is worse: a
+            # reader who cannot hear the room cannot tell it from silence.
+            self.stats["capped"] += 1
+            self.hub.publish(language, unit.seq, unit.text)
+            self._record("translation", seq=unit.seq, language=language,
+                         text=unit.text, source="capped")
         return outputs
 
     def translated(self, unit, languages, translations, elapsed):
