@@ -59,13 +59,13 @@ cp .env.example .env                # the two API keys
 cp config.example.toml config.toml  # everything else
 ```
 
-Then find your audio source:
+Then see what audio sources this machine offers:
 
 ```sh
 python3 server.py --list-devices
 ```
 
-Put the name in `config.toml` under `[audio]`, where a partial name is enough.
+The source is not configured: the operator picks it on the operator page before each meeting, because the name changes with a reboot or a replugged cable.
 Note that anything marked as playback captures what the computer is playing rather than what the microphone hears.
 
 ## Before your first meeting
@@ -123,6 +123,7 @@ Two addresses are printed, on two different ports.
 The operator opens the `/operator` one on the laptop, picks the audio source, and presses Start.
 That port is bound to this machine only, so the controls cannot be reached from the network or through your tunnel.
 Its address carries a token minted for that run, so copy it from the terminal each week rather than saving a bookmark.
+Setting `OPERATOR_TOKEN` in `.env` pins it instead, which saves clicking a fresh link on every restart while developing; leave it unset for a meeting, so a link that leaks expires when the server does.
 Everyone else opens `/` on their phone and picks a language.
 
 The language list is fixed when the server starts, which keeps the reader URLs stable so a printed card or a saved bookmark keeps working week to week.

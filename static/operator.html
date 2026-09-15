@@ -44,6 +44,11 @@
     border: 1px solid var(--ink); border-radius: 3px; cursor: pointer;
     background: var(--ink); color: var(--paper);
   }
+  /* Colour only while the button will do something. A red Stop on a
+     stopped session reads as an alarm rather than as a control. */
+  #start:enabled { background: var(--live); border-color: var(--live); }
+  #stop:enabled { background: var(--halt); border-color: var(--halt);
+                  color: var(--paper); }
   button.secondary { background: transparent; color: var(--ink); }
   button:disabled { opacity: .35; cursor: default; }
   button:focus-visible { outline: 3px solid var(--live); outline-offset: 2px; }
@@ -63,18 +68,23 @@
     background: #fff; color: var(--halt); font-size: .9rem;
   }
 
+  /* Each label and its number share one cell. Left to flow as sixteen
+     separate grid items, a row of three wraps a number away from the
+     label it belongs to. */
   dl { display: grid; grid-template-columns: repeat(3, 1fr);
        gap: 1rem .75rem; margin: 1.5rem 0 0;
        padding-top: 1.25rem; border-top: 1px solid var(--rule); }
+  dl > div { min-width: 0; }
   dt { font-size: .78rem; color: var(--quiet); }
   dd { margin: .15rem 0 0; font-size: 1.3rem; font-variant-numeric: tabular-nums; }
+  @media (max-width: 26rem) { dl { grid-template-columns: repeat(2, 1fr); } }
 
   .share { display: none; gap: 1.25rem; align-items: center;
            margin-top: 1.5rem; padding-top: 1.25rem;
            border-top: 1px solid var(--rule); }
-  .share img { width: 8rem; height: 8rem; flex: none;
-               border: 1px solid var(--rule); border-radius: 3px;
-               background: #fff; }
+  .share button { flex: none; padding: 0; border: 1px solid var(--rule);
+                  border-radius: 3px; background: #fff; line-height: 0; }
+  .share img { width: 8rem; height: 8rem; display: block; }
   .share div { min-width: 0; }
   .share h2 { font-size: .85rem; font-weight: 600; color: var(--quiet);
               margin: 0 0 .35rem; }
@@ -107,6 +117,14 @@
     position: relative; z-index: 1;
   }
 
+  /* Held up to a room, so it wants the screen rather than a corner of it. */
+  dialog { border: 1px solid var(--rule); border-radius: 4px; padding: 1rem;
+           background: #fff; max-width: 90vw; }
+  dialog::backdrop { background: rgba(22, 24, 29, .75); }
+  dialog img { display: block; width: min(80vh, 80vw); height: auto; }
+  dialog p { margin: .75rem 0 0; font-size: .85rem; color: var(--quiet);
+             text-align: center; overflow-wrap: anywhere; }
+
   .feed { margin-top: 1.75rem; padding-top: 1.25rem;
           border-top: 1px solid var(--rule); }
   .feed p { margin: 0 0 .5rem; color: var(--quiet); font-size: .92rem; }
@@ -138,25 +156,32 @@
 </div>
 
 <dl>
-  <dt>Sentences</dt><dd id="units">0</dd>
-  <dt>Listening</dt><dd id="listeners">0</dd>
-  <dt>Translation</dt><dd id="median">&ndash;</dd>
-  <dt>Fell back</dt><dd id="failures">0</dd>
-  <dt>Too slow</dt><dd id="timeouts">0</dd>
-  <dt>Reconnects</dt><dd id="reconnects">0</dd>
-  <dt>Untranslated</dt><dd id="skipped">0</dd>
-  <dt>Corrected</dt><dd id="corrections">0</dd>
+  <div><dt>Sentences</dt><dd id="units">0</dd></div>
+  <div><dt>Listening</dt><dd id="listeners">0</dd></div>
+  <div><dt>Translation</dt><dd id="median">&ndash;</dd></div>
+  <div><dt>Fell back</dt><dd id="failures">0</dd></div>
+  <div><dt>Too slow</dt><dd id="timeouts">0</dd></div>
+  <div><dt>Reconnects</dt><dd id="reconnects">0</dd></div>
+  <div><dt>Untranslated</dt><dd id="skipped">0</dd></div>
+  <div><dt>Corrected</dt><dd id="corrections">0</dd></div>
 </dl>
 
 <div class="share" id="share">
-  <img id="qr" alt="QR code for the reader address">
+  <button id="qrOpen" title="Show a larger code">
+    <img id="qr" alt="QR code for the reader address">
+  </button>
   <div>
     <h2>Where people read</h2>
     <a id="publicUrl" href="#"></a>
-    <p class="note">Point a camera at the code, or share the link. Print it
-      once and it keeps working.</p>
+    <p class="note">Point a camera at the code, or share the link. Tap the
+      code to enlarge it for the room.</p>
   </div>
 </div>
+
+<dialog id="qrLarge">
+  <img id="qrBig" alt="QR code for the reader address">
+  <p id="qrCaption"></p>
+</dialog>
 
 <div class="langs">
   <h2>Languages</h2>
@@ -198,11 +223,15 @@ function showAlert(message) {
 }
 
 async function loadDevices() {
-  const { devices, configured, error } = await api("/api/devices");
+  const { devices, suggested, error } = await api("/api/devices");
   if (error) { showAlert("Could not list audio sources. " + error); return; }
   const select = el("device");
   select.innerHTML = "";
-  for (const device of devices) {
+  // By name, because the order a backend lists its inputs in is the order
+  // the kernel found them, which is nothing a person can scan down.
+  const sorted = devices.slice().sort(
+    (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  for (const device of sorted) {
     const option = document.createElement("option");
     option.value = device.name;
     const marks = [];
@@ -210,22 +239,15 @@ async function loadDevices() {
     if (device.monitor) marks.push("playback");
     if (device.detail) marks.push(device.detail);
     option.textContent = device.name + (marks.length ? "  (" + marks.join(", ") + ")" : "");
-    // The configured source wins over whatever the backend calls default.
-    // parec marks no device as default, so without this nothing is selected
-    // and the browser shows the first option, which on a PulseAudio machine
-    // is the playback monitor rather than the microphone.
-    if (configured ? device.name === configured : device.default) {
-      option.selected = true;
-    }
+    // The server decides which to pre-select, because sorting has thrown
+    // away the order it would take to work that out here.
+    if (device.name === suggested) option.selected = true;
     select.appendChild(option);
   }
-  const missing = configured && !devices.some((d) => d.name === configured);
   // The note, not showAlert: poll() rewrites the alert every two seconds
   // from the session error, so a warning put there disappears on its own.
   el("deviceNote").textContent =
-    (missing ? "The configured source " + configured + " is not listed, "
-             + "so the selection below is a guess. " : "")
-    + "Sources marked playback capture what this computer plays, "
+    "Sources marked playback capture what this computer plays, "
     + "not what the microphone hears.";
 }
 
@@ -279,12 +301,17 @@ function render(status) {
   el("listeners").textContent = status.refused
     ? `${reading} (${status.refused} turned away)` : reading;
 
-  el("start").disabled = ["running", "starting"].includes(status.state);
+  // The same rule Session.start enforces. Reconnecting also means a
+  // supervisor task is alive, so a green Start there offers the operator
+  // a button whose only possible answer is "Already running."
+  el("start").disabled = status.state !== "stopped";
   el("stop").disabled = status.state === "stopped";
 
   // The QR is fetched once. Its contents do not change between polls.
   if (status.public_url && !el("qr").src) {
     el("qr").src = "/qr.svg";
+    el("qrBig").src = "/qr.svg";
+    el("qrCaption").textContent = status.public_url;
     el("publicUrl").textContent = status.public_url;
     el("publicUrl").href = status.public_url;
     el("share").style.display = "flex";
@@ -346,6 +373,13 @@ function renderLanguages(languages) {
     host.appendChild(row);
   }
 }
+
+el("qrOpen").onclick = () => el("qrLarge").showModal();
+// A dialog this size is mostly backdrop, and a click there is how anyone
+// expects to dismiss it. Escape already works on its own.
+el("qrLarge").onclick = (event) => {
+  if (event.target === el("qrLarge")) el("qrLarge").close();
+};
 
 el("start").onclick = async () => {
   el("start").disabled = true;

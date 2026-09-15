@@ -11,10 +11,13 @@ check a microphone feed, tune segmentation, or measure translation latency,
 because a terminal is a better place to see what is happening than a browser.
 
 Usage:
-    python3 pipeline.py --device <source> --model gemini-3.8-flash
+    python3 pipeline.py --model gemini-3.8-flash
     python3 pipeline.py --device <source> --model gemini-3.8-flash \\
         --languages "French,Congolese Swahili" \\
         --keyterms keyterms.txt --glossary glossary.txt --correct-english
+
+Without --device it opens whatever the backend calls the default input, so
+run --list-devices first if the wrong thing ends up being captured.
 
 Output format:
     A dim line starting with a middle dot is a raw recognition fragment,
@@ -54,7 +57,6 @@ from capture import CHANNELS, SAMPLE_RATE
 # follows config.example.toml, so the two can be read side by side.
 SETTINGS = [
     ("capture", "audio", "backend", str, "auto"),
-    ("device", "audio", "device", str, None),
     ("endpointing", "audio", "endpointing", int, 400),
 
     ("languages", "languages", "available", list, ["French", "Swahili"]),
@@ -445,7 +447,6 @@ def build_asr_url(settings, keyterms):
 
 ARGUMENT_HELP = {
     "capture": "auto, sounddevice, or parec",
-    "device": "audio input device name; see --list-devices",
     "endpointing": "milliseconds of silence that ends an utterance",
     "languages": "comma separated language names",
     "grace": "seconds a language runs on after its last reader leaves",
@@ -725,8 +726,10 @@ async def run(args, settings):
     queue = asyncio.Queue()
 
     try:
-        source = await capture.open_capture(settings["device"],
-                                            settings["capture"])
+        # No --device means the default input, so the usual check of the
+        # audio path is one command with nothing to look up first.
+        device = args.device or capture.default_device(settings["capture"])
+        source = await capture.open_capture(device, settings["capture"])
     except capture.CaptureError as exc:
         sys.exit(str(exc))
 
@@ -735,7 +738,7 @@ async def run(args, settings):
 
     describe = (", ".join(translator.languages) if translator
                 else "transcription only")
-    print(f"Listening on {settings['device']}. {describe}. Ctrl-C to stop.",
+    print(f"Listening on {device}. {describe}. Ctrl-C to stop.",
           file=sys.stderr)
     started = time.monotonic()
     sink = TerminalSink(translator.outputs if translator else [], started,
@@ -788,8 +791,12 @@ def main():
                         help="transcribe only, no translation model needed")
     parser.add_argument("--no-color", action="store_true")
     parser.add_argument("--config", default="config.toml")
+    # Not a setting: the source changes with every reboot, so a name kept
+    # in config.toml would be stale more often than it was right.
+    parser.add_argument("--device",
+                        help="audio input device name; see --list-devices")
     add_settings_arguments(parser, [
-        "capture", "device", "endpointing",
+        "capture", "endpointing",
         "languages",
         "model", "reasoning_effort", "correct_english", "max_tokens",
         "timeout", "hold",
@@ -804,9 +811,6 @@ def main():
         return
 
     settings = resolve(args, load_config(args.config))
-    if not settings["device"]:
-        sys.exit("No audio source. Set audio.device in config.toml, pass "
-                 "--device, or run --list-devices to see the options.")
     asyncio.run(run(args, settings))
 
 

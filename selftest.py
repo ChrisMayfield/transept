@@ -199,7 +199,7 @@ def fake_config(**overrides):
     config = {
         "languages": ["French", "Swahili"], "grace": 90.0,
         "correct_english": True, "ceiling": 4.0, "gap": 0.6, "hold": 8.0,
-        "device": "fake", "capture": "auto", "asr_model": "nova-3",
+        "capture": "auto", "asr_model": "nova-3",
         "endpointing": 400, "keyterms": ["Kalema"], "glossary": "",
         "model": "fake-model", "max_tokens": 2000, "timeout": 15.0,
         "reasoning_effort": "low", "idle_stop": 0, "public_url": "",
@@ -320,6 +320,26 @@ async def check_pipeline(checks):
     checks.check("English is still published for whoever arrives later",
                  len(hub.buffers["English"]) == 3,
                  list(hub.buffers["English"]))
+
+    checks.section("Grace, and leaving on purpose")
+    hub = server.Hub(["French", "Swahili"])
+    first = hub.subscribe("French", "phone")
+    checks.check("a channel with a reader on it is wanted",
+                 hub.wanted("French", 90))
+    # The switch: the same phone opens another channel.
+    hub.subscribe("Swahili", "phone")
+    checks.check("switching language wakes the stream being left",
+                 first.qsize() == 1 and first.get_nowait() is server.LEAVING)
+    hub.unsubscribe("French", first, "phone", dropped=False)
+    checks.check("the language left behind stops with no grace period",
+                 not hub.wanted("French", 90), hub.last_seen["French"])
+    checks.check("the language moved to is wanted", hub.wanted("Swahili", 90))
+    # The drop: a phone whose screen locked, which grace exists for.
+    gone = hub.subscribe("French", "other")
+    hub.unsubscribe("French", gone, "other", dropped=True)
+    checks.check("a reader who was cut off still gets the grace period",
+                 hub.wanted("French", 90), hub.last_seen["French"])
+    checks.check("grace runs out", not hub.wanted("French", 0))
 
     checks.section("The listener cap")
     hub = server.Hub(["French"], max_listeners=2)
@@ -752,11 +772,12 @@ def check_authorization(checks):
 
 
 def check_device_listing(checks):
-    """The device list names the configured source, so the page selects it.
+    """The device list names one source to pre-select, so the page can.
 
-    parec marks no device as default, so without this the operator page has
-    nothing to pre-select and the browser falls to the first option, which
-    on a PulseAudio machine is the playback monitor.
+    parec marks no device as default, and the page sorts by name and so has
+    lost the backend's order. Without a suggestion from here the browser
+    falls to the first option, which on a PulseAudio machine is the
+    playback monitor rather than the microphone.
     """
 
     class StubRequest:
@@ -808,8 +829,8 @@ def check_device_listing(checks):
     try:
         server.capture.list_devices = listed
         payload = json.loads(asyncio.run(server.api_devices(request)).text)
-        checks.check("the device list names the configured source",
-                     payload.get("configured") == "fake", payload)
+        checks.check("the playback monitor is not what gets pre-selected",
+                     payload.get("suggested") == "fake", payload)
         server.capture.list_devices = raises
         payload = json.loads(asyncio.run(server.api_devices(request)).text)
         checks.check("a backend that cannot list is reported, not raised",
@@ -830,7 +851,7 @@ def check_device_listing(checks):
         opened = StubRequest(fake_config())
         payload = json.loads(asyncio.run(server.api_devices(opened)).text)
         checks.check("listing devices with the token is allowed",
-                     payload.get("configured") == "fake", payload)
+                     payload.get("suggested") == "fake", payload)
 
         server.capture.list_devices = slow
         counted = asyncio.run(ticks_while_listing(request))
@@ -849,6 +870,24 @@ def check_server(checks):
     """
     check_authorization(checks)
     check_device_listing(checks)
+    checks.section("The operator token")
+    kept = os.environ.pop("OPERATOR_TOKEN", None)
+    try:
+        minted = {server.operator_token() for _ in range(3)}
+        checks.check("a token with nothing set is minted fresh every run",
+                     len(minted) == 3 and all(len(one) >= 32
+                                              for one in minted), minted)
+        os.environ["OPERATOR_TOKEN"] = ""
+        checks.check("an empty OPERATOR_TOKEN still mints one",
+                     len(server.operator_token()) >= 32)
+        os.environ["OPERATOR_TOKEN"] = "bench"
+        checks.check("OPERATOR_TOKEN pins the address across restarts",
+                     server.operator_token() == "bench")
+    finally:
+        os.environ.pop("OPERATOR_TOKEN", None)
+        if kept is not None:
+            os.environ["OPERATOR_TOKEN"] = kept
+
     checks.section("The running server")
     port, operator = free_port(), free_port()
     environment = dict(
@@ -856,6 +895,9 @@ def check_server(checks):
         DEEPGRAM_API_KEY="selftest",
         LLM_API_KEY="selftest",
         LLM_BASE_URL="http://invalid.invalid/v1",
+        # Explicitly empty, so the minted-token checks below test minting
+        # rather than whatever this machine happens to have in .env.
+        OPERATOR_TOKEN="",
     )
     process = subprocess.Popen(
         [sys.executable, "-u", "server.py",
@@ -1008,6 +1050,8 @@ def check_server(checks):
                  f"http://127.0.0.1:{operator}/operator" in output, output)
     checks.check("the banner says the operator address is not a bookmark",
                  "changes" in output and "every restart" in output, output)
+    checks.check("a minted token is not the empty OPERATOR_TOKEN",
+                 len(TOKEN) >= 32, TOKEN)
     checks.check("binding to loopback says so, since a phone cannot reach it",
                  "Bound to this machine only" in output, output)
     checks.check("the server exited when asked",

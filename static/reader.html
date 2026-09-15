@@ -92,16 +92,82 @@
 </header>
 
 <main id="feed">
-  <p class="waiting" id="waiting">Captions will appear here as people speak.</p>
+  <p class="waiting" id="waiting"></p>
 </main>
 
-<button class="resume" id="resume">Jump to newest</button>
+<button class="resume" id="resume"></button>
 
 <script>
+// The two lines this page says in its own voice, in the languages a
+// congregation is likely to list. Written out here rather than fetched,
+// because a reader who does not read English should not have to wait on
+// the translation model to be told that nobody has spoken yet, and these
+// two sentences never change. A language with no entry falls back to
+// English, so adding one to config.toml is not a change to this file.
+const PHRASES = {
+  "English": ["Captions will appear here as people speak.",
+              "Jump to newest"],
+  "Amharic": ["ሰዎች ሲናገሩ የጽሑፍ መግለጫዎች እዚህ ይታያሉ።",
+              "ወደ አዲሱ ሂድ"],
+  "Arabic": ["ستظهر التسميات التوضيحية هنا أثناء حديث الناس.",
+             "الانتقال إلى الأحدث"],
+  "Chinese": ["人们说话时，字幕会显示在这里。",
+              "跳到最新"],
+  "Farsi": ["هنگامی که افراد صحبت می‌کنند، زیرنویس‌ها اینجا نمایش داده می‌شوند.",
+            "رفتن به جدیدترین"],
+  "French": ["Les sous-titres apparaîtront ici au fur et à mesure que les gens parlent.",
+             "Aller au plus récent"],
+  "German": ["Untertitel erscheinen hier, während die Leute sprechen.",
+             "Zu den neuesten springen"],
+  "Haitian Creole": ["Soutèt yo ap parèt isit la pandan moun ap pale.",
+                     "Ale nan pi resan an"],
+  "Hindi": ["लोग जैसे-जैसे बोलेंगे, कैप्शन यहाँ दिखाई देंगे।",
+            "नवीनतम पर जाएँ"],
+  "Italian": ["I sottotitoli appariranno qui man mano che le persone parlano.",
+              "Vai al più recente"],
+  "Japanese": ["人々が話すと、ここに字幕が表示されます。",
+               "最新へ移動"],
+  "Korean": ["사람들이 말하면 자막이 여기에 표시됩니다.",
+             "최신으로 이동"],
+  "Kurdish": ["Jêrnivîs dê li vir xuya bibin dema ku mirov diaxivin.",
+              "Biçe ya herî nû"],
+  "Nepali": ["मानिसहरू बोल्दै जाँदा क्याप्सनहरू यहाँ देखिनेछन्।",
+             "पछिल्लोमा जानुहोस्"],
+  "Polish": ["Napisy pojawią się tutaj, gdy ludzie będą mówić.",
+             "Przejdź do najnowszych"],
+  "Portuguese": ["As legendas aparecerão aqui à medida que as pessoas falarem.",
+                 "Ir para o mais recente"],
+  "Russian": ["Субтитры будут появляться здесь по мере того, как люди говорят.",
+              "К последним"],
+  "Somali": ["Qoraallada halkan ayay ka soo muuqan doonaan marka dadku hadlaan.",
+             "U bood kan ugu cusub"],
+  "Spanish": ["Los subtítulos aparecerán aquí a medida que las personas hablen.",
+              "Ir a lo más reciente"],
+  "Swahili": ["Manukuu yataonekana hapa watu wanapozungumza.",
+              "Nenda kwenye mapya zaidi"],
+  "Tagalog": ["Lalabas dito ang mga caption habang nagsasalita ang mga tao.",
+              "Pumunta sa pinakabago"],
+  "Ukrainian": ["Субтитри з’являтимуться тут, коли люди говоритимуть.",
+                "Перейти до найновішого"],
+  "Vietnamese": ["Phụ đề sẽ xuất hiện ở đây khi mọi người nói.",
+                 "Đến phần mới nhất"],
+};
+
+// Right to left, so the two lines this page writes itself read correctly.
+// Caption text carries dir="auto" instead, since a mixed line is common.
+const RTL = ["Arabic", "Farsi", "Kurdish"];
+
 const feed = document.getElementById("feed");
 const dot = document.getElementById("dot");
 const picker = document.getElementById("channel");
 const resume = document.getElementById("resume");
+
+// One id per page load, not per channel: it tells the server that the
+// stream it is about to open replaces the one this phone already had, so
+// the language being left stops without waiting out the grace period.
+// Unguessable, and it names nobody.
+const reader = (crypto.randomUUID ? crypto.randomUUID()
+  : String(Math.random()).slice(2) + String(Date.now()));
 
 let source = null;
 let seen = new Map();
@@ -132,6 +198,20 @@ resume.onclick = () => {
   feed.scrollTop = feed.scrollHeight;
 };
 
+// Put this page's own two lines into the language being read. An unlisted
+// language keeps the English wording rather than showing nothing.
+function speak(channel) {
+  const [waiting, newest] = PHRASES[channel] || PHRASES["English"];
+  const rtl = RTL.includes(channel);
+  const placeholder = document.getElementById("waiting");
+  if (placeholder) {
+    placeholder.textContent = waiting;
+    placeholder.dir = rtl ? "rtl" : "ltr";
+  }
+  resume.textContent = newest;
+  resume.dir = rtl ? "rtl" : "ltr";
+}
+
 function addLine(entry) {
   const waiting = document.getElementById("waiting");
   if (waiting) waiting.remove();
@@ -148,6 +228,9 @@ function addLine(entry) {
   }
 
   line = document.createElement("p");
+  // The caption may be a right to left language, and an English name or a
+  // scripture reference inside it stays left to right either way.
+  line.dir = "auto";
   line.textContent = entry.text;
   feed.appendChild(line);
   seen.set(entry.seq, line);
@@ -164,10 +247,14 @@ function addLine(entry) {
 function connect(channel) {
   if (source) source.close();
   seen = new Map();
-  feed.innerHTML =
-    '<p class="waiting" id="waiting">Captions will appear here as people speak.</p>';
+  feed.innerHTML = '<p class="waiting" id="waiting"></p>';
+  speak(channel);
   localStorage.setItem("captionChannel", channel);
-  source = new EventSource("/stream/" + encodeURIComponent(channel));
+  // The reader id tells the server this stream replaces the one this phone
+  // already had, so a language somebody has just left stops being paid for
+  // rather than running out its grace period with nobody reading it.
+  source = new EventSource("/stream/" + encodeURIComponent(channel)
+                           + "?reader=" + encodeURIComponent(reader));
   source.onopen = () => dot.classList.add("on");
   source.onerror = () => dot.classList.remove("on");
   source.onmessage = (event) => {
@@ -177,6 +264,10 @@ function connect(channel) {
 }
 
 picker.onchange = () => connect(picker.value);
+
+// Before the channel list arrives, so a returning reader is not shown a
+// blank line and then an English one a moment later.
+speak(localStorage.getItem("captionChannel") || "English");
 
 // Keep the screen awake; reacquire after the phone is unlocked.
 async function keepAwake() {

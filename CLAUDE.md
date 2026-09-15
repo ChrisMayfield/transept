@@ -82,6 +82,10 @@ Recognition runs continuously while a session is on, but a language is translate
 `Translator.translate` takes an explicit `outputs` list for exactly this reason, and an empty list means no model call at all, counted in `stats["skipped"]`.
 The `None` check in `translate` is explicit rather than a truthiness test, because an empty list silently expanding to every language would bill for what nobody is reading.
 
+A reader who picks a different language is not a reader who left, so the switch gets no grace.
+The reader page sends an id with each stream and `Hub.subscribe` retires that reader's previous stream with the `LEAVING` sentinel, which is what lets `unsubscribe` tell a deliberate departure from a dropped one and leave `last_seen` alone for the first.
+Without it a phone switching language holds both channels until the old handler's next keepalive write, up to fifteen seconds later, and then buys the abandoned language a further `grace` seconds nobody is reading.
+
 Demand is unauthenticated, so `max_languages` caps how many run at once: without it one client opening every channel makes every sentence pay for the whole list, in tokens and in the latency more output adds for real readers.
 `demand` keeps the languages the operator forced on, then the ones with the most readers, and returns the rest as capped.
 A capped language gets the English line rather than a gap, and the default is 0 because showing English to a real reader is worse than the tokens a cap saves.
@@ -108,6 +112,8 @@ A reader who leaves holds its slot until the next keepalive write fails, up to 1
 Both pages in `static/` are single files with inline CSS and JavaScript, no build step and no framework.
 Server strings reach both pages, including exception text and device names, so they build nodes and set `textContent` rather than assembling `innerHTML`.
 The reader page keeps chosen language and text size in `localStorage` and holds a screen wake lock, which is why HTTPS matters.
+Its own two lines, the empty-feed message and the jump-to-newest button, are translated from the `PHRASES` table in the page rather than by the model: a reader who does not read English should not wait on a model call to be told nobody has spoken yet, and those two sentences never change.
+A language missing from the table falls back to English, so adding one to `config.toml` is not a change to `reader.html`.
 
 ## Things that look wrong but are not
 
@@ -161,6 +167,10 @@ The 48 kHz fallback averages groups of three samples rather than taking every th
 Platform assumptions belong in `capture.py` and that function, nowhere else.
 
 ## Conventions
+
+The audio source is deliberately not a setting.
+It changes with a reboot or a replugged cable, so a name in `config.toml` would be stale more often than right; the operator picks it on the page, `pipeline.py` takes a plain `--device` and otherwise opens `capture.default_device`, and `Session` keeps the chosen name on itself rather than writing it back into the config.
+`capture.choose_default` holds the one rule for which input to offer first, since the operator page sorts by name and so no longer knows the order the backend listed them in.
 
 Settings live in `config.toml`, resolved by the `SETTINGS` table in `pipeline.py`.
 Adding a setting means adding one row there, then naming it in the `add_settings_arguments` call of whichever entry points should expose it as a flag.
@@ -217,6 +227,7 @@ HTTPS is still required, because the screen wake lock needs a secure context, an
 `operator_port` is a setting; the operator host is not, because the point of the second listener is that a tunnel cannot be pointed at it by mistake.
 A headless machine wants an SSH forward rather than a wider bind.
 
-The operator token is minted every run and printed with the address, never configured, and there is no tokenless mode.
-A settable token invites a weak or forgotten one and buys only a stable bookmark, which a volunteer reading the address off the terminal does not need.
-It still travels in the query string on that first load, so it reaches browser history, and stripping it from the address bar is not a client-side fix while `/operator` itself is gated on it.
+The operator token is minted every run and printed with the address, and there is no tokenless mode.
+`OPERATOR_TOKEN` in `.env` pins it, which exists for development, where a fresh address every restart is a fresh link to click every restart.
+It stays in `.env` beside the keys rather than becoming a `config.toml` setting, because a setting invites a weak or forgotten token on the machine that runs the meetings.
+The token still travels in the query string on that first load, so it reaches browser history, and stripping it from the address bar is not a client-side fix while `/operator` itself is gated on it.

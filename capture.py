@@ -58,6 +58,27 @@ def list_devices(backend="auto"):
     return _sounddevice_devices()
 
 
+def choose_default(devices):
+    """Which input to offer first, in the backend's own order.
+
+    parec marks nothing as default, so without a rule here a PulseAudio
+    machine offers its playback monitor first, and the captions would be
+    whatever the laptop is playing rather than what was said in the room.
+    """
+    for device in devices:
+        if device["default"]:
+            return device["name"]
+    for device in devices:
+        if not device["monitor"]:
+            return device["name"]
+    return devices[0]["name"] if devices else ""
+
+
+def default_device(backend="auto"):
+    """The input to use when nobody named one. May be empty."""
+    return choose_default(list_devices(backend))
+
+
 def _parec_devices():
     try:
         output = subprocess.run(["pactl", "list", "short", "sources"],
@@ -292,6 +313,6 @@ def print_devices(backend="auto"):
         suffix = f"  [{', '.join(marks)}]" if marks else ""
         detail = f"  ({device['detail']})" if device["detail"] else ""
         print(f"  {device['name']}{detail}{suffix}")
-    print("\nPut the name in config.toml under [audio]. Anything marked "
-          "playback captures\nwhat this computer is playing, not what the "
-          "microphone hears.")
+    print("\nPass the name to pipeline.py with --device, or pick it on the "
+          "operator page.\nAnything marked playback captures what this "
+          "computer is playing, not what the\nmicrophone hears.")

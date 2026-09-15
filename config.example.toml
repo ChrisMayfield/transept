@@ -7,10 +7,6 @@
 # auto picks parec on Linux when available and sounddevice everywhere else.
 # Force one with "sounddevice" or "parec" if the other misbehaves.
 backend = "auto"
-# Run `python3 server.py --list-devices` to find this.
-# Anything marked playback captures what the computer plays, not the mic.
-# With sounddevice a partial name works, as does a numeric index.
-device = "alsa_input.usb-Focusrite_Scarlett_Solo-00.analog-stereo"
 # Milliseconds of silence that ends an utterance. Lower is snappier but
 # clips people who pause mid-sentence.
 endpointing = 400

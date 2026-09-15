@@ -17,7 +17,7 @@ per language, only while somebody is reading that language or the operator
 has forced it on, so an unread language costs nothing.
 
 The operator address is printed at startup with a token minted for that
-run; there is no way to set one.
+run, unless OPERATOR_TOKEN in .env pins one for development.
 
 Usage:
     python3 server.py --model gemini-3.8-flash --reasoning-effort low \\
@@ -66,6 +66,10 @@ RECONNECT_BACKOFF = [1, 2, 5, 10, 20]
 # Seconds a run must last to count as healthy and reset the backoff. Without
 # it, a few blips early in a meeting make a later one cost twenty seconds.
 HEALTHY_RUN = 60
+# Queued in place of a caption to tell a stream handler its reader has
+# moved on. A sentinel object rather than None, which json.dumps would
+# happily turn into a caption reading "null".
+LEAVING = object()
 
 
 class Hub:
@@ -77,9 +81,13 @@ class Hub:
         self.refused = 0
         self.buffers = {name: deque(maxlen=HISTORY) for name in self.channels}
         self.subscribers = {name: set() for name in self.channels}
-        # When a channel last had somebody on it, so a language does not shut
-        # off the instant a phone drops and reconnects.
+        # When a reader was last cut off a channel without meaning to be, so
+        # a language does not shut off the instant a phone drops and comes
+        # back. Set only by an involuntary departure: a reader who picks a
+        # different language has not lost anything to wait out.
         self.last_seen = dict.fromkeys(self.channels)
+        # reader id -> the one queue that reader is holding.
+        self.streams = {}
 
     def publish(self, channel, seq, text):
         """Add a line, or revise one already sent under the same seq.
@@ -109,15 +117,45 @@ class Hub:
                 # replay buffer on its next reconnect than by a stalled feed.
                 pass
 
-    def subscribe(self, channel):
+    def subscribe(self, channel, reader=None):
+        """Open a stream, retiring the one this reader already had.
+
+        One stream per reader: a phone that switches language would
+        otherwise hold both until the old handler noticed at its next
+        keepalive write, up to fifteen seconds later, and the language
+        nobody is reading any more would keep being paid for.
+        """
         queue = asyncio.Queue(maxsize=200)
         self.subscribers[channel].add(queue)
-        self.last_seen[channel] = time.monotonic()
+        if reader:
+            self.retire(reader)
+            self.streams[reader] = queue
         return queue
 
-    def unsubscribe(self, channel, queue):
+    def retire(self, reader):
+        """Wake this reader's previous stream so its handler returns."""
+        previous = self.streams.pop(reader, None)
+        if previous is None:
+            return
+        try:
+            previous.put_nowait(LEAVING)
+        except asyncio.QueueFull:
+            # A queue this far behind belongs to a phone that stopped
+            # reading long ago; the keepalive write will end it.
+            pass
+
+    def unsubscribe(self, channel, queue, reader=None, dropped=True):
+        """Close a stream. dropped is False when the reader chose to leave.
+
+        Grace exists for a phone that locks its screen, not for somebody
+        who just picked a different language, so a deliberate departure
+        leaves last_seen alone and the old language can stop at once.
+        """
         self.subscribers[channel].discard(queue)
-        self.last_seen[channel] = time.monotonic()
+        if reader and self.streams.get(reader) is queue:
+            del self.streams[reader]
+        if dropped:
+            self.last_seen[channel] = time.monotonic()
 
     def wanted(self, channel, grace):
         """True while somebody is reading this channel, or just was."""
@@ -150,6 +188,7 @@ class Session:
         self.hub = hub
         self.state = "stopped"
         self.error = None
+        self.device = ""
         self.started_at = None
         self.last_activity = None
         self.idle_task = None
@@ -179,8 +218,11 @@ class Session:
         # while the first was in its reconnect backoff.
         if self.state != "stopped":
             return False, "Already running."
-        self.config["device"] = device or self.config["device"]
-        if not self.config["device"]:
+        # Whatever the operator picked, kept on the session rather than in
+        # the config: the source is chosen fresh every meeting because the
+        # name changes with a reboot or a replugged cable.
+        self.device = device or ""
+        if not self.device:
             return False, "Choose an audio source first."
         self.error = None
         self.stats = {"units": 0, "translated": 0, "failures": 0,
@@ -237,7 +279,7 @@ class Session:
             return
         config = self.config
         header = (
-            self.started_at, config["device"], config["asr_model"],
+            self.started_at, self.device, config["asr_model"],
             config["model"], json.dumps(config["languages"]),
             int(bool(config["correct_english"])),
             json.dumps({name: config[name] for name in
@@ -356,7 +398,7 @@ class Session:
         return {
             "state": self.state,
             "error": self.error,
-            "device": self.config["device"],
+            "device": self.device,
             "model": self.config["model"],
             "channels": self.hub.channels,
             "listeners": self.hub.listener_count(),
@@ -422,7 +464,7 @@ class Session:
 
     async def _run_once(self):
         config = self.config
-        source = await capture.open_capture(config["device"],
+        source = await capture.open_capture(self.device,
                                             config["capture"])
         # Only the counter carries over. Reusing one segmenter would carry
         # the buffered fragments and audio_end too, and audio_end is relative
@@ -638,11 +680,12 @@ async def api_devices(request):
                                           config["capture"])
     except capture.CaptureError as exc:
         return web.json_response({"devices": [], "error": str(exc)})
-    # The page pre-selects the configured source, which has to be sent
-    # separately: the "default" flag on a device is whatever the backend
-    # considers default, and parec marks nothing at all.
+    # Which one to pre-select, decided here rather than on the page: the
+    # "default" flag is whatever the backend considers default and parec
+    # marks nothing at all, and the page sorts the list by name anyway, so
+    # it no longer knows the order the backend offered them in.
     return web.json_response({"devices": devices,
-                              "configured": config["device"]})
+                              "suggested": capture.choose_default(devices)})
 
 
 async def read_body(request):
@@ -708,7 +751,12 @@ async def stream(request):
     await response.prepare(request)
     await response.write(b"retry: 3000\n\n")
 
-    queue = hub.subscribe(channel)
+    # Unguessable and made fresh by each page load, so it identifies one
+    # phone's stream without naming anybody. Absent is fine: the stream
+    # then simply cannot be retired early.
+    reader = request.query.get("reader", "")
+    queue = hub.subscribe(channel, reader)
+    dropped = True
     try:
         # Replay recent history so someone arriving late has context. The
         # client dedupes on seq, so overlap with the live feed is harmless.
@@ -718,6 +766,11 @@ async def stream(request):
         while True:
             try:
                 entry = await asyncio.wait_for(queue.get(), timeout=15)
+                if entry is LEAVING:
+                    # This reader opened another channel. Chosen, not lost,
+                    # so the channel being left gets no grace period.
+                    dropped = False
+                    break
                 await response.write(
                     f"data: {json.dumps(entry)}\n\n".encode())
             except TimeoutError:
@@ -727,7 +780,7 @@ async def stream(request):
     except (ConnectionResetError, asyncio.CancelledError):
         pass
     finally:
-        hub.unsubscribe(channel, queue)
+        hub.unsubscribe(channel, queue, reader, dropped)
     return response
 
 
@@ -799,6 +852,18 @@ def build_operator_app(hub, session, token):
     return app
 
 
+def operator_token():
+    """The token the operator address carries.
+
+    Minted for the run unless OPERATOR_TOKEN pins one, so a link that leaks
+    expires when the server does. The override exists for development,
+    where a new address every restart is a new link to click every restart.
+    It lives in .env beside the keys, never in config.toml, and a meeting
+    should leave it unset.
+    """
+    return os.environ.get("OPERATOR_TOKEN") or secrets.token_urlsafe(32)
+
+
 async def serve(config, token, settings):
     """Run both listeners until Ctrl-C, then stop the session.
 
@@ -840,7 +905,7 @@ def main():
                         help="list audio input devices and exit")
     parser.add_argument("--config", default="config.toml")
     add_settings_arguments(parser, [
-        "capture", "device", "endpointing",
+        "capture", "endpointing",
         "languages", "grace", "max_languages",
         "model", "reasoning_effort", "correct_english", "max_tokens",
         "timeout", "hold",
@@ -874,16 +939,18 @@ def main():
     config["llm_key"] = llm_key
     config["llm_base"] = llm_base
 
-    # Minted, never configured: the banner prints the address with the
-    # token in it, so a link that leaks expires at the next restart.
-    token = secrets.token_urlsafe(32)
+    token = operator_token()
     reader = settings["public_url"] or (
         f"http://{settings['host']}:{settings['port']}/")
     print(f"Reader:   {reader}")
     print(f"Operator: http://{OPERATOR_HOST}:{settings['operator_port']}"
           f"/operator?token={token}")
-    print("That address carries a token minted for this run, so it "
-          "changes\nevery restart. Copy it rather than saving a bookmark.")
+    if os.environ.get("OPERATOR_TOKEN"):
+        print("That address carries OPERATOR_TOKEN from .env, so it is the "
+              "same\nevery restart. Clear it to have one minted per run.")
+    else:
+        print("That address carries a token minted for this run, so it "
+              "changes\nevery restart. Copy it rather than saving a bookmark.")
     if settings["host"] in ("127.0.0.1", "localhost", "::1"):
         print("Bound to this machine only. Readers reach it through your "
               "tunnel;\nset server.host to 0.0.0.0 to allow direct "
