@@ -600,8 +600,8 @@ def check_authorization(checks):
     """The token rule, without needing a second server on a second port."""
 
     class StubRequest:
-        def __init__(self, token, query=None, header=None):
-            self.app = {"token": token}
+        def __init__(self, token, query=None, header=None, session=None):
+            self.app = {"token": token, "session": session}
             self.query = {"token": query} if query else {}
             self.headers = {"X-Caption-Token": header} if header else {}
 
@@ -617,6 +617,28 @@ def check_authorization(checks):
     checks.check("a wrong token is refused",
                  not server.authorized(StubRequest("secret", query="wrong")))
 
+    # The rule is worth only as much as the routes that apply it. Status
+    # names the audio device and the model and carries the raw error text
+    # and the last lines spoken, so it is not a reader's to read.
+    session = make_session(["French"], True, [])[0]
+    refused = asyncio.run(server.api_status(
+        StubRequest("secret", session=session)))
+    payload = json.loads(refused.text)
+    checks.check("status without the token is refused",
+                 refused.status == 403 and payload["ok"] is False,
+                 f"{refused.status} {payload}")
+    # The operator page polls this every two seconds and reads ok and
+    # message off a refusal. Without the message it shows a blank page and
+    # never says the token is the problem.
+    checks.check("a refused status says why, for the page to show",
+                 payload.get("message"), payload)
+    allowed = asyncio.run(server.api_status(
+        StubRequest("secret", header="secret", session=session)))
+    checks.check("status with the token is allowed",
+                 allowed.status == 200
+                 and json.loads(allowed.text)["state"] == "stopped",
+                 allowed.status)
+
 
 def check_device_listing(checks):
     """The device list names the configured source, so the page selects it.
@@ -627,8 +649,11 @@ def check_device_listing(checks):
     """
 
     class StubRequest:
-        def __init__(self, config):
-            self.app = {"session": SimpleNamespace(config=config)}
+        def __init__(self, config, token=None, supplied=None):
+            self.app = {"session": SimpleNamespace(config=config),
+                        "token": token}
+            self.query = {"token": supplied} if supplied else {}
+            self.headers = {}
 
     def listed(backend):
         return [{"name": "monitor", "detail": "", "monitor": True,
@@ -678,6 +703,26 @@ def check_device_listing(checks):
         checks.check("a backend that cannot list is reported, not raised",
                      payload["devices"] == [] and "pactl" in payload["error"],
                      payload)
+
+        # Listing devices runs a subprocess and names the sound hardware,
+        # so it sits behind the token like the rest of /api. A reader on
+        # the tunnel reaching it is an unauthenticated fork per request.
+        server.capture.list_devices = listed
+        locked = StubRequest(fake_config(), token="secret")
+        response = asyncio.run(server.api_devices(locked))
+        payload = json.loads(response.text)
+        checks.check("listing devices without the token is refused",
+                     response.status == 403 and payload["devices"] == [],
+                     f"{response.status} {payload}")
+        # The operator page destructures devices, configured and error out
+        # of this answer, so a refusal has to carry the same shape or the
+        # page throws on the missing list and shows nothing at all.
+        checks.check("a refused listing still tells the operator page why",
+                     "error" in payload, payload)
+        opened = StubRequest(fake_config(), token="secret", supplied="secret")
+        payload = json.loads(asyncio.run(server.api_devices(opened)).text)
+        checks.check("listing devices with the token is allowed",
+                     payload.get("configured") == "fake", payload)
 
         server.capture.list_devices = slow
         counted = asyncio.run(ticks_while_listing(request))

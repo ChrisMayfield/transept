@@ -93,6 +93,11 @@ Request handlers share one event loop with the capture pipeline, so anything tha
 `api_devices` runs `pactl` under `asyncio.to_thread` for that reason, and a handler that shells out, touches the disk, or calls a third party belongs in a thread too.
 Twenty concurrent listings ran inline once, and a request that took 0.9 ms on an idle server took 209 ms behind them.
 
+Everything under `/api` is behind `authorized`, including the two routes that only read.
+`/api/status` carries the device name, the model, the raw exception text, and the last lines spoken, and `/api/devices` names the sound hardware and forks a process per request.
+The reader page needs neither, and with a tunnel in front the server is on the public internet rather than the local network the operator token was sized for.
+A refusal has to keep the shape the operator page destructures, which is `ok` and `message` for status and `devices` and `error` for the device list, or the page renders a blank panel instead of saying the token is wrong.
+
 ## Things that look wrong but are not
 
 Segmentation exists because Deepgram finalizes text mid-sentence.

@@ -353,8 +353,14 @@ el("stop").onclick = async () => {
 };
 
 async function poll() {
-  try { render(await api("/api/status")); }
-  catch (error) { showAlert("Lost contact with the server."); }
+  try {
+    const status = await api("/api/status");
+    // A refusal carries ok and message where a status carries state. Handed
+    // to render, it paints a blank page every two seconds rather than saying
+    // the token is missing or wrong.
+    if (status.ok === false) { showAlert(status.message); return; }
+    render(status);
+  } catch (error) { showAlert("Lost contact with the server."); }
 }
 
 loadDevices();

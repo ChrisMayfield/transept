@@ -554,11 +554,31 @@ async def operator_page(request):
 
 
 async def api_status(request):
+    """Everything the operator page shows, which is more than a reader sees.
+
+    Behind the token because it names the audio device and the model, and
+    carries the raw error text and the last lines spoken. The transcript is
+    public by design on the reader page; the rest of this is host detail.
+    """
+    if not authorized(request):
+        return web.json_response({"ok": False, "message": "Not authorized."},
+                                 status=403)
     return web.json_response(request.app["session"].status())
 
 
 async def api_devices(request):
-    """Input devices, so the operator picks from a list rather than typing."""
+    """Input devices, so the operator picks from a list rather than typing.
+
+    Behind the operator token like every other route under /api, because
+    listing devices runs a subprocess and names the sound hardware, and
+    neither is something a reader on the tunnel needs.
+    """
+    if not authorized(request):
+        # The devices-and-error shape the operator page already renders,
+        # not the ok-and-message shape of the other routes: the page
+        # destructures this answer and would throw on a missing list.
+        return web.json_response({"devices": [], "error": "Not authorized."},
+                                 status=403)
     config = request.app["session"].config
     try:
         # In a thread, because list_devices shells out to pactl with a five
