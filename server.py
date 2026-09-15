@@ -26,9 +26,11 @@ QR code or a bookmarked link keeps working from week to week.
 import argparse
 import asyncio
 import hashlib
+import hmac
 import io
 import json
 import os
+import secrets
 import sys
 import time
 from collections import deque
@@ -531,12 +533,22 @@ class Session:
 
 
 def authorized(request):
+    """True if this request carries the token minted for this run.
+
+    There is deliberately no tokenless mode. The operator routes are meant
+    to be reached from the operator's own machine, but a page open in any
+    tab of the operator's browser can post a cross-origin form to
+    127.0.0.1 with no CORS preflight, and without a secret it can guess
+    that reaches Session.start and Session.stop.
+    """
     token = request.app["token"]
-    if not token:
-        return True
     supplied = (request.headers.get("X-Caption-Token")
-                or request.query.get("token"))
-    return supplied == token
+                or request.query.get("token") or "")
+    # Bytes and compare_digest rather than ==, which returns sooner for a
+    # token that shares a prefix. The encode is not decoration: given two
+    # str, compare_digest raises TypeError on anything outside ASCII, and
+    # a request can carry that, so == would become a 500 here.
+    return hmac.compare_digest(supplied.encode(), token.encode())
 
 
 async def page(request, filename):
@@ -768,22 +780,24 @@ def main():
     config["llm_key"] = llm_key
     config["llm_base"] = llm_base
 
-    # The operator secret belongs with the other secrets, not in config.toml.
-    token = os.environ.get("OPERATOR_TOKEN")
+    # Minted every run rather than configured. A settable token invites a
+    # weak one and a forgotten one, and the volunteer never types this:
+    # the banner below prints the address with the token already in it.
+    # Per run also means a link that leaks, by screen share or a photo of
+    # this terminal, stops working at the next restart.
+    token = secrets.token_urlsafe(32)
     app = build_app(config, token)
-    suffix = f"?token={token}" if token else ""
     reader = settings["public_url"] or (
         f"http://{settings['host']}:{settings['port']}/")
     print(f"Reader:   {reader}")
     print(f"Operator: http://{settings['host']}:{settings['port']}"
-          f"/operator{suffix}")
+          f"/operator?token={token}")
+    print("That address carries a token minted for this run, so it "
+          "changes\nevery restart. Copy it rather than saving a bookmark.")
     if settings["host"] in ("127.0.0.1", "localhost", "::1"):
         print("Bound to this machine only. Readers reach it through your "
               "tunnel;\nset server.host to 0.0.0.0 to allow direct "
               "connections on this network.")
-    elif not token:
-        print("No OPERATOR_TOKEN set, and this server is reachable from the "
-              "network:\nanyone who can reach it can start and stop it.")
     web.run_app(app, host=settings["host"], port=settings["port"], print=None)
 
 

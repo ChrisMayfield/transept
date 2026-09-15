@@ -203,4 +203,8 @@ A manifest and service worker would add install friction and offline machinery t
 HTTPS is still required, because the screen wake lock needs a secure context, and a tunnel in front is the current answer.
 `public_url` exists because the bind address is not the address a phone can reach, and the QR endpoint renders that value rather than the listener.
 
-The operator token is thin security appropriate for a local network and nothing more.
+The operator token is minted every run and printed with the address, never configured.
+A settable one invites a weak token and a forgotten one, and it buys only a stable bookmark, which a volunteer reading the address off the terminal each week does not need.
+There is no tokenless mode, and `authorized` has no branch that grants access without one.
+Loopback is not a substitute: a page open in any tab of the operator's browser can post a cross-origin form to `127.0.0.1` with no CORS preflight, and against a tokenless server that request reaches `Session.start` and `Session.stop`.
+The token does still travel in the query string on the first load, which puts it in browser history, and stripping it from the address bar is not a client-side fix while `/operator` itself is gated on it.

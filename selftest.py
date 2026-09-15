@@ -31,6 +31,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -575,10 +576,12 @@ def wait_for_port(port, process, timeout=20.0):
     return False
 
 
-def request(port, path, method="GET", body=None, timeout=5.0):
+def request(port, path, method="GET", body=None, timeout=5.0, token=None):
     """Returns (status, body text). A 4xx is an answer here, not an error."""
     data = json.dumps(body).encode("utf-8") if body is not None else None
     headers = {"Content-Type": "application/json"} if data else {}
+    if token:
+        headers["X-Caption-Token"] = token
     call = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=data,
                                   headers=headers, method=method)
     try:
@@ -596,6 +599,38 @@ def sse_preamble(port, channel, size=13, timeout=5.0):
                 response.read(size).decode("utf-8"))
 
 
+def drain(process):
+    """Collect the server's output in the background, returning the list.
+
+    One reader has to own the stream. Calling readline here and
+    communicate later loses the lines in between: readline fills the
+    buffered reader from the pipe, communicate reads the raw descriptor,
+    and whatever is sitting in the buffer never reaches either caller.
+    """
+    lines = []
+    thread = threading.Thread(
+        target=lambda: lines.extend(iter(process.stdout.readline, "")),
+        daemon=True)
+    thread.start()
+    return lines, thread
+
+
+def operator_address(lines, timeout=10.0):
+    """The operator address once the banner prints it.
+
+    The token is minted per run, so the banner is the only place the
+    address holding it exists. Reading it here is also exactly what the
+    volunteer does, which is why the address is worth checking at all.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        for line in list(lines):
+            if line.startswith("Operator:"):
+                return line.strip()
+        time.sleep(0.05)
+    return ""
+
+
 def check_authorization(checks):
     """The token rule, without needing a second server on a second port."""
 
@@ -606,8 +641,6 @@ def check_authorization(checks):
             self.headers = {"X-Caption-Token": header} if header else {}
 
     checks.section("The operator token")
-    checks.check("no token configured lets anyone in",
-                 server.authorized(StubRequest(None)))
     checks.check("a configured token refuses a request without one",
                  not server.authorized(StubRequest("secret")))
     checks.check("the token is accepted in the query string",
@@ -616,6 +649,22 @@ def check_authorization(checks):
                  server.authorized(StubRequest("secret", header="secret")))
     checks.check("a wrong token is refused",
                  not server.authorized(StubRequest("secret", query="wrong")))
+
+    def refuses(query):
+        # A raise is a 500 on a route a stranger can reach, so the failure
+        # this reports has to be a refusal rather than an exception.
+        try:
+            return not server.authorized(StubRequest("secret", query=query))
+        except TypeError:
+            return False
+
+    # This guards the encode in authorized, not the constant-time
+    # comparison: compare_digest given two str raises TypeError on anything
+    # outside ASCII, which a stranger can put in a query string and which
+    # would answer 500 rather than 403. Reverting to == also passes, since
+    # == was never the unsafe part.
+    checks.check("a token outside ASCII is refused rather than raising",
+                 refuses("caf\u00e9"))
 
     # The rule is worth only as much as the routes that apply it. Status
     # names the audio device and the model and carries the raw error text
@@ -649,9 +698,11 @@ def check_device_listing(checks):
     """
 
     class StubRequest:
-        def __init__(self, config, token=None, supplied=None):
+        """Authorized unless supplied is withheld; there is no open mode."""
+
+        def __init__(self, config, supplied="secret"):
             self.app = {"session": SimpleNamespace(config=config),
-                        "token": token}
+                        "token": "secret"}
             self.query = {"token": supplied} if supplied else {}
             self.headers = {}
 
@@ -708,7 +759,7 @@ def check_device_listing(checks):
         # so it sits behind the token like the rest of /api. A reader on
         # the tunnel reaching it is an unauthenticated fork per request.
         server.capture.list_devices = listed
-        locked = StubRequest(fake_config(), token="secret")
+        locked = StubRequest(fake_config(), supplied=None)
         response = asyncio.run(server.api_devices(locked))
         payload = json.loads(response.text)
         checks.check("listing devices without the token is refused",
@@ -719,7 +770,7 @@ def check_device_listing(checks):
         # page throws on the missing list and shows nothing at all.
         checks.check("a refused listing still tells the operator page why",
                      "error" in payload, payload)
-        opened = StubRequest(fake_config(), token="secret", supplied="secret")
+        opened = StubRequest(fake_config())
         payload = json.loads(asyncio.run(server.api_devices(opened)).text)
         checks.check("listing devices with the token is allowed",
                      payload.get("configured") == "fake", payload)
@@ -748,9 +799,6 @@ def check_server(checks):
         DEEPGRAM_API_KEY="selftest",
         LLM_API_KEY="selftest",
         LLM_BASE_URL="http://invalid.invalid/v1",
-        # load_env only fills variables that are not already set, so setting
-        # this empty keeps a real .env token from locking the checks out.
-        OPERATOR_TOKEN="",
     )
     process = subprocess.Popen(
         [sys.executable, "-u", "server.py",
@@ -759,18 +807,26 @@ def check_server(checks):
          "--host", "127.0.0.1", "--port", str(port)],
         cwd=HERE, env=environment, stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT, text=True)
+    lines, reader = drain(process)
     try:
         if not wait_for_port(port, process):
-            output = process.stdout.read() if process.stdout else ""
-            checks.check(f"server.py came up on port {port}", False, output)
+            checks.check(f"server.py came up on port {port}", False,
+                         "".join(lines))
             return
+
+        # Nothing reaches the operator routes without this, so it comes
+        # first and everything below depends on the banner being usable.
+        address = operator_address(lines)
+        TOKEN = address.split("token=", 1)[-1] if "token=" in address else ""
+        checks.check("the banner prints an operator address with a token",
+                     len(TOKEN) >= 32, address or "".join(lines))
 
         status, body = request(port, "/api/channels")
         checks.check("channels are fixed at startup",
                      json.loads(body)["channels"] == ["English", "French",
                                                       "Swahili"], body)
 
-        status, body = request(port, "/api/status")
+        status, body = request(port, "/api/status", token=TOKEN)
         state = json.loads(body)
         checks.check("status starts stopped", state["state"] == "stopped",
                      state["state"])
@@ -779,11 +835,22 @@ def check_server(checks):
                          for language in state["languages"]),
                      state["languages"])
 
-        for path, expected in (("/", 200), ("/operator", 200),
-                               ("/api/devices", 200)):
+        for path, secret in (("/", None), ("/operator", TOKEN),
+                             ("/api/devices", TOKEN)):
+            status, _ = request(port, path, token=secret)
+            checks.check(f"{path} answers 200", status == 200, status)
+
+        # The token rule through real routing. Every other check of it calls
+        # the handlers directly, so none of them would notice a route left
+        # out of add_routes or a decorator that never ran.
+        for path in ("/operator", "/api/status", "/api/devices"):
             status, _ = request(port, path)
-            checks.check(f"{path} answers {expected}", status == expected,
-                         status)
+            checks.check(f"{path} is refused without the token",
+                         status == 403, status)
+        for path in ("/", "/api/channels"):
+            status, _ = request(port, path)
+            checks.check(f"{path} stays open, as a reader needs it",
+                         status == 200, status)
 
         status, body = request(port, "/qr.svg")
         checks.check("the QR endpoint explains a missing public_url",
@@ -799,33 +866,36 @@ def check_server(checks):
         checks.check("the event stream opens with a reconnect interval",
                      preamble.startswith("retry:"), repr(preamble))
 
-        status, body = request(port, "/api/start", "POST", {})
+        status, body = request(port, "/api/start", "POST", {}, token=TOKEN)
         checks.check("starting without a device is refused with a reason",
                      json.loads(body)["ok"] is False
                      and "audio source" in json.loads(body)["message"], body)
 
-        status, body = request(port, "/api/stop", "POST", {})
+        status, body = request(port, "/api/stop", "POST", {}, token=TOKEN)
         checks.check("stopping when idle is refused",
                      json.loads(body)["ok"] is False, body)
 
         status, body = request(port, "/api/language", "POST",
-                               {"language": "French", "mode": "on"})
+                               {"language": "French", "mode": "on"},
+                               token=TOKEN)
         checks.check("a language can be forced on", json.loads(body)["ok"],
                      body)
-        state = json.loads(request(port, "/api/status")[1])
+        state = json.loads(request(port, "/api/status", token=TOKEN)[1])
         french = [item for item in state["languages"]
                   if item["name"] == "French"][0]
         checks.check("the override shows in status and makes it active",
                      french["override"] == "on" and french["active"], french)
 
         status, body = request(port, "/api/language", "POST",
-                               {"language": "Klingon", "mode": "on"})
+                               {"language": "Klingon", "mode": "on"},
+                               token=TOKEN)
         checks.check("an unknown language is refused",
                      json.loads(body)["ok"] is False, body)
 
         # The operator page reads the {"ok": false} shape and shows the
         # message. A 500 traceback reaches it as nothing at all.
-        status, body = request(port, "/api/language", "POST", body=None)
+        status, body = request(port, "/api/language", "POST", body=None,
+                               token=TOKEN)
         checks.check("a language request with no body is an answer, not a 500",
                      status == 200 and json.loads(body)["ok"] is False,
                      f"{status} {body}")
@@ -836,13 +906,17 @@ def check_server(checks):
         # give it a moment and then insist.
         process.terminate()
         try:
-            output = process.communicate(timeout=3)[0]
+            process.wait(timeout=3)
         except subprocess.TimeoutExpired:
             process.kill()
-            output = process.communicate()[0]
+            process.wait()
+        reader.join(timeout=2)
+        output = "".join(lines)
 
     checks.check("the startup banner prints the reader address",
                  f"http://127.0.0.1:{port}/" in output, output)
+    checks.check("the banner says the operator address is not a bookmark",
+                 "changes" in output and "every restart" in output, output)
     checks.check("binding to loopback says so, since a phone cannot reach it",
                  "Bound to this machine only" in output, output)
     checks.check("the server exited when asked",
