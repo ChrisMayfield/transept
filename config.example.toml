@@ -97,6 +97,14 @@ port = 8080
 # and a headless box wants an SSH forward rather than a wider bind.
 operator_port = 8081
 
+# Most event streams to hold at once, 0 for no cap. Every reader costs a
+# task, a queue and a socket, and each line is written to all of them, so
+# an unbounded count lets one client slow the fan-out for the whole room.
+# 500 is far more phones than a room holds and costs about 6 MB; the
+# refused get a 503 and their browsers retry. Raise it if you really have
+# that many readers, since a phone turned away sees no captions at all.
+max_listeners = 500
+
 # The address readers actually use, which is your tunnel's hostname, not the
 # address above. The operator page shows this as a QR code people can point a
 # camera at. Leave empty before a tunnel is set up.

@@ -79,6 +79,7 @@ SETTINGS = [
     ("host", "server", "host", str, "127.0.0.1"),
     ("port", "server", "port", int, 8080),
     ("operator_port", "server", "operator_port", int, 8081),
+    ("max_listeners", "server", "max_listeners", int, 500),
     ("public_url", "server", "public_url", str, ""),
 ]
 
@@ -460,6 +461,7 @@ ARGUMENT_HELP = {
     "host": "address to bind",
     "port": "port to bind, the one a tunnel points at",
     "operator_port": "port for the operator controls, always loopback",
+    "max_listeners": "most event streams to hold at once, 0 for no cap",
     "public_url": "the address readers use, for the QR code",
 }
 

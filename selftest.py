@@ -321,6 +321,22 @@ async def check_pipeline(checks):
                  len(hub.buffers["English"]) == 3,
                  list(hub.buffers["English"]))
 
+    checks.section("The listener cap")
+    hub = server.Hub(["French"], max_listeners=2)
+    checks.check("an empty hub is not full", not hub.full())
+    first, second = hub.subscribe("English"), hub.subscribe("French")
+    checks.check("the cap counts across channels, not per channel",
+                 hub.full() and hub.listener_total() == 2,
+                 hub.listener_count())
+    hub.unsubscribe("French", second)
+    checks.check("a reader leaving frees the slot", not hub.full())
+    unlimited = server.Hub(["French"])
+    for _ in range(50):
+        unlimited.subscribe("French")
+    checks.check("no cap means no ceiling, which is the old behaviour",
+                 not unlimited.full(), unlimited.listener_total())
+    del first
+
     checks.section("The language cap")
     everything = ["French", "Swahili", "Spanish", "Kurdish"]
     translator = FakeTranslator()
@@ -637,6 +653,15 @@ def request(port, path, method="GET", body=None, timeout=5.0, token=None):
         return exc.code, exc.read().decode("utf-8")
 
 
+def open_stream(port, channel="English", timeout=5.0):
+    """A raw event stream held open, so the cap can be reached on purpose."""
+    sock = socket.create_connection(("127.0.0.1", port), timeout=timeout)
+    sock.sendall(f"GET /stream/{channel} HTTP/1.1\r\nHost: x\r\n"
+                 f"Accept: text/event-stream\r\n\r\n".encode())
+    sock.recv(64)
+    return sock
+
+
 def sse_preamble(port, channel, size=13, timeout=5.0):
     """The first bytes of an event stream, plus its content type."""
     url = f"http://127.0.0.1:{port}/stream/{channel}"
@@ -851,7 +876,7 @@ def check_server(checks):
          "--config", "selftest-no-such-config.toml",
          "--model", "selftest-model", "--languages", "French,Swahili",
          "--host", "127.0.0.1", "--port", str(port),
-         "--operator-port", str(operator)],
+         "--operator-port", str(operator), "--max-listeners", "3"],
         cwd=HERE, env=environment, stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT, text=True)
     lines, reader = drain(process)
@@ -955,9 +980,30 @@ def check_server(checks):
         # message. A 500 traceback reaches it as nothing at all.
         status, body = request(operator, "/api/language", "POST", body=None,
                                token=TOKEN)
-        checks.check("a language request with no body is an answer, not a 500",
+        checks.check("a language request with no body is an answer, "
+                     "not a 500",
                      status == 200 and json.loads(body)["ok"] is False,
                      f"{status} {body}")
+
+        # Last, because these hold the cap full for as long as they are
+        # open and every check above wants a slot.
+        held = [open_stream(port) for _ in range(3)]
+        try:
+            try:
+                status, body = request(port, "/stream/English", timeout=3)
+            except Exception as exc:
+                # A stream that opened is the failure this is looking for,
+                # and urllib blocks on it rather than returning a status.
+                status, body = 200, f"held open: {type(exc).__name__}"
+            checks.check("a reader past the cap is refused, not left hanging",
+                         status == 503, f"{status} {body}")
+            state = json.loads(request(operator, "/api/status",
+                                       token=TOKEN)[1])
+            checks.check("the operator page can see readers turned away",
+                         state["refused"] >= 1, state["refused"])
+        finally:
+            for sock in held:
+                sock.close()
     finally:
         # A graceful exit can lag by up to the event stream keepalive, since
         # the handler for a reader who has walked away only finds out at its

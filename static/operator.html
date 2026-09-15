@@ -273,8 +273,12 @@ function render(status) {
   el("skipped").textContent = status.skipped || 0;
   el("corrections").textContent = status.corrections || 0;
   el("median").textContent = status.median ? status.median + "s" : "\u2013";
-  el("listeners").textContent = Object.values(status.listeners || {})
+  const reading = Object.values(status.listeners || {})
     .reduce((total, count) => total + count, 0);
+  // Only once it has happened: a zero here would be one more number to
+  // read past every week for a cap that has never bitten.
+  el("listeners").textContent = status.refused
+    ? `${reading} (${status.refused} turned away)` : reading;
 
   el("start").disabled = ["running", "starting"].includes(status.state);
   el("stop").disabled = status.state === "stopped";

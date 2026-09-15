@@ -66,8 +66,12 @@ HEALTHY_RUN = 60
 class Hub:
     """Ring buffer plus live subscribers, one channel per language."""
 
-    def __init__(self, languages):
+    def __init__(self, languages, max_listeners=0):
         self.channels = ["English"] + list(languages)
+        # Nothing authenticates to open an event stream, so the count is
+        # bounded here rather than left to whatever the machine will bear.
+        self.max_listeners = max_listeners
+        self.refused = 0
         self.buffers = {name: deque(maxlen=HISTORY) for name in self.channels}
         self.subscribers = {name: set() for name in self.channels}
         # When a channel last had somebody on it, so a language does not shut
@@ -121,6 +125,19 @@ class Hub:
 
     def listener_count(self):
         return {name: len(queues) for name, queues in self.subscribers.items()}
+
+    def listener_total(self):
+        return sum(len(queues) for queues in self.subscribers.values())
+
+    def full(self):
+        """True once the listener cap is reached.
+
+        Every stream costs a task, a queue and a socket, and each published
+        line is written to all of them, so an unbounded count is a way for
+        one client to make the fan-out slower for the whole room.
+        """
+        return (self.max_listeners > 0
+                and self.listener_total() >= self.max_listeners)
 
     def clear(self):
         for buffer in self.buffers.values():
@@ -351,6 +368,8 @@ class Session:
             "model": self.config["model"],
             "channels": self.hub.channels,
             "listeners": self.hub.listener_count(),
+            "refused": self.hub.refused,
+            "max_listeners": self.hub.max_listeners,
             "uptime": (time.time() - self.started_at
                        if self.started_at and self.state != "stopped" else 0),
             "units": self.stats["units"],
@@ -697,6 +716,12 @@ async def stream(request):
     channel = request.match_info["channel"]
     if channel not in hub.channels:
         return web.Response(status=404, text="No such channel.")
+    if hub.full():
+        # Refused before prepare, so this is an ordinary response a browser
+        # will retry rather than a stream that opens and then goes quiet.
+        hub.refused += 1
+        return web.Response(status=503, text="Too many readers just now.",
+                            headers={"Retry-After": "10"})
 
     response = web.StreamResponse(headers={
         "Content-Type": "text/event-stream",
@@ -807,7 +832,7 @@ async def serve(config, token, settings):
     share one Hub and one Session, so this is two doors onto one room
     rather than two servers.
     """
-    hub = Hub(config["languages"])
+    hub = Hub(config["languages"], config.get("max_listeners") or 0)
     session = Session(config, hub)
     listeners = (
         (build_reader_app(hub, session), settings["host"], settings["port"]),
@@ -847,7 +872,7 @@ def main():
         "glossary", "keyterms", "ceiling", "gap", "hold", "asr_model",
         "endpointing", "max_tokens", "timeout", "reasoning_effort",
         "correct_english", "host", "port", "operator_port", "record",
-        "database",
+        "database", "max_languages", "max_listeners",
     ])
     args = parser.parse_args()
 
