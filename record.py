@@ -3,7 +3,7 @@
 Keep each session, and turn it into something worth reading afterwards.
 
 A meeting is recorded line by line into a SQLite file while it runs. Nothing
-here is for the readers; it is for the three things that decide caption
+here is for the readers; it is for the three things that decide subtitle
 quality and are otherwise edited on a hunch: SYSTEM_PROMPT, glossary.txt,
 and keyterms.txt.
 
@@ -83,7 +83,7 @@ def connect(path):
 
 
 class Recorder:
-    """Writes one session to disk, off the path the captions run on.
+    """Writes one session to disk, off the path the subtitles run on.
 
     Every sink method here only puts a row on a queue. The writes happen in
     one task owned by the Session, because sink.unit runs inside the loop
@@ -426,7 +426,7 @@ def _latency(page, lines):
     waits = [line["latency"] for line in lines
              if line["latency"] is not None]
     if lags:
-        page.write(f"Caption lag, from the words being spoken to the "
+        page.write(f"Subtitle lag, from the words being spoken to the "
                    f"English line appearing: {latency_summary(lags)}.\n\n")
     if waits:
         page.write(f"Translation, on top of that: "

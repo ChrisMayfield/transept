@@ -1,6 +1,6 @@
 # Transept
 
-Live captioning and translation for church meetings, delivered to phones.
+Live subtitling and translation for church meetings, delivered to phones.
 
 Someone speaks into a microphone.
 A few tenths of a second later the words appear on the phones of people who cannot hear well.
@@ -141,7 +141,7 @@ Two tunnels are worth considering, and the difference is whether you want to own
 **Tailscale Funnel** needs no domain and costs nothing.
 The address is your machine's own name, `https://<machine>.<tailnet>.ts.net`, and it is the same every time the tunnel starts.
 Readers install nothing and need no account, since only the laptop runs Tailscale.
-A funnel is open to the internet by design: anyone who has the address can read the captions, which is the same bargain as a printed card in the foyer, and it is why the operator port never goes through it.
+A funnel is open to the internet by design: anyone who has the address can read the subtitles, which is the same bargain as a printed card in the foyer, and it is why the operator port never goes through it.
 
 Install Tailscale from [tailscale.com/download](https://tailscale.com/download), then connect this machine and see what it is called:
 
@@ -176,7 +176,7 @@ Cloudflare's free Quick Tunnel needs no domain but mints a new random `trycloudf
 
 ```sh
 cloudflared tunnel create chapel
-cloudflared tunnel route dns chapel captions.example.org
+cloudflared tunnel route dns chapel subtitles.example.org
 ```
 
 Whichever you pick, put the resulting address in `config.toml`:
@@ -243,7 +243,7 @@ Audio from your meeting is sent to Deepgram, and the resulting text is sent to y
 Both are commercial services with their own retention policies.
 This is worth raising with whoever leads the meeting before you deploy it, particularly in a setting where people say personal things out loud.
 
-By default nothing is stored on disk, so captions live in memory and disappear when the session stops.
+By default nothing is stored on disk, so subtitles live in memory and disappear when the session stops.
 Turning on `record` in `config.toml` changes that, and it is a decision to make with whoever leads the meeting.
 A recorded session keeps every English sentence, every translation, and how long each one took, in `sessions.db` next to the code.
 It is not encrypted, `.gitignore` keeps it out of your fork, and nothing is ever deleted automatically.
@@ -254,7 +254,7 @@ The translation prompt forbids the model from inventing names, numbers, dates, o
 This is deliberate and it matters: a reader of a translated channel cannot hear the room and has no way to catch a confident wrong name.
 When the audio is unclear, the intended behavior is visible confusion rather than a plausible guess.
 
-Captions are an aid, not a record.
+Subtitles are an aid, not a record.
 Tell people that.
 
 ## About the name

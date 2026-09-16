@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Captions control</title>
+<title>Transept control</title>
 <style>
   :root {
     --ink: #16181d;
@@ -135,7 +135,7 @@
 </style>
 </head>
 <body>
-<h1>Captions control</h1>
+<h1>Transept control</h1>
 
 <div class="state stopped" id="state">
   <b id="stateWord">Stopped</b>
@@ -153,7 +153,7 @@
 </div>
 
 <div class="controls">
-  <button id="start">Start captions</button>
+  <button id="start">Start subtitles</button>
   <button id="stop" class="secondary">Stop</button>
 </div>
 
@@ -168,7 +168,7 @@
      newlines and the indentation it is given. -->
 <dl>
   <div><dt title="Whole sentences recognized since this session started.">Sentences</dt><dd id="units">0</dd></div>
-  <div><dt title="Devices with a caption channel open right now, counting every language.">Reading</dt><dd id="listeners">0</dd></div>
+  <div><dt title="Devices with a subtitle channel open right now, counting every language.">Reading</dt><dd id="listeners">0</dd></div>
   <div><dt title="How many of those devices are reading the English channel.">English</dt><dd id="english">0</dd></div>
   <div><dt title="Sentences whose translation failed, so those channels showed the English words instead.">Fell back</dt><dd id="failures">0</dd></div>
   <div><dt title="Sentences whose translation did not arrive in time, so those channels showed the English words instead.">Too slow</dt><dd id="timeouts">0</dd></div>
@@ -192,7 +192,7 @@
 
 <dialog id="qrLarge">
   <img id="qrBig" alt="QR code for the reader address">
-  <p id="qrCaption"></p>
+  <p id="qrUrl"></p>
 </dialog>
 
 <div class="langs">
@@ -213,7 +213,7 @@ const el = (id) => document.getElementById(id);
 
 async function api(path, method = "GET", body = null) {
   const options = { method, headers: {} };
-  if (token) options.headers["X-Caption-Token"] = token;
+  if (token) options.headers["X-Subtitle-Token"] = token;
   if (body) {
     options.headers["Content-Type"] = "application/json";
     options.body = JSON.stringify(body);
@@ -324,7 +324,7 @@ function render(status) {
   if (status.public_url && !el("qr").src) {
     el("qr").src = "/qr.svg";
     el("qrBig").src = "/qr.svg";
-    el("qrCaption").textContent = status.public_url;
+    el("qrUrl").textContent = status.public_url;
     el("publicUrl").textContent = status.public_url;
     el("publicUrl").href = status.public_url;
     el("share").style.display = "flex";

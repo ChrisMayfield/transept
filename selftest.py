@@ -675,7 +675,7 @@ def request(port, path, method="GET", body=None, timeout=5.0, token=None):
     data = json.dumps(body).encode("utf-8") if body is not None else None
     headers = {"Content-Type": "application/json"} if data else {}
     if token:
-        headers["X-Caption-Token"] = token
+        headers["X-Subtitle-Token"] = token
     call = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=data,
                                   headers=headers, method=method)
     try:
@@ -739,7 +739,7 @@ def check_authorization(checks):
         def __init__(self, token, query=None, header=None, session=None):
             self.app = {"token": token, "session": session}
             self.query = {"token": query} if query else {}
-            self.headers = {"X-Caption-Token": header} if header else {}
+            self.headers = {"X-Subtitle-Token": header} if header else {}
 
     checks.section("The operator token")
     checks.check("a configured token refuses a request without one",
@@ -1085,7 +1085,7 @@ async def check_store(checks):
 
     The last section here is the one that matters most. A disk that has
     stopped answering must cost the record and nothing else, so a Recorder
-    that raises on every call has to leave the captions untouched.
+    that raises on every call has to leave the subtitles untouched.
     """
     checks.section("Recording a session to disk")
     path = Path(tempfile.mkdtemp()) / "selftest.db"
@@ -1200,7 +1200,7 @@ async def check_store(checks):
         raised = exc
     checks.check("the pipeline did not raise", raised is None, repr(raised))
     french = [entry["text"] for entry in hub.buffers["French"]]
-    checks.check("every caption still reached the readers",
+    checks.check("every subtitle still reached the readers",
                  french == [f"<French> {name}" for name in SENTENCES], french)
 
     checks.section("Reading a recording back")

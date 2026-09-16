@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Stop the caption server and close the Tailscale Funnel.
+# Stop the subtitle server and close the Tailscale Funnel.
 # transept-start.sh runs this first, so it has to be safe when nothing is
 # running. No -e: every step is worth attempting even when an earlier one
 # failed, because the point is to leave nothing running and nothing exposed.
@@ -29,7 +29,7 @@ for pid in $(pgrep -u "$USER" -f 'server\.py'); do
     [ "$(readlink -f "/proc/$pid/cwd" 2>/dev/null)" = "$PWD" ] || continue
     # A plain kill is SIGTERM, which server.py handles like Ctrl-C: the
     # session stops and the last lines drain.
-    echo "Stopping the caption server (PID $pid)..."
+    echo "Stopping the subtitle server (PID $pid)..."
     kill "$pid" 2>/dev/null
     for _ in $(seq 1 20); do
         gone "$pid" && break
@@ -41,4 +41,4 @@ for pid in $(pgrep -u "$USER" -f 'server\.py'); do
     fi
     stopped=1
 done
-[ -n "$stopped" ] || echo "No caption server was running here."
+[ -n "$stopped" ] || echo "No subtitle server was running here."

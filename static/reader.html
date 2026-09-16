@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Captions</title>
+<title>Transept subtitles</title>
 <style>
   :root {
     --ink: #16181d;
@@ -118,11 +118,11 @@
 // two sentences never change. A language with no entry falls back to
 // English, so adding one to config.toml is not a change to this file.
 const PHRASES = {
-  "English": ["Captions will appear here as people speak.",
+  "English": ["Subtitles will appear here as people speak.",
               "Jump to newest"],
-  "Amharic": ["ሰዎች ሲናገሩ የጽሑፍ መግለጫዎች እዚህ ይታያሉ።",
+  "Amharic": ["ሰዎች ሲናገሩ የትርጉም ጽሑፎች እዚህ ይታያሉ።",
               "ወደ አዲሱ ሂድ"],
-  "Arabic": ["ستظهر التسميات التوضيحية هنا أثناء حديث الناس.",
+  "Arabic": ["ستظهر الترجمة النصية هنا أثناء حديث الناس.",
              "الانتقال إلى الأحدث"],
   "Chinese": ["人们说话时，字幕会显示在这里。",
               "跳到最新"],
@@ -132,9 +132,9 @@ const PHRASES = {
              "Aller au plus récent"],
   "German": ["Untertitel erscheinen hier, während die Leute sprechen.",
              "Zu den neuesten springen"],
-  "Haitian Creole": ["Soutèt yo ap parèt isit la pandan moun ap pale.",
+  "Haitian Creole": ["Soutit yo ap parèt isit la pandan moun ap pale.",
                      "Ale nan pi resan an"],
-  "Hindi": ["लोग जैसे-जैसे बोलेंगे, कैप्शन यहाँ दिखाई देंगे।",
+  "Hindi": ["लोग जैसे-जैसे बोलेंगे, उपशीर्षक यहाँ दिखाई देंगे।",
             "नवीनतम पर जाएँ"],
   "Italian": ["I sottotitoli appariranno qui man mano che le persone parlano.",
               "Vai al più recente"],
@@ -144,7 +144,7 @@ const PHRASES = {
              "최신으로 이동"],
   "Kurdish": ["Jêrnivîs dê li vir xuya bibin dema ku mirov diaxivin.",
               "Biçe ya herî nû"],
-  "Nepali": ["मानिसहरू बोल्दै जाँदा क्याप्सनहरू यहाँ देखिनेछन्।",
+  "Nepali": ["मानिसहरू बोल्दै जाँदा उपशीर्षकहरू यहाँ देखिनेछन्।",
              "पछिल्लोमा जानुहोस्"],
   "Polish": ["Napisy pojawią się tutaj, gdy ludzie będą mówić.",
              "Przejdź do najnowszych"],
@@ -158,7 +158,7 @@ const PHRASES = {
               "Ir a lo más reciente"],
   "Swahili": ["Manukuu yataonekana hapa watu wanapozungumza.",
               "Nenda kwenye mapya zaidi"],
-  "Tagalog": ["Lalabas dito ang mga caption habang nagsasalita ang mga tao.",
+  "Tagalog": ["Lalabas dito ang mga subtitle habang nagsasalita ang mga tao.",
               "Pumunta sa pinakabago"],
   "Ukrainian": ["Субтитри з’являтимуться тут, коли люди говоритимуть.",
                 "Перейти до найновішого"],
@@ -167,7 +167,7 @@ const PHRASES = {
 };
 
 // Right to left, so the two lines this page writes itself read correctly.
-// Caption text carries dir="auto" instead, since a mixed line is common.
+// Subtitle text carries dir="auto" instead, since a mixed line is common.
 const RTL = ["Arabic", "Farsi", "Kurdish"];
 
 const feed = document.getElementById("feed");
@@ -182,7 +182,7 @@ const resume = document.getElementById("resume");
 const reader = (crypto.randomUUID ? crypto.randomUUID()
   : String(Math.random()).slice(2) + String(Date.now()));
 
-// The dot is the only thing on this page that says whether captions are
+// The dot is the only thing on this page that says whether subtitles are
 // still arriving, and a pause in the room looks exactly like a dropped
 // connection. The title is what tells the two apart, so it moves with the
 // colour rather than standing at one word for both states.
@@ -198,17 +198,17 @@ let pinned = true;
 // The same number as --size in the stylesheet, which is what the page shows
 // for the moment before this script runs. A stored size outside the range
 // the buttons can reach is not a size this page wrote, so it is ignored
-// rather than applied: --size: NaNrem would leave the captions unreadable
+// rather than applied: --size: NaNrem would leave the subtitles unreadable
 // with no way to tap back out of it.
 const DEFAULT_SIZE = 1.4;
 const MIN_SIZE = 0.9;
 const MAX_SIZE = 3;
-const stored = parseFloat(localStorage.getItem("captionSize"));
+const stored = parseFloat(localStorage.getItem("subtitleSize"));
 let size = (stored >= MIN_SIZE && stored <= MAX_SIZE) ? stored : DEFAULT_SIZE;
 
 function applySize() {
   document.documentElement.style.setProperty("--size", size + "rem");
-  localStorage.setItem("captionSize", String(size));
+  localStorage.setItem("subtitleSize", String(size));
 }
 document.getElementById("bigger").onclick = () => {
   size = Math.min(size + 0.15, MAX_SIZE); applySize();
@@ -263,7 +263,7 @@ function addLine(entry) {
   }
 
   line = document.createElement("p");
-  // The caption may be a right to left language, and an English name or a
+  // The subtitle may be a right to left language, and an English name or a
   // scripture reference inside it stays left to right either way.
   line.dir = "auto";
   line.textContent = entry.text;
@@ -284,7 +284,7 @@ function connect(channel) {
   seen = new Map();
   feed.innerHTML = '<p class="waiting" id="waiting"></p>';
   speak(channel);
-  localStorage.setItem("captionChannel", channel);
+  localStorage.setItem("subtitleChannel", channel);
   // The reader id tells the server this stream replaces the one this phone
   // already had, so a language somebody has just left stops being paid for
   // rather than running out its grace period with nobody reading it.
@@ -302,7 +302,7 @@ picker.onchange = () => connect(picker.value);
 
 // Before the channel list arrives, so a returning reader is not shown a
 // blank line and then an English one a moment later.
-speak(localStorage.getItem("captionChannel") || "English");
+speak(localStorage.getItem("subtitleChannel") || "English");
 
 // Keep the screen awake; reacquire after the phone is unlocked.
 async function keepAwake() {
@@ -326,7 +326,7 @@ fetch("/api/channels").then((r) => r.json()).then(({ channels }) => {
     option.textContent = name;
     picker.appendChild(option);
   }
-  const saved = localStorage.getItem("captionChannel");
+  const saved = localStorage.getItem("subtitleChannel");
   picker.value = channels.includes(saved) ? saved : "English";
   connect(picker.value);
 });

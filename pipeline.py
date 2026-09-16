@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Live captioning and translation, terminal edition.
+Live subtitling and translation, terminal edition.
 
 Captures audio, streams it to Deepgram for speech recognition, buffers
 finalized fragments into whole sentences, translates each sentence into every
@@ -155,7 +155,7 @@ DIM = "\033[2m"
 RESET = "\033[0m"
 
 SYSTEM_PROMPT = """\
-You are producing live captions for a Sunday school class. The source text \
+You are producing live subtitles for a Sunday school class. The source text \
 comes from automatic speech recognition of people speaking aloud, so it may \
 contain recognition errors, false starts, and incomplete sentences.
 
@@ -316,7 +316,7 @@ class Translator:
         self.glossary = glossary
         self.max_tokens = max_tokens
         self.reasoning_effort = reasoning_effort
-        # Live captioning gets one fast retry, because a class cannot wait out
+        # Live subtitling gets one fast retry, because a class cannot wait out
         # a long backoff and the caller falls back to English. Offline review
         # raises this, where waiting beats losing the line.
         self.max_attempts = max_attempts

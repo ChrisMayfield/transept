@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Live captioning and translation server.
+Live subtitling and translation server.
 
 Runs the capture pipeline behind an HTTP server, so a volunteer can start and
-stop it from a browser and listeners can read captions on their phones.
+stop it from a browser and listeners can read subtitles on their phones.
 
 Two listeners. The reader port carries the pages phones use, and is the
 one to point a tunnel at; the operator port stays on 127.0.0.1.
@@ -66,9 +66,9 @@ RECONNECT_BACKOFF = [1, 2, 5, 10, 20]
 # Seconds a run must last to count as healthy and reset the backoff. Without
 # it, a few blips early in a meeting make a later one cost twenty seconds.
 HEALTHY_RUN = 60
-# Queued in place of a caption to tell a stream handler its reader has
+# Queued in place of a subtitle to tell a stream handler its reader has
 # moved on. A sentinel object rather than None, which json.dumps would
-# happily turn into a caption reading "null".
+# happily turn into a subtitle reading "null".
 LEAVING = object()
 
 
@@ -322,7 +322,7 @@ class Session:
         return self.recorder is not None and self.recorder.session_id
 
     def _record(self, method, **row):
-        """Hand one row to the recorder, and never let it reach the captions.
+        """Hand one row to the recorder, and never let it reach the subtitles.
 
         The Recorder is built not to raise, but the guard belongs here as
         well, because these calls sit in the loop that drains the Deepgram
@@ -658,7 +658,7 @@ def authorized(request):
     browser tab post a cross-origin form at these routes.
     """
     token = request.app["token"]
-    supplied = (request.headers.get("X-Caption-Token")
+    supplied = (request.headers.get("X-Subtitle-Token")
                 or request.query.get("token") or "")
     # Bytes, because compare_digest on two str raises TypeError outside
     # ASCII and a query string can carry that.
@@ -702,7 +702,7 @@ async def api_devices(request):
     config = request.app["session"].config
     try:
         # In a thread: list_devices shells out to pactl with a five second
-        # timeout, and this loop is also feeding the captions.
+        # timeout, and this loop is also feeding the subtitles.
         devices = await asyncio.to_thread(capture.list_devices,
                                           config["capture"])
     except capture.CaptureError as exc:

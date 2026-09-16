@@ -62,7 +62,7 @@ def choose_default(devices):
     """Which input to offer first, in the backend's own order.
 
     parec marks nothing as default, so without a rule here a PulseAudio
-    machine offers its playback monitor first, and the captions would be
+    machine offers its playback monitor first, and the subtitles would be
     whatever the laptop is playing rather than what was said in the room.
     """
     for device in devices:

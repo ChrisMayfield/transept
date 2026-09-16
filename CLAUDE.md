@@ -5,8 +5,8 @@ Guidance for Claude Code (claude.ai/code) when working in this repository.
 
 ## What this is
 
-Live captioning and translation for an in-person meeting, delivered to phones over server-sent events.
-English speech in, English captions plus translations out, one channel per language.
+Live subtitling and translation for an in-person meeting, delivered to phones over server-sent events.
+English speech in, English subtitles plus translations out, one channel per language.
 
 The readers are people who cannot hear well and people whose first language is not English, on their own phones during a church meeting.
 The operator is a volunteer with a laptop who has five minutes before the meeting starts.
@@ -22,7 +22,7 @@ The English channel is a transcript, not a summary.
 It may be corrected for recognition errors using the glossary, but false starts, repetitions, and informal grammar stay as spoken, because for a deaf reader that line is the record of what was said.
 Translations get latitude on grammar and phrasing because fluency requires it, never on content.
 
-Captions must never silently stall.
+Subtitles must never silently stall.
 When a translation fails, times out, or comes back missing a language, the English text goes to that channel so a reader sees something rather than a gap.
 
 ## Commands
@@ -104,7 +104,7 @@ Every operator route is behind `authorized`, including the two that only read: `
 The token also stops a page in another tab of the operator's browser from posting a cross-origin form at the loopback port, which needs no CORS preflight and would otherwise reach `Session.start`.
 A refusal has to keep the shape the operator page destructures, `ok` and `message` for status and `devices` and `error` for the device list, or the page renders a blank panel instead of saying the token is wrong.
 
-Handlers share their event loop with the capture pipeline, so anything that blocks in one stalls the caption fan-out to every phone in the room.
+Handlers share their event loop with the capture pipeline, so anything that blocks in one stalls the subtitle fan-out to every phone in the room.
 `api_devices` runs `pactl` under `asyncio.to_thread` for that reason, and a handler that shells out, touches the disk, or calls a third party belongs in a thread too.
 
 `max_listeners` bounds how many event streams the `Hub` holds, since nothing authenticates to open one and each costs a task, a queue, a socket, and a write on every published line.
@@ -243,14 +243,14 @@ A check that cannot fail is worse than no check, because it reads like coverage.
 "the server exited when asked" terminated the process, waited three seconds, killed it, and then asserted a return code, which is true after a kill, so it passed for a release while the server could not in fact exit at all with a reader connected; it now holds an event stream open across the shutdown and asserts that killing was never needed.
 After adding a check for a fix, revert the fix and confirm the check fails.
 
-What `selftest.py` cannot tell you is whether the captions are any good.
+What `selftest.py` cannot tell you is whether the subtitles are any good.
 Recognition accuracy is decided by the microphone feed and can only be judged in the actual room, and translation quality needs a native speaker and `review.py`.
 Latency claims should come from an actual run: `python3 pipeline.py --no-translate` tags each line with how far behind real time it arrived, and a full `pipeline.py` or `review.py` run prints translation median and p95 on exit.
 
 ## Known limits
 
 The reader view is a plain web page by choice, not an installable app.
-A manifest and service worker would add install friction and offline machinery that a live caption feed cannot use anyway.
+A manifest and service worker would add install friction and offline machinery that a live subtitle feed cannot use anyway.
 HTTPS is still required, because the screen wake lock needs a secure context, and a tunnel in front is the current answer.
 `public_url` exists because the bind address is not the address a phone can reach, and the QR endpoint renders that value rather than the listener.
 

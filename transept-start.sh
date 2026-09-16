@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Start the caption server and open a Tailscale Funnel in front of it.
+# Start the subtitle server and open a Tailscale Funnel in front of it.
 # Run it from anywhere: server.py reads config.toml, .env, and static/ out
 # of the directory it starts in, so move there first.
 set -euo pipefail
@@ -42,7 +42,7 @@ fi
 # -u because the operator address is printed once at startup and Python
 # buffers stdout when it is a file, which would hold that line back until
 # the server exits.
-echo "Starting the caption server..."
+echo "Starting the subtitle server..."
 "$PYTHON" -u server.py >"$LOG_FILE" 2>&1 &
 SERVER_PID=$!
 for _ in $(seq 1 30); do
@@ -61,7 +61,7 @@ fi
 echo "Opening the Tailscale Funnel on port $PORT..."
 if ! tailscale funnel --bg --yes "$PORT"; then
     echo "The funnel did not open, so no phone off this laptop can reach the"
-    echo "captions. If the message above was about access, run this once:"
+    echo "subtitles. If the message above was about access, run this once:"
     echo "    sudo tailscale set --operator=$USER"
     ./transept-stop.sh >/dev/null
     exit 1
