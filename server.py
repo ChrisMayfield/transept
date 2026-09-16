@@ -157,6 +157,24 @@ class Hub:
         if dropped:
             self.last_seen[channel] = time.monotonic()
 
+    def close(self):
+        """End every open stream, so the handlers holding them return.
+
+        A phone keeps its stream open for as long as the page is up, and
+        AppRunner.cleanup waits on the connections a site still has, so one
+        reader who never closes the tab keeps the whole process alive after
+        the operator has pressed Ctrl-C.
+        """
+        for queues in self.subscribers.values():
+            for queue in list(queues):
+                try:
+                    queue.put_nowait(LEAVING)
+                except asyncio.QueueFull:
+                    # Far enough behind that the handler is not reading;
+                    # closing the socket under it ends that one instead.
+                    pass
+        self.streams.clear()
+
     def wanted(self, channel, grace):
         """True while somebody is reading this channel, or just was."""
         if self.subscribers[channel]:
@@ -891,6 +909,8 @@ async def serve(config, token, settings):
         # Before the runners: stopping the session closes the Deepgram
         # socket and the translator, which needs the loop still running.
         await session.stop()
+        # Then let go of the phones, for the reason Hub.close explains.
+        hub.close()
         for runner in runners:
             await runner.cleanup()
 

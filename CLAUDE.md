@@ -35,6 +35,8 @@ python3 selftest.py [section]         lint, pipeline, session, store, server
 ruff check .                          the linter alone, as selftest runs it
 python3 review.py --input t.txt --review review.md    offline translation review
 python3 record.py --session last --out review/sunday.md    read a session back
+./transept-start.sh                   stop leftovers, start, open the funnel
+./transept-stop.sh                    the funnel, then the server
 ```
 
 Any setting may be overridden for a one-off, for example `python3 server.py --ceiling 6`.
@@ -115,6 +117,19 @@ The reader page keeps chosen language and text size in `localStorage` and holds 
 Its own two lines, the empty-feed message and the jump-to-newest button, are translated from the `PHRASES` table in the page rather than by the model: a reader who does not read English should not wait on a model call to be told nobody has spoken yet, and those two sentences never change.
 A language missing from the table falls back to English, so adding one to `config.toml` is not a change to `reader.html`.
 
+### Operator scripts
+
+`transept-start.sh` and `transept-stop.sh` are the weekly pair for a room behind Tailscale Funnel, and `README.md` covers what they do for the operator.
+They are bash and they assume Tailscale, which is a narrower bet than the rest of the project makes; everything else here runs on three platforms.
+Nothing else may depend on them, and `server.py` must stay runnable on its own.
+
+Both ports and `public_url` are read from `config.toml` with `tomllib`, never copied into the scripts, since a second copy of the port is a copy that will one day disagree with the one the server binds.
+The start script warns when `public_url` differs from the address the funnel just published, which is the one setup mistake that survives a successful start and only shows up as a QR code nobody can open.
+
+There is no PID file.
+`transept-stop.sh` finds its target the way the operator would describe it, a python whose working directory is this one, running `server.py`, which also catches the copy somebody started by hand in a terminal they have since closed.
+Both halves of that test earn their place, because matching the command line alone would also match an editor or a shell with the same words in it, and the next thing the script does is send that process a signal.
+
 ## Things that look wrong but are not
 
 Segmentation exists because Deepgram finalizes text mid-sentence.
@@ -163,6 +178,21 @@ Without it, a dead capture device leaves the websocket open and the session hang
 
 The 48 kHz fallback averages groups of three samples rather than taking every third one, because plain decimation would alias everything above 8 kHz back into the speech band.
 
+`transept-start.sh` runs `python3 -u`.
+Python block buffers stdout when it is a file rather than a terminal, and the operator address with its token is printed once at startup, so without `-u` the log file stays empty until the server exits, which is exactly when that address stops being worth having.
+
+`transept-start.sh` runs `transept-stop.sh` before it starts anything.
+A server left from a previous meeting holds both ports, and by then there is rarely a terminal left to press Ctrl-C in, so refusing would send a volunteer hunting for a process five minutes before the meeting.
+Clearing first also means anything still holding either port afterwards is genuinely not Transept, which is the one case worth stopping for and what the `ss` check reports.
+
+`transept-stop.sh` closes the funnel with `tailscale funnel reset` rather than naming the port.
+The per-port `tailscale funnel 8080 off` form was removed, and current versions answer it with "the CLI for serve and funnel has changed" and a nonzero exit, which in a stop script means a meeting's address stays open to the internet afterwards.
+
+`serve` calls `hub.close()` between stopping the session and cleaning up the runners.
+A phone holds its event stream open for as long as the page is up, `AppRunner.cleanup` waits on the connections its site still has, and an event stream ends only when the handler returns.
+Without it the process does not exit at all while one reader still has the page open, which is every meeting, and Ctrl-C appears to do nothing.
+The operator then closes the terminal on a process that goes on holding the operator port, and next week's run dies of `address already in use` against an owner that has no window left to press Ctrl-C in.
+
 `install_stop_handler` exists because `loop.add_signal_handler` raises `NotImplementedError` on Windows.
 Platform assumptions belong in `capture.py` and that function, nowhere else.
 
@@ -208,9 +238,9 @@ Adding a check means adding one `checks.check(label, condition, detail)` line.
 The `store` section ends with a `Recorder` that raises on every method, asserted against the `Hub` buffers.
 An isolation wrapper with no test that exercises the raising path is a wrapper nobody knows works; this one was written before the guard existed and failed until it did.
 
-A fixture that cannot reach a branch hides a bug under a passing check.
-`FRAGMENTS` once punctuated its second fragment, so the buffer was always empty when the gap check ran and a sequence number collision lived for a release under a check whose label claimed to test the gap.
-It now closes one sentence each way, by gap, by endpoint on the same fragment, and by punctuation.
+A check that cannot fail is worse than no check, because it reads like coverage.
+`FRAGMENTS` once punctuated its second fragment, so the buffer was always empty when the gap check ran and a sequence number collision lived for a release under a check whose label claimed to test the gap; it now closes one sentence each way, by gap, by endpoint on the same fragment, and by punctuation.
+"the server exited when asked" terminated the process, waited three seconds, killed it, and then asserted a return code, which is true after a kill, so it passed for a release while the server could not in fact exit at all with a reader connected; it now holds an event stream open across the shutdown and asserts that killing was never needed.
 After adding a check for a fix, revert the fix and confirm the check fails.
 
 What `selftest.py` cannot tell you is whether the captions are any good.

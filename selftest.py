@@ -908,6 +908,7 @@ def check_server(checks):
         cwd=HERE, env=environment, stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT, text=True)
     lines, reader = drain(process)
+    lingering = None
     try:
         if not wait_for_port(port, process) or not wait_for_port(
                 operator, process):
@@ -1030,17 +1031,23 @@ def check_server(checks):
         finally:
             for sock in held:
                 sock.close()
+
+        # Held open across the shutdown below, because a phone with the
+        # page still up is the normal state of the room when the operator
+        # presses Ctrl-C, and a stream nobody ends is a connection the
+        # runner will wait on.
+        lingering = open_stream(port)
     finally:
-        # A graceful exit can lag by up to the event stream keepalive, since
-        # the handler for a reader who has walked away only finds out at its
-        # next write. Waiting that out would double the time this takes, so
-        # give it a moment and then insist.
         process.terminate()
+        forced = False
         try:
-            process.wait(timeout=3)
+            process.wait(timeout=5)
         except subprocess.TimeoutExpired:
+            forced = True
             process.kill()
             process.wait()
+        if lingering:
+            lingering.close()
         reader.join(timeout=2)
         output = "".join(lines)
 
@@ -1054,8 +1061,8 @@ def check_server(checks):
                  len(TOKEN) >= 32, TOKEN)
     checks.check("binding to loopback says so, since a phone cannot reach it",
                  "Bound to this machine only" in output, output)
-    checks.check("the server exited when asked",
-                 process.returncode is not None, process.returncode)
+    checks.check("the server exited while a phone was still reading",
+                 not forced, "it ignored the signal and had to be killed")
 
 
 # -- recording a session -----------------------------------------------------
