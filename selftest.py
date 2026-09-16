@@ -401,6 +401,18 @@ async def check_pipeline(checks):
                  "French" in session.demand()[0],
                  session.demand())
 
+    # The operator page shows this beside the total, and the language list
+    # cannot carry it: every row there is a translated channel with a mode
+    # to set, and English has no model call to switch off.
+    hub.subscribe("English")
+    hub.subscribe("English")
+    status = session.status()
+    checks.check("the readers on English are counted for the operator",
+                 status["english_listeners"] == 2
+                 and all(row["name"] != "English"
+                         for row in status["languages"]),
+                 status["english_listeners"])
+
     checks.section("Translation failure falls back to English")
     translator = FakeTranslator(mode="fail")
     session, hub = make_session(["French"], False, ["French"])

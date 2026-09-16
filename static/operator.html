@@ -76,6 +76,8 @@
        padding-top: 1.25rem; border-top: 1px solid var(--rule); }
   dl > div { min-width: 0; }
   dt { font-size: .78rem; color: var(--quiet); }
+  /* The only hint that the labels explain themselves on hover. */
+  dt[title] { cursor: help; }
   dd { margin: .15rem 0 0; font-size: 1.3rem; font-variant-numeric: tabular-nums; }
   @media (max-width: 26rem) { dl { grid-template-columns: repeat(2, 1fr); } }
 
@@ -155,15 +157,25 @@
   <button id="stop" class="secondary">Stop</button>
 </div>
 
+<!-- Three rows, and the row a number sits in is half of what it says. The
+     first is the room: how much has been said and who is reading it. The
+     second is trouble, where any number above zero is worth a look. The
+     third is ordinary running, which is not zero on a healthy Sunday.
+
+     A label has room for one or two words, and a volunteer who has run this
+     twice should not have to guess which two, so the sentence each one is
+     short for lives in its title, on one line because a tooltip keeps the
+     newlines and the indentation it is given. -->
 <dl>
-  <div><dt>Sentences</dt><dd id="units">0</dd></div>
-  <div><dt>Listening</dt><dd id="listeners">0</dd></div>
-  <div><dt>Translation</dt><dd id="median">&ndash;</dd></div>
-  <div><dt>Fell back</dt><dd id="failures">0</dd></div>
-  <div><dt>Too slow</dt><dd id="timeouts">0</dd></div>
-  <div><dt>Reconnects</dt><dd id="reconnects">0</dd></div>
-  <div><dt>Untranslated</dt><dd id="skipped">0</dd></div>
-  <div><dt>Corrected</dt><dd id="corrections">0</dd></div>
+  <div><dt title="Whole sentences recognized since this session started.">Sentences</dt><dd id="units">0</dd></div>
+  <div><dt title="Devices with a caption channel open right now, counting every language.">Reading</dt><dd id="listeners">0</dd></div>
+  <div><dt title="How many of those devices are reading the English channel.">English</dt><dd id="english">0</dd></div>
+  <div><dt title="Sentences whose translation failed, so those channels showed the English words instead.">Fell back</dt><dd id="failures">0</dd></div>
+  <div><dt title="Sentences whose translation did not arrive in time, so those channels showed the English words instead.">Too slow</dt><dd id="timeouts">0</dd></div>
+  <div><dt title="Times the connection to the recognizer dropped and was opened again. A few early in a meeting are normal.">Reconnects</dt><dd id="reconnects">0</dd></div>
+  <div><dt title="Median time the translation model took to answer.">Translation</dt><dd id="median">&ndash;</dd></div>
+  <div><dt title="Sentences nobody had a translated channel open for, so no model call was made and they cost nothing.">Untranslated</dt><dd id="skipped">0</dd></div>
+  <div><dt title="English lines the glossary revised after they had already gone out, usually a name the recognizer misheard.">Corrected</dt><dd id="corrections">0</dd></div>
 </dl>
 
 <div class="share" id="share">
@@ -300,6 +312,7 @@ function render(status) {
   // Only once it has happened, so a cap that never bites adds nothing.
   el("listeners").textContent = status.refused
     ? `${reading} (${status.refused} turned away)` : reading;
+  el("english").textContent = status.english_listeners || 0;
 
   // The same rule Session.start enforces. Reconnecting also means a
   // supervisor task is alive, so a green Start there offers the operator
@@ -342,8 +355,13 @@ function renderLanguages(languages) {
     const live = document.createElement("span");
     live.className = "live" + (language.active ? " on" : "")
       + (language.capped ? " capped" : "");
+    // One per state, since the dot is three colours and a grey one has two
+    // quite different meanings: nobody is reading this language, or the
+    // operator switched it off and nothing at all reaches that channel.
     live.title = language.active ? "Translating"
-      : language.capped ? "Over the language cap, showing English" : "Idle";
+      : language.capped ? "Over the language cap, showing English"
+      : language.override === "off" ? "Off, nothing is sent to this channel"
+      : "Idle, nobody is reading this language";
 
     const name = document.createElement("span");
     name.className = "name";

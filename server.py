@@ -379,6 +379,12 @@ class Session:
         return True, f"{language} set to {mode}."
 
     def language_report(self):
+        """The translated channels, which are the ones with a mode to set.
+
+        English is not here. It is never a model call, so it has nothing
+        the buttons on this list could switch; its reader count goes to
+        the operator page as english_listeners instead.
+        """
         translated, capped = self.demand()
         translated, capped = set(translated), set(capped)
         return [{
@@ -444,6 +450,9 @@ class Session:
             "recording": bool(self.recording()),
             "dropped": self.recorder.dropped if self.recorder else 0,
             "languages": self.language_report(),
+            # Beside the total on the page: a room where everybody reads
+            # English and a room where nobody does need different things
+            # from the operator, and the total alone cannot tell them apart.
             "english_listeners": len(self.hub.subscribers["English"]),
             "median": (sorted(latencies)[len(latencies) // 2]
                        if latencies else None),

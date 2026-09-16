@@ -31,13 +31,19 @@
     padding: calc(.6rem + env(safe-area-inset-top)) 1rem .6rem;
     background: var(--paper); border-bottom: 1px solid var(--rule);
   }
+  /* min-width because a flex item will not shrink below its content, and a
+     select's content is its widest option: on a narrow phone "Haitian
+     Creole" would otherwise push the size buttons off the screen. */
   select {
     font: inherit; font-size: .95rem; font-weight: 600; color: var(--ink);
-    background: transparent; border: 0; padding: .2rem 0; flex: 1;
+    background: transparent; border: 0; padding: .2rem 0;
+    flex: 1; min-width: 0;
   }
+  /* The same pair the operator page uses for a live channel. Grey against
+     teal was too close a call on a phone in a bright room. */
   .dot {
     width: .5rem; height: .5rem; border-radius: 50%;
-    background: var(--quiet); flex: none;
+    background: var(--rule); flex: none;
   }
   .dot.on { background: var(--live); }
   .sizes { display: flex; gap: .25rem; }
@@ -83,11 +89,18 @@
 </head>
 <body>
 <header>
-  <span class="dot" id="dot" title="Connection"></span>
+  <span class="dot" id="dot" title="Connecting"></span>
   <select id="channel" aria-label="Language"></select>
+  <!-- Reset last rather than between the two steppers: those get tapped
+       repeatedly, and a mis-tap in the middle would throw away the size
+       somebody had just spent four taps finding. -->
   <div class="sizes">
-    <button id="smaller" aria-label="Smaller text">&minus;</button>
-    <button id="bigger" aria-label="Larger text">+</button>
+    <button id="smaller" title="Smaller text"
+            aria-label="Smaller text">&minus;</button>
+    <button id="bigger" title="Larger text"
+            aria-label="Larger text">+</button>
+    <button id="reset" title="Default text size"
+            aria-label="Default text size">&#8634;</button>
   </div>
 </header>
 
@@ -169,20 +182,42 @@ const resume = document.getElementById("resume");
 const reader = (crypto.randomUUID ? crypto.randomUUID()
   : String(Math.random()).slice(2) + String(Date.now()));
 
+// The dot is the only thing on this page that says whether captions are
+// still arriving, and a pause in the room looks exactly like a dropped
+// connection. The title is what tells the two apart, so it moves with the
+// colour rather than standing at one word for both states.
+function connected(live) {
+  dot.classList.toggle("on", live);
+  dot.title = live ? "Connected" : "Not connected, trying again";
+}
+
 let source = null;
 let seen = new Map();
 let pinned = true;
-let size = parseFloat(localStorage.getItem("captionSize") || "1.4");
+
+// The same number as --size in the stylesheet, which is what the page shows
+// for the moment before this script runs. A stored size outside the range
+// the buttons can reach is not a size this page wrote, so it is ignored
+// rather than applied: --size: NaNrem would leave the captions unreadable
+// with no way to tap back out of it.
+const DEFAULT_SIZE = 1.4;
+const MIN_SIZE = 0.9;
+const MAX_SIZE = 3;
+const stored = parseFloat(localStorage.getItem("captionSize"));
+let size = (stored >= MIN_SIZE && stored <= MAX_SIZE) ? stored : DEFAULT_SIZE;
 
 function applySize() {
   document.documentElement.style.setProperty("--size", size + "rem");
   localStorage.setItem("captionSize", String(size));
 }
 document.getElementById("bigger").onclick = () => {
-  size = Math.min(size + 0.15, 3); applySize();
+  size = Math.min(size + 0.15, MAX_SIZE); applySize();
 };
 document.getElementById("smaller").onclick = () => {
-  size = Math.max(size - 0.15, 0.9); applySize();
+  size = Math.max(size - 0.15, MIN_SIZE); applySize();
+};
+document.getElementById("reset").onclick = () => {
+  size = DEFAULT_SIZE; applySize();
 };
 applySize();
 
@@ -255,10 +290,10 @@ function connect(channel) {
   // rather than running out its grace period with nobody reading it.
   source = new EventSource("/stream/" + encodeURIComponent(channel)
                            + "?reader=" + encodeURIComponent(reader));
-  source.onopen = () => dot.classList.add("on");
-  source.onerror = () => dot.classList.remove("on");
+  source.onopen = () => connected(true);
+  source.onerror = () => connected(false);
   source.onmessage = (event) => {
-    dot.classList.add("on");
+    connected(true);
     addLine(JSON.parse(event.data));
   };
 }
@@ -280,14 +315,19 @@ document.addEventListener("visibilitychange", () => {
 keepAwake();
 
 fetch("/api/channels").then((r) => r.json()).then(({ channels }) => {
-  for (const name of channels) {
+  // Alphabetical, English included: the server lists English first because
+  // that is the order the pipeline works in, but a reader looking for
+  // Swahili scans a list, and a name out of order is a name they scan past.
+  // English is still what an untouched phone opens on.
+  const sorted = channels.slice().sort((a, b) => a.localeCompare(b));
+  for (const name of sorted) {
     const option = document.createElement("option");
     option.value = name;
     option.textContent = name;
     picker.appendChild(option);
   }
   const saved = localStorage.getItem("captionChannel");
-  picker.value = channels.includes(saved) ? saved : channels[0];
+  picker.value = channels.includes(saved) ? saved : "English";
   connect(picker.value);
 });
 </script>
