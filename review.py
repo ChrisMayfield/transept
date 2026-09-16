@@ -27,12 +27,11 @@ are dropped, unless --keep-prefix is given.
 
 import argparse
 import asyncio
-import os
 import re
 import sys
 
 from pipeline import (CONTEXT_UNITS, Translator, add_settings_arguments,
-                      latency_summary, load_config, load_env, load_glossary,
+                      latency_summary, load_config, load_glossary, load_keys,
                       resolve)
 
 ANSI_RE = re.compile(r"\033\[[0-9;]*m")
@@ -85,12 +84,12 @@ def write_review(path, model, outputs, rows):
                 out.write("> Comments:\n\n")
 
 
-async def run(args, settings):
-    load_env()
-    api_key = os.environ.get("LLM_API_KEY")
-    base_url = os.environ.get("LLM_BASE_URL")
+async def run(args, settings, keys):
+    api_key = keys["llm_key"]
+    base_url = keys["llm_base"]
     if not api_key or not base_url:
-        sys.exit("Set LLM_API_KEY and LLM_BASE_URL in .env")
+        sys.exit("Set llm_api_key and llm_base_url under [keys] in "
+                 "config.toml")
     if not settings["model"]:
         sys.exit("No model. Set translation.model in config.toml or pass "
                  "--model.")
@@ -154,13 +153,14 @@ def main():
                         help="take every input line verbatim")
     parser.add_argument("--config", default="config.toml")
     add_settings_arguments(parser, [
-        "languages",
         "model", "reasoning_effort", "correct_english", "max_tokens",
         "timeout",
+        "languages",
         "glossary",
     ])
     args = parser.parse_args()
-    asyncio.run(run(args, resolve(args, load_config(args.config))))
+    config = load_config(args.config)
+    asyncio.run(run(args, resolve(args, config), load_keys(config)))
 
 
 if __name__ == "__main__":

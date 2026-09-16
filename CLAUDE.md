@@ -53,7 +53,7 @@ capture -> Deepgram websocket -> Segmenter -> Translator -> Hub -> SSE -> phones
 Both yield 16 kHz mono signed 16-bit chunks, and nothing downstream knows which produced them.
 An empty chunk means end of stream, which is how a device that disappears becomes a reconnect rather than a hang.
 
-`pipeline.py` holds everything the entry points share: `SETTINGS`, `resolve`, `Segmenter`, `Translator`, `SYSTEM_PROMPT`, `load_env`, and the three loops `pump_audio`, `listen`, and `publish`.
+`pipeline.py` holds everything the entry points share: `SECRETS`, `SETTINGS`, `resolve`, `load_keys`, `Segmenter`, `Translator`, `SYSTEM_PROMPT`, and the three loops `pump_audio`, `listen`, and `publish`.
 It also runs standalone as a terminal tool, which is the fastest way to debug the pipeline without the web layer.
 
 `server.py` adds `Hub` (ring buffers and subscribers), `Session` (start, stop, supervise, reconnect), and the aiohttp routes.
@@ -204,8 +204,17 @@ It changes with a reboot or a replugged cable, so a name in `config.toml` would 
 
 Settings live in `config.toml`, resolved by the `SETTINGS` table in `pipeline.py`.
 Adding a setting means adding one row there, then naming it in the `add_settings_arguments` call of whichever entry points should expose it as a flag.
+`SETTINGS`, `ARGUMENT_HELP`, and `config.example.toml` are in one order, section for section and key for key, because adding a setting means reading them side by side; `selftest.py` compares the first and the last and fails on drift.
+The sections follow the path a sentence takes: `[audio]` in, `[recognition]`, `[segmentation]`, `[translation]`, then `[languages]`, the `[files]` that tune both models, `[session]`, and `[server]` out.
+`endpointing` is a Deepgram parameter rather than a property of the sound card, so it sits in `[recognition]` beside the model it is sent with.
 Every argparse default is `None` so `resolve` can distinguish an absent flag from one that happens to match the default.
-Secrets stay in `.env` and never move into `config.toml`.
+
+The keys live in the same file, in `[keys]`, resolved by `load_keys` against the `SECRETS` table rather than by `resolve`.
+A separate `.env` meant that changing translation providers was two edits in two files, one for the base URL and the key and one for the model name, which is the change most likely to be made in a hurry.
+They are not rows in `SETTINGS` because `SETTINGS` becomes command line flags, and a key on a command line lands in the process list and in shell history.
+An environment variable of the same name in capitals overrides the file, which is what a systemd unit, a container, or `selftest.py` uses; an empty variable counts as set, which is how a run asks for a minted operator token on a machine whose `config.toml` pins one.
+`config.toml` is gitignored for this reason and the file itself says so at the top.
+The third column of `SECRETS` is always the second in capitals, spelled out rather than derived so that grepping for `DEEPGRAM_API_KEY` finds the table, and `selftest.py` asserts the two agree so the rule the config file states cannot drift.
 
 Standard library first, few dependencies.
 `websockets`, `httpx`, and `aiohttp` are the whole list at runtime, and adding a fourth needs a real reason.
@@ -258,6 +267,8 @@ HTTPS is still required, because the screen wake lock needs a secure context, an
 A headless machine wants an SSH forward rather than a wider bind.
 
 The operator token is minted every run and printed with the address, and there is no tokenless mode.
-`OPERATOR_TOKEN` in `.env` pins it, which exists for development, where a fresh address every restart is a fresh link to click every restart.
-It stays in `.env` beside the keys rather than becoming a `config.toml` setting, because a setting invites a weak or forgotten token on the machine that runs the meetings.
+`operator_token` under `[keys]` pins it, which exists for development, where a fresh address every restart is a fresh link to click every restart.
+It sits with the keys rather than among the settings, and `operator_token()` takes the pinned value as an argument rather than reading the environment itself, so the one place that decides where a secret comes from stays `load_keys`.
+It is not a `SETTINGS` row and so has no flag, because a setting invites a weak or forgotten token on the machine that runs the meetings.
+A meeting leaves it empty.
 The token still travels in the query string on that first load, so it reaches browser history, and stripping it from the address bar is not a client-side fix while `/operator` itself is gated on it.

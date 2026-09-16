@@ -24,8 +24,9 @@ Phones subscribe over server-sent events, one channel per language, with the las
 `pipeline.py` is the same pipeline without the web layer, which is the fastest way to check a microphone or tune segmentation.
 `review.py` translates a text file offline, `record.py` keeps a session and turns it into a review document, `capture.py` is the audio layer, `selftest.py` checks the software without a microphone or an API key, and `static/` holds the two web pages.
 
-**Config files:** Settings live in `config.toml` and secrets in `.env`.
-Keeping them apart means your settings can be committed to your own fork and copied to a second room, while your keys never leave your machine.
+**Config file:** Everything is in `config.toml`, keys included, so switching translation providers is one edit rather than two.
+It is gitignored, because it holds your keys once you fill them in.
+A fork that wants to commit its settings so a second room starts from a known-good file should take the keys back out first, or set them through the environment instead.
 
 ## What you need
 
@@ -55,9 +56,12 @@ git clone <this repository>
 cd transept
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env                # the two API keys
-cp config.example.toml config.toml  # everything else
+cp config.example.toml config.toml  # the two API keys, and everything else
 ```
+
+Open `config.toml` and paste the two keys in under `[keys]`.
+Everything below them has a working default.
+An environment variable of the same name in capitals, `DEEPGRAM_API_KEY` or `LLM_API_KEY`, overrides the file, which is how a systemd unit or a container supplies a key without one being written down here.
 
 Then see what audio sources this machine offers:
 
@@ -116,7 +120,7 @@ Settle with your speakers which variety of a language they actually use, because
 python3 server.py
 ```
 
-That is the whole weekly command, and everything it needs is in `config.toml` and `.env`.
+That is the whole weekly command, and everything it needs is in `config.toml`.
 Any setting can still be overridden for a one-off, for example `python3 server.py --ceiling 6`.
 Once a tunnel is set up, the two scripts under [Two commands on a Sunday](#two-commands-on-a-sunday) run the server and the funnel together, which is the shorter version of this page.
 
@@ -124,7 +128,7 @@ Two addresses are printed, on two different ports.
 The operator opens the `/operator` one on the laptop, picks the audio source, and presses Start.
 That port is bound to this machine only, so the controls cannot be reached from the network or through your tunnel.
 Its address carries a token minted for that run, so copy it from the terminal each week rather than saving a bookmark.
-Setting `OPERATOR_TOKEN` in `.env` pins it instead, which saves clicking a fresh link on every restart while developing; leave it unset for a meeting, so a link that leaks expires when the server does.
+Setting `operator_token` under `[keys]` pins it instead, which saves clicking a fresh link on every restart while developing; leave it empty for a meeting, so a link that leaks expires when the server does.
 Everyone else opens `/` on their phone and picks a language.
 
 The language list is fixed when the server starts, which keeps the reader URLs stable so a printed card or a saved bookmark keeps working week to week.

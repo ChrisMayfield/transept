@@ -1,15 +1,62 @@
-# Copy to config.toml and edit. Secrets stay in .env; everything else
-# lives here so a weekly run is just `python3 server.py`.
+# Copy to config.toml and edit. Gitignored, because it holds your API keys.
 #
-# Anything here can be overridden on the command line for a one-off.
+# Any setting can be overridden on the command line, except the keys, which
+# an environment variable of the same name in capitals overrides instead.
+
+[keys]
+# Speech recognition. Create a key at https://console.deepgram.com
+# New accounts include free credit that covers a long time at a few
+# meetings a week.
+deepgram_api_key = ""
+
+# Translation. Any OpenAI-compatible endpoint, the part of the URL before
+# /chat/completions. The model it serves is translation.model below.
+#
+#   Google            https://generativelanguage.googleapis.com/v1beta/openai
+#   Anthropic         https://api.anthropic.com/v1
+#   OpenAI            https://api.openai.com/v1
+#   Local Ollama      http://localhost:11434/v1
+#   LiteLLM proxy     http://your-proxy:4000/v1
+llm_base_url = ""
+llm_api_key = ""
+
+# Pins the /operator address across restarts, for development. Leave empty
+# for a meeting, so a link that leaks expires when the server does.
+operator_token = ""
 
 [audio]
 # auto picks parec on Linux when available and sounddevice everywhere else.
 # Force one with "sounddevice" or "parec" if the other misbehaves.
 backend = "auto"
+
+[recognition]
+model = "nova-3"
 # Milliseconds of silence that ends an utterance. Lower is snappier but
 # clips people who pause mid-sentence.
 endpointing = 400
+
+[segmentation]
+# Seconds a half-finished sentence waits before being translated anyway.
+# Watch how often sentences close with reason "ceiling": a lot of them means
+# people are talking over each other.
+ceiling = 4.0
+# Silence that separates one person's abandoned sentence from the next
+# person's new one.
+gap = 0.6
+
+[translation]
+model = "gemini-3.8-flash"
+# Translation does not benefit from deliberation. On models that think by
+# default this roughly halves latency.
+reasoning_effort = "low"
+# Use the glossary to fix recognition errors on the English channel too.
+correct_english = true
+# Raise if responses truncate; thinking tokens count against this.
+max_tokens = 2000
+# Seconds before a request is abandoned.
+timeout = 15
+# Seconds to wait for a translation before showing English instead.
+hold = 8
 
 [languages]
 # What readers may choose from. A language costs nothing until somebody
@@ -26,28 +73,9 @@ grace = 90
 # opening every channel from making every sentence cost the whole list.
 max_active = 0
 
-[translation]
-model = "gemini-3.8-flash"
-# Translation does not benefit from deliberation. On models that think by
-# default this roughly halves latency.
-reasoning_effort = "low"
-# Use the glossary to fix recognition errors on the English channel too.
-correct_english = true
-# Raise if responses truncate; thinking tokens count against this.
-max_tokens = 2000
-# Seconds before a request is abandoned.
-timeout = 15
-# Seconds to wait for a translation before showing English instead.
-hold = 8
-
-[segmentation]
-# Seconds a half-finished sentence waits before being translated anyway.
-# Watch how often sentences close with reason "ceiling": a lot of them means
-# people are talking over each other.
-ceiling = 4.0
-# Silence that separates one person's abandoned sentence from the next
-# person's new one.
-gap = 0.6
+[files]
+glossary = "glossary.txt"
+keyterms = "keyterms.txt"
 
 [session]
 # Stop by itself after this many minutes with nothing said, because
@@ -64,13 +92,6 @@ idle_stop_minutes = 10
 # reading. Nothing is ever deleted automatically.
 record = false
 database = "sessions.db"
-
-[recognition]
-model = "nova-3"
-
-[files]
-glossary = "glossary.txt"
-keyterms = "keyterms.txt"
 
 [server]
 # Loopback only, which is the right default when a tunnel is in front:

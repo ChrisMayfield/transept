@@ -1,13 +1,10 @@
-# Secrets
-.env
+# Settings and API keys. A fork can commit its own copy so a second room
+# starts from a known-good file, but only after taking out the API keys.
+config.toml
 
 # May include names of members. Keep these out of a public repository.
 glossary.txt
 keyterms.txt
-
-# Settings might be worth committing to your own fork so a second room
-# can start from a known-good file.
-config.toml
 
 # Recordings, transcripts, and review documents. A recorded session holds
 # every word said in the room, so it is more sensitive than the glossary.

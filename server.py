@@ -17,7 +17,7 @@ per language, only while somebody is reading that language or the operator
 has forced it on, so an unread language costs nothing.
 
 The operator address is printed at startup with a token minted for that
-run, unless OPERATOR_TOKEN in .env pins one for development.
+run, unless operator_token in config.toml pins one for development.
 
 Usage:
     python3 server.py --model gemini-3.8-flash --reasoning-effort low \\
@@ -35,7 +35,6 @@ import hashlib
 import hmac
 import io
 import json
-import os
 import secrets
 import sys
 import time
@@ -53,8 +52,8 @@ import record
 from pipeline import (SYSTEM_PROMPT, Segmenter, Translator,
                       add_settings_arguments,
                       build_asr_url, install_stop_handler, listen,
-                      load_config, load_env,
-                      load_file_lines, load_glossary, publish, pump_audio,
+                      load_config, load_file_lines, load_glossary,
+                      load_keys, publish, pump_audio,
                       resolve)
 
 STATIC = Path(__file__).parent / "static"
@@ -879,16 +878,15 @@ def build_operator_app(hub, session, token):
     return app
 
 
-def operator_token():
+def operator_token(pinned=""):
     """The token the operator address carries.
 
-    Minted for the run unless OPERATOR_TOKEN pins one, so a link that leaks
-    expires when the server does. The override exists for development,
-    where a new address every restart is a new link to click every restart.
-    It lives in .env beside the keys, never in config.toml, and a meeting
-    should leave it unset.
+    Minted for the run unless [keys] operator_token pins one, so a link that
+    leaks expires when the server does. The override exists for development,
+    where a new address every restart is a new link to click every restart,
+    and a meeting should leave it empty.
     """
-    return os.environ.get("OPERATOR_TOKEN") or secrets.token_urlsafe(32)
+    return pinned or secrets.token_urlsafe(32)
 
 
 async def serve(config, token, settings):
@@ -934,14 +932,14 @@ def main():
                         help="list audio input devices and exit")
     parser.add_argument("--config", default="config.toml")
     add_settings_arguments(parser, [
-        "capture", "endpointing",
-        "languages", "grace", "max_languages",
+        "capture",
+        "asr_model", "endpointing",
+        "ceiling", "gap",
         "model", "reasoning_effort", "correct_english", "max_tokens",
         "timeout", "hold",
-        "ceiling", "gap",
-        "idle_stop", "record", "database",
-        "asr_model",
+        "languages", "grace", "max_languages",
         "glossary", "keyterms",
+        "idle_stop", "record", "database",
         "host", "port", "operator_port", "max_listeners",
     ])
     args = parser.parse_args()
@@ -950,13 +948,12 @@ def main():
         capture.print_devices(args.capture or "auto")
         return
 
-    load_env()
-    settings = resolve(args, load_config(args.config))
-    deepgram_key = os.environ.get("DEEPGRAM_API_KEY")
-    llm_key = os.environ.get("LLM_API_KEY")
-    llm_base = os.environ.get("LLM_BASE_URL")
-    if not deepgram_key or not llm_key or not llm_base:
-        sys.exit("Set DEEPGRAM_API_KEY, LLM_API_KEY, and LLM_BASE_URL in .env")
+    parsed = load_config(args.config)
+    settings = resolve(args, parsed)
+    keys = load_keys(parsed)
+    if not keys["deepgram_key"] or not keys["llm_key"] or not keys["llm_base"]:
+        sys.exit("Set deepgram_api_key, llm_api_key, and llm_base_url under "
+                 "[keys] in config.toml")
     if not settings["model"]:
         sys.exit("No translation model. Set translation.model in config.toml "
                  "or pass --model.")
@@ -964,19 +961,20 @@ def main():
     config = dict(settings)
     config["keyterms"] = load_file_lines(settings["keyterms"])
     config["glossary"] = load_glossary(settings["glossary"])
-    config["deepgram_key"] = deepgram_key
-    config["llm_key"] = llm_key
-    config["llm_base"] = llm_base
+    config["deepgram_key"] = keys["deepgram_key"]
+    config["llm_key"] = keys["llm_key"]
+    config["llm_base"] = keys["llm_base"]
 
-    token = operator_token()
+    token = operator_token(keys["operator_token"])
     reader = settings["public_url"] or (
         f"http://{settings['host']}:{settings['port']}/")
     print(f"Reader:   {reader}")
     print(f"Operator: http://{OPERATOR_HOST}:{settings['operator_port']}"
           f"/operator?token={token}")
-    if os.environ.get("OPERATOR_TOKEN"):
-        print("That address carries OPERATOR_TOKEN from .env, so it is the "
-              "same\nevery restart. Clear it to have one minted per run.")
+    if keys["operator_token"]:
+        print("That address carries operator_token from config.toml, so it "
+              "is the same\nevery restart. Clear it to have one minted per "
+              "run.")
     else:
         print("That address carries a token minted for this run, so it "
               "changes\nevery restart. Copy it rather than saving a bookmark.")

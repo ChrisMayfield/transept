@@ -51,17 +51,33 @@ except ImportError:
 import capture
 from capture import CHANNELS, SAMPLE_RATE
 
-# Every setting, in one place: attribute, config.toml section and key, type,
-# and built-in default. Precedence is command line, then config.toml, then
-# the default here. Adding a setting means adding one row. The order here
-# follows config.example.toml, so the two can be read side by side.
+# The keys, which live in the same file as every other setting so that
+# switching translation providers is one edit rather than two. They are not
+# rows in SETTINGS because SETTINGS becomes command line flags, and a key on
+# a command line lands in the process list and in shell history.
+# Attribute, key under [keys], and the environment variable that wins over
+# it, which is always the key in capitals. The variable is spelled out rather
+# than derived so that grepping for it finds this table.
+SECRETS = [
+    ("deepgram_key", "deepgram_api_key", "DEEPGRAM_API_KEY"),
+    ("llm_base", "llm_base_url", "LLM_BASE_URL"),
+    ("llm_key", "llm_api_key", "LLM_API_KEY"),
+    ("operator_token", "operator_token", "OPERATOR_TOKEN"),
+]
+
+# Every other setting, in one place: attribute, config.toml section and key,
+# type, and built-in default. Precedence is command line, then config.toml,
+# then the default here. Adding a setting means adding one row. The order
+# here follows config.example.toml, section for section and key for key, so
+# that the two can be read side by side.
 SETTINGS = [
     ("capture", "audio", "backend", str, "auto"),
-    ("endpointing", "audio", "endpointing", int, 400),
 
-    ("languages", "languages", "available", list, ["French", "Swahili"]),
-    ("grace", "languages", "grace", float, 90.0),
-    ("max_languages", "languages", "max_active", int, 0),
+    ("asr_model", "recognition", "model", str, "nova-3"),
+    ("endpointing", "recognition", "endpointing", int, 400),
+
+    ("ceiling", "segmentation", "ceiling", float, 4.0),
+    ("gap", "segmentation", "gap", float, 0.6),
 
     ("model", "translation", "model", str, None),
     ("reasoning_effort", "translation", "reasoning_effort", str, None),
@@ -70,19 +86,18 @@ SETTINGS = [
     ("timeout", "translation", "timeout", float, 15.0),
     ("hold", "translation", "hold", float, 8.0),
 
-    ("ceiling", "segmentation", "ceiling", float, 4.0),
-    ("gap", "segmentation", "gap", float, 0.6),
+    ("languages", "languages", "available", list, ["French", "Swahili"]),
+    ("grace", "languages", "grace", float, 90.0),
+    ("max_languages", "languages", "max_active", int, 0),
+
+    ("glossary", "files", "glossary", str, "glossary.txt"),
+    ("keyterms", "files", "keyterms", str, "keyterms.txt"),
 
     ("idle_stop", "session", "idle_stop_minutes", float, 10.0),
     # Off by default. Recording a meeting is a decision a congregation makes,
     # not something that should happen because nobody set anything.
     ("record", "session", "record", bool, False),
     ("database", "session", "database", str, "sessions.db"),
-
-    ("asr_model", "recognition", "model", str, "nova-3"),
-
-    ("glossary", "files", "glossary", str, "glossary.txt"),
-    ("keyterms", "files", "keyterms", str, "keyterms.txt"),
 
     # Loopback by default: opening a service to a shared network should be
     # a deliberate edit, not what happens when nobody sets anything.
@@ -126,26 +141,23 @@ def resolve(args, config):
     return settings
 
 
-def load_env(path=".env"):
-    """Read KEY=value lines from .env without adding a dependency.
+def load_keys(config):
+    """Read the [keys] section of config.toml, letting the environment win.
 
-    Real environment variables win, so a systemd unit or a shell export can
-    override the file without editing it.
+    A real environment variable overrides the file, so a systemd unit, a
+    container, or one shell export can supply a key without editing the
+    file, and so selftest can run a server on keys of its own. An empty
+    variable counts as set, which is how a run asks for a minted operator
+    token on a machine whose config.toml pins one.
     """
-    try:
-        with open(path, encoding="utf-8") as handle:
-            lines = handle.readlines()
-    except OSError:
-        return
-    for line in lines:
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
-        if key and key not in os.environ:
-            os.environ[key] = value
+    section = config.get("keys", {})
+    keys = {}
+    for attr, name, variable in SECRETS:
+        value = os.environ.get(variable)
+        if value is None:
+            value = section.get(name, "")
+        keys[attr] = str(value).strip()
+    return keys
 
 
 CONTEXT_UNITS = 3
@@ -447,10 +459,10 @@ def build_asr_url(settings, keyterms):
 
 ARGUMENT_HELP = {
     "capture": "auto, sounddevice, or parec",
+    "asr_model": "Deepgram model name",
     "endpointing": "milliseconds of silence that ends an utterance",
-    "languages": "comma separated language names",
-    "grace": "seconds a language runs on after its last reader leaves",
-    "max_languages": "most languages to translate at once, 0 for no cap",
+    "ceiling": "seconds to hold fragments before forcing a sentence",
+    "gap": "seconds of silence that closes the buffered sentence",
     "model": "translation model, e.g. gemini-3.8-flash",
     "reasoning_effort": "low is usually right; translation needs no thinking",
     "correct_english": "fix recognition errors on the English channel using "
@@ -458,15 +470,15 @@ ARGUMENT_HELP = {
     "max_tokens": "raise if responses truncate; thinking counts against this",
     "timeout": "seconds before a translation request is abandoned",
     "hold": "seconds to wait for a translation before showing English",
-    "ceiling": "seconds to hold fragments before forcing a sentence",
-    "gap": "seconds of silence that closes the buffered sentence",
+    "languages": "comma separated language names",
+    "grace": "seconds a language runs on after its last reader leaves",
+    "max_languages": "most languages to translate at once, 0 for no cap",
+    "glossary": "file of names and terms for the translation model",
+    "keyterms": "file of terms to bias speech recognition toward",
     "idle_stop": "minutes of silence before the session stops itself; "
                  "0 disables",
     "record": "keep a transcript of the session; see record.py",
     "database": "where a recorded session is kept",
-    "asr_model": "Deepgram model name",
-    "glossary": "file of names and terms for the translation model",
-    "keyterms": "file of terms to bias speech recognition toward",
     "host": "address to bind",
     "port": "port to bind, the one a tunnel points at",
     "operator_port": "port for the operator controls, always loopback",
@@ -699,19 +711,19 @@ class TerminalSink:
                 f"{self.timeouts} too slow. {latency_summary(self.latencies)}")
 
 
-async def run(args, settings):
-    load_env()
-    deepgram_key = os.environ.get("DEEPGRAM_API_KEY")
+async def run(args, settings, keys):
+    deepgram_key = keys["deepgram_key"]
     if not deepgram_key:
-        sys.exit("Set DEEPGRAM_API_KEY in .env")
+        sys.exit("Set deepgram_api_key under [keys] in config.toml")
 
     translator = None
     if not args.no_translate:
-        llm_key = os.environ.get("LLM_API_KEY")
-        llm_base = os.environ.get("LLM_BASE_URL")
+        llm_key = keys["llm_key"]
+        llm_base = keys["llm_base"]
         if not llm_key or not llm_base:
-            sys.exit("Set LLM_API_KEY and LLM_BASE_URL in .env, "
-                     "or pass --no-translate to check the audio path alone.")
+            sys.exit("Set llm_api_key and llm_base_url under [keys] in "
+                     "config.toml, or pass --no-translate to check the "
+                     "audio path alone.")
         if not settings["model"]:
             sys.exit("No translation model. Set translation.model in "
                      "config.toml or pass --model.")
@@ -796,12 +808,12 @@ def main():
     parser.add_argument("--device",
                         help="audio input device name; see --list-devices")
     add_settings_arguments(parser, [
-        "capture", "endpointing",
-        "languages",
+        "capture",
+        "asr_model", "endpointing",
+        "ceiling", "gap",
         "model", "reasoning_effort", "correct_english", "max_tokens",
         "timeout", "hold",
-        "ceiling", "gap",
-        "asr_model",
+        "languages",
         "glossary", "keyterms",
     ])
     args = parser.parse_args()
@@ -810,8 +822,8 @@ def main():
         capture.print_devices(args.capture or "auto")
         return
 
-    settings = resolve(args, load_config(args.config))
-    asyncio.run(run(args, settings))
+    config = load_config(args.config)
+    asyncio.run(run(args, resolve(args, config), load_keys(config)))
 
 
 if __name__ == "__main__":

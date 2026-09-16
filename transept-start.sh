@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Start the subtitle server and open a Tailscale Funnel in front of it.
-# Run it from anywhere: server.py reads config.toml, .env, and static/ out
-# of the directory it starts in, so move there first.
+# Run it from anywhere: server.py reads config.toml and static/ out of the
+# directory it starts in, so move there first.
 set -euo pipefail
 cd "$(dirname "$0")"
 

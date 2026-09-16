@@ -783,6 +783,83 @@ def check_authorization(checks):
                  allowed.status)
 
 
+def check_example_config(checks):
+    """The tables in pipeline.py and config.example.toml still agree.
+
+    They are read side by side whenever a setting is added, so a key in one
+    and not the other, or the same keys in a different order, is a defect
+    even though nothing breaks at runtime.
+    """
+    checks.section("config.example.toml against SETTINGS and SECRETS")
+    section, listed = None, []
+    for line in (HERE / "config.example.toml").read_text().splitlines():
+        if line.startswith("["):
+            section = line.strip("[]")
+        elif line[:1].isalpha() and "=" in line:
+            listed.append((section, line.split("=", 1)[0].strip()))
+
+    keys = [key for where, key in listed if where == "keys"]
+    checks.check("every key in [keys] is a SECRETS row, in the same order",
+                 keys == [key for _, key, _ in pipeline.SECRETS],
+                 f"{keys} against SECRETS")
+    settings = [pair for pair in listed if pair[0] != "keys"]
+    expected = [(where, key) for _, where, key, _, _ in pipeline.SETTINGS]
+    only_file = [pair for pair in settings if pair not in expected]
+    only_table = [pair for pair in expected if pair not in settings]
+    if only_file or only_table:
+        detail = (f"only in the file: {only_file}, "
+                  f"only in SETTINGS: {only_table}")
+    else:
+        # Same rows in a different order, which the lists above cannot show.
+        detail = next((f"SETTINGS has {table} where the file has {found}"
+                       for table, found in zip(expected, settings, strict=True)
+                       if table != found), "")
+    checks.check("every other setting is a SETTINGS row, in the same order",
+                 settings == expected, detail)
+
+
+def check_keys(checks):
+    """Keys come out of config.toml, and the environment still wins.
+
+    The variables are popped for the duration, because this machine has a
+    working config.toml and a shell that may export any of them, and a check
+    that reads a real key would pass for the wrong reason.
+    """
+    checks.section("Keys in config.toml")
+    config = {"keys": {"deepgram_api_key": "file-deepgram",
+                       "llm_base_url": "  http://file/v1  ",
+                       "llm_api_key": "file-llm",
+                       "operator_token": "file-token"}}
+    checks.check("every variable is its key in capitals, as the file claims",
+                 all(variable == key.upper()
+                     for _, key, variable in pipeline.SECRETS),
+                 pipeline.SECRETS)
+    kept = {name: os.environ.pop(name, None)
+            for _, _, name in pipeline.SECRETS}
+    try:
+        keys = pipeline.load_keys(config)
+        checks.check("a key set in config.toml is read",
+                     keys["deepgram_key"] == "file-deepgram", keys)
+        checks.check("whitespace around a pasted key is trimmed off",
+                     keys["llm_base"] == "http://file/v1", keys)
+        checks.check("a file with no [keys] section is empty, not a crash",
+                     pipeline.load_keys({}) == {attr: "" for attr, _, _
+                                                in pipeline.SECRETS})
+        os.environ["LLM_API_KEY"] = "from-environment"
+        checks.check("an environment variable overrides the file",
+                     pipeline.load_keys(config)["llm_key"]
+                     == "from-environment")
+        os.environ["OPERATOR_TOKEN"] = ""
+        checks.check("an empty variable overrides a pinned token, which is "
+                     "how a run asks for a minted one",
+                     pipeline.load_keys(config)["operator_token"] == "")
+    finally:
+        for name, value in kept.items():
+            os.environ.pop(name, None)
+            if value is not None:
+                os.environ[name] = value
+
+
 def check_device_listing(checks):
     """The device list names one source to pre-select, so the page can.
 
@@ -881,24 +958,18 @@ def check_server(checks):
     happens to say on this machine.
     """
     check_authorization(checks)
+    check_example_config(checks)
+    check_keys(checks)
     check_device_listing(checks)
     checks.section("The operator token")
-    kept = os.environ.pop("OPERATOR_TOKEN", None)
-    try:
-        minted = {server.operator_token() for _ in range(3)}
-        checks.check("a token with nothing set is minted fresh every run",
-                     len(minted) == 3 and all(len(one) >= 32
-                                              for one in minted), minted)
-        os.environ["OPERATOR_TOKEN"] = ""
-        checks.check("an empty OPERATOR_TOKEN still mints one",
-                     len(server.operator_token()) >= 32)
-        os.environ["OPERATOR_TOKEN"] = "bench"
-        checks.check("OPERATOR_TOKEN pins the address across restarts",
-                     server.operator_token() == "bench")
-    finally:
-        os.environ.pop("OPERATOR_TOKEN", None)
-        if kept is not None:
-            os.environ["OPERATOR_TOKEN"] = kept
+    minted = {server.operator_token() for _ in range(3)}
+    checks.check("a token with nothing set is minted fresh every run",
+                 len(minted) == 3 and all(len(one) >= 32
+                                          for one in minted), minted)
+    checks.check("an empty operator_token still mints one",
+                 len(server.operator_token("")) >= 32)
+    checks.check("operator_token pins the address across restarts",
+                 server.operator_token("bench") == "bench")
 
     checks.section("The running server")
     port, operator = free_port(), free_port()
@@ -908,7 +979,7 @@ def check_server(checks):
         LLM_API_KEY="selftest",
         LLM_BASE_URL="http://invalid.invalid/v1",
         # Explicitly empty, so the minted-token checks below test minting
-        # rather than whatever this machine happens to have in .env.
+        # rather than whatever this machine happens to have in config.toml.
         OPERATOR_TOKEN="",
     )
     process = subprocess.Popen(
