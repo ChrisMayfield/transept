@@ -1,234 +1,25 @@
-#!/usr/bin/env bash
-# Transept: the subtitle server and the Tailscale Funnel in front of it.
+#!/bin/sh
+# Find a Python, then hand the whole job to transept.py.
 #
 #     ./transept start | stop | restart | status
 #
-# Run it from anywhere: server.py reads config.toml and static/ out of the
-# directory it starts in, so move there first.
-#
-# No -e. The stop path has to attempt every step even when an earlier one
-# failed, because the point is to leave nothing running and nothing exposed,
-# and the start path checks each step it cares about and says what went
-# wrong, which is worth more to an operator than a silent nonzero exit.
-set -uo pipefail
+# This exists so that one spelling of the command works on all three
+# platforms. A shebang cannot choose between .venv/bin/python3 and
+# .venv/Scripts/python.exe, and on Windows there is often no python3 at
+# all, so the choice lives here rather than in a line transept.py cannot
+# change. Everything else is Python.
 cd "$(dirname "$0")" || exit 1
 
-LOG_FILE="/tmp/transept-server.log"
-if [ -x .venv/bin/python3 ]; then
-    PYTHON=.venv/bin/python3
-else
-    PYTHON=python3
-fi
-
-# The ports and the address on the card come from config.toml, because a
-# copy of the port here would one day disagree with the one server.py binds.
-read_config() {
-    read -r PORT OPERATOR_PORT PUBLIC_URL <<<"$("$PYTHON" - <<'PY'
-import tomllib
-try:
-    server = tomllib.load(open("config.toml", "rb")).get("server", {})
-except FileNotFoundError:
-    server = {}
-print(server.get("port", 8080), server.get("operator_port", 8081),
-      server.get("public_url", ""))
-PY
-)"
-    # read succeeds on empty input, so a python that could not parse the
-    # config gets caught here rather than as "sport = :" further down.
-    case "$PORT$OPERATOR_PORT" in
-        *[!0-9]* | "")
-            echo "Could not read the ports from config.toml. Check that the"
-            echo "file is valid TOML and that $PYTHON is 3.11 or newer."
-            exit 1
-            ;;
-    esac
-}
-
-# Ours is a python running out of this directory. Matching the command line
-# alone would also match an editor or a shell with the same words in it, and
-# the caller is about to send that process a signal.
-server_pids() {
-    local pid
-    for pid in $(pgrep -u "$USER" -f 'server\.py'); do
-        case "$(ps -p "$pid" -o comm=)" in python*) ;; *) continue ;; esac
-        [ "$(readlink -f "/proc/$pid/cwd" 2>/dev/null)" = "$PWD" ] || continue
-        echo "$pid"
-    done
-}
-
-# A zombie counts as gone: it is finished and holds no port, its parent has
-# simply not reaped it yet, and kill -0 alone would call it alive and spend
-# ten seconds waiting for a process that already stopped.
-gone() {
-    case "$(ps -p "$1" -o state= 2>/dev/null)" in ""|Z*) return 0 ;; esac
-    return 1
-}
-
-# The address this machine answers on, which is the one the funnel serves.
-# Empty when tailscale cannot say, and every caller treats that as unknown
-# rather than printing half an address.
-funnel_url() {
-    local name
-    name=$(tailscale status --json 2>/dev/null | "$PYTHON" -c "import json, sys
-try:
-    print(json.load(sys.stdin)['Self']['DNSName'].rstrip('.'))
-except Exception:
-    pass")
-    [ -n "$name" ] && echo "https://$name/"
-}
-
-do_stop() {
-    # reset rather than naming a port: the per-port "off" form was dropped
-    # from the Tailscale CLI, and this script owns the funnel config anyway.
-    echo "Closing the Tailscale Funnel..."
-    tailscale funnel reset ||
-        echo "Could not close it. Check 'tailscale funnel status'."
-
-    local pid stopped=""
-    for pid in $(server_pids); do
-        # A plain kill is SIGTERM, which server.py handles like Ctrl-C: the
-        # session stops and the last lines drain.
-        echo "Stopping the subtitle server (PID $pid)..."
-        kill "$pid" 2>/dev/null
-        for _ in $(seq 1 20); do
-            gone "$pid" && break
-            sleep 0.5
-        done
-        if ! gone "$pid"; then
-            echo "It ignored the stop signal for ten seconds and was forced."
-            kill -9 "$pid" 2>/dev/null
-        fi
-        stopped=1
-    done
-    [ -n "$stopped" ] || echo "No subtitle server was running here."
-}
-
-do_start() {
-    # A server left from a previous meeting holds both ports, and by then
-    # there is rarely a terminal left to press Ctrl-C in. Clearing it here
-    # also means the funnel below is opened in front of a server this script
-    # can stop.
-    echo "Clearing anything left over from a previous run:"
-    do_stop | sed 's/^/  /'
-
-    local busy
-    busy=$(ss -ltnpH "sport = :$PORT or sport = :$OPERATOR_PORT")
-    if [ -n "$busy" ]; then
-        echo "Port $PORT or $OPERATOR_PORT is held by something that is not"
-        echo "Transept, so the server has nowhere to listen:"
-        echo "$busy"
-        exit 1
+for candidate in .venv/bin/python3 .venv/Scripts/python.exe; do
+    if [ -x "$candidate" ]; then
+        exec "$candidate" transept.py "$@"
     fi
-
-    # -u because the operator address is printed once at startup and Python
-    # buffers stdout when it is a file, which would hold that line back until
-    # the server exits.
-    echo "Starting the subtitle server..."
-    "$PYTHON" -u server.py >"$LOG_FILE" 2>&1 &
-    local server_pid=$!
-    for _ in $(seq 1 30); do
-        if (: </dev/tcp/127.0.0.1/"$PORT") 2>/dev/null; then break; fi
-        sleep 0.5
-    done
-    if ! (: </dev/tcp/127.0.0.1/"$PORT") 2>/dev/null; then
-        echo "The server never listened on port $PORT:"
-        tail -n 3 "$LOG_FILE"
-        kill "$server_pid" 2>/dev/null
-        exit 1
+done
+for candidate in python3 python; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+        exec "$candidate" transept.py "$@"
     fi
+done
 
-    # --bg so the funnel outlives this script, --yes because nobody is at a
-    # prompt: this script owns the funnel config.
-    echo "Opening the Tailscale Funnel on port $PORT..."
-    if ! tailscale funnel --bg --yes "$PORT"; then
-        echo "The funnel did not open, so no phone off this laptop can reach"
-        echo "the subtitles. If the message above was about access, run this"
-        echo "once:"
-        echo "    sudo tailscale set --operator=$USER"
-        do_stop >/dev/null
-        exit 1
-    fi
-
-    echo
-    local url
-    url=$(funnel_url)
-    # The QR code the room scans is built from public_url, so a stale value
-    # there is a printed card that opens nothing.
-    if [ -n "$url" ] && [ "${PUBLIC_URL%/}" != "${url%/}" ]; then
-        echo "Warning: public_url in config.toml is \"$PUBLIC_URL\","
-        echo "but this funnel serves $url"
-    fi
-    # Both addresses come out of the log rather than being built here. Each
-    # carries a token this run minted, and the funnel hostname on its own
-    # now opens nothing.
-    grep -m1 '^Reader: ' "$LOG_FILE" || echo "Reader:   ${url:-$PUBLIC_URL}"
-    grep -m1 '^Operator: ' "$LOG_FILE" || true
-    echo "Log:      $LOG_FILE"
-    echo "Stop the server, and the funnel, with ./transept stop"
-}
-
-# Enough to answer the two questions worth asking mid-meeting: is the room
-# being subtitled, and what address do I hand somebody. Nonzero when the
-# server is not running, the way systemctl status answers.
-do_status() {
-    local pids
-    pids=$(server_pids | tr '\n' ' ')
-    if [ -z "$pids" ]; then
-        echo "Server:   not running"
-    else
-        echo "Server:   running (PID ${pids% })"
-        echo "          reader port $PORT, operator port $OPERATOR_PORT"
-    fi
-
-    # The funnel is a separate thing that can outlive the server, which is
-    # the state worth naming out loud: an address still answering all week.
-    if tailscale funnel status 2>/dev/null | grep -q "127.0.0.1:$PORT"; then
-        echo "Funnel:   open on port $PORT"
-    else
-        echo "Funnel:   closed"
-    fi
-
-    # The addresses carry a token minted for the run, so a stopped server
-    # has none to give and the hostname alone is all there is to say.
-    local url
-    url=$(funnel_url)
-    if [ -z "$pids" ]; then
-        echo "Reader:   ${url:-${PUBLIC_URL:-unknown}}, once a server is up"
-    else
-        grep -m1 '^Reader: ' "$LOG_FILE" 2>/dev/null ||
-            echo "Reader:   unknown, since this server was not started here"
-        grep -m1 '^Operator: ' "$LOG_FILE" 2>/dev/null ||
-            echo "Operator: unknown, since this server was not started here"
-        echo "Log:      $LOG_FILE"
-    fi
-    [ -n "$pids" ]
-}
-
-usage() {
-    cat <<'TXT'
-Usage: ./transept start | stop | restart | status
-
-  start     stop anything left over, start the server, open the funnel
-  restart   the same thing, spelled the way you meant it
-  stop      close the funnel, then stop the server
-  status    whether the server and the funnel are up, and the addresses
-TXT
-}
-
-# Reading the config is part of doing the work, not of being asked for help,
-# so a broken config.toml still gets an operator the usage message.
-case "${1:-}" in
-    start | restart) read_config && do_start ;;
-    stop) do_stop ;;
-    status) read_config && do_status ;;
-    help | -h | --help) usage ;;
-    "")
-        usage
-        exit 2
-        ;;
-    *)
-        echo "Unknown command: $1"
-        usage
-        exit 2
-        ;;
-esac
+echo "No Python found. See step 1 of SETUP.md."
+exit 1

@@ -32,7 +32,7 @@ When a translation fails, times out, or comes back missing a language, the Engli
 python3 server.py                     the whole thing, and the entire weekly command
 python3 server.py --list-devices      find an audio source
 python3 pipeline.py --no-translate    check the audio path, no translation key needed
-python3 selftest.py [section]         lint, pipeline, session, store, server
+python3 selftest.py [section]         lint, pipeline, session, store, server, script
 ruff check .                          the linter alone, as selftest runs it
 python3 review.py --input t.txt --review review.md         offline translation review
 python3 record.py --session last --out review/sunday.md    read a session back
@@ -129,28 +129,49 @@ The reader page keeps chosen language and text size in `localStorage` and holds 
 Its own two lines, the empty-feed message and the jump-to-newest button, are translated from the `PHRASES` table in the page rather than by the model: a reader who does not read English should not wait on a model call to be told nobody has spoken yet, and those two sentences never change.
 A language missing from the table falls back to English, so adding one to `config.toml` is not a change to `reader.html`.
 
-### Operator scripts
-
 ### The transept script
 
 `./transept start | stop | restart | status` is the weekly command for a room behind Tailscale Funnel, and `SETUP.md` covers what the script does for the operator.
-The script is bash and assumes Tailscale, which is a narrower bet than the rest of the project makes; everything else here runs on three platforms.
-Nothing else may depend on the script, and `server.py` must stay runnable on its own, which is also the form a systemd unit would take.
+The work is in `transept.py`; the `transept` beside it is a dozen lines of `sh` that pick an interpreter and hand over.
+Two files rather than one because a shebang cannot choose between `.venv/bin/python3` and `.venv/Scripts/python.exe`, and on Windows there is frequently no `python3` at all, so one spelling of the command works on three platforms only if something looks first.
+The launcher holds no logic beyond that search, and nothing new belongs in it.
 
-A command is one `do_*` function and one line in the `case` at the bottom, and the pieces they share sit in `read_config`, `server_pids`, `funnel_url`, and `gone`.
-`start` was a separate script that ran the stop script as a subprocess, so the shared half of that pair was a process boundary; `status` exists because once `server_pids` is a function, answering "is the room being subtitled" is three lines rather than a second copy of the rule.
+Tailscale is assumed, which is a narrower bet than the rest of the project makes.
+Nothing else may depend on either file, and `server.py` must stay runnable on its own, which is also the form a systemd unit would take.
 
-The script does not `set -e`.
-The stop path has to attempt every step even when an earlier one failed, because the point is to leave nothing running and nothing exposed, and the start path checks each step it cares about and says what went wrong, which is worth more to a volunteer than a silent nonzero exit.
-`read_config` checks that the ports it read are digits for that reason: `read` succeeds on empty input, so a `config.toml` that would not parse otherwise reaches `ss` as `sport = :`.
+A command is one `do_*` function and one `choices` entry in `main`, and the pieces they share sit in `read_config`, `server_record`, `funnel_url`, and `banner`.
+`stop` is the one command that runs without reading `config.toml`, because the point of stopping is to leave nothing running and nothing exposed, and a config that will not parse must not stand in the way of that.
+The ports it needs come out of the record instead.
+
+Nothing raises its way out of a command.
+The stop path attempts every step even when an earlier one failed, and the start path checks each step it cares about and says what went wrong, which is worth more to a volunteer than a traceback.
+A missing `tailscale` is reported as a command that failed, because from the room's point of view there is no difference between absent and refusing.
 
 Both ports and `public_url` are read from `config.toml` with `tomllib`, never copied into the script, since a second copy of the port is a copy that will one day disagree with the one the server binds.
 `start` warns when `public_url` differs from the address the funnel just published, which is the one setup mistake that survives a successful start and only shows up as a QR code nobody can open.
 Both addresses are read back out of the log rather than built here, because each carries a token the server minted, and the funnel hostname on its own now opens nothing.
 
-There is no PID file.
-`server_pids` finds its target the way the operator would describe it, a python whose working directory is this one, running `server.py`, which also catches the copy somebody started by hand in a terminal they have since closed.
-Both halves of that test earn their place, because matching the command line alone would also match an editor or a shell with the same words in it, and the next thing the caller does is send that process a signal.
+### Finding the server to stop
+
+`server.py` writes `transept.pid` in the directory it starts in, once both ports are bound, and removes the file on the way out.
+The pid file replaced a search through `pgrep`, `ps`, and `/proc/<pid>/cwd` that only Linux could answer: macOS has no `/proc`, and Windows has no per-process working directory to ask about at all.
+Writing it from the server rather than from the script keeps what that search was for, since the copy somebody started by hand in a terminal they have since closed writes the same file.
+
+The file is written after the listeners bind, so a second server that dies of "address already in use" cannot overwrite the record of the one holding the ports, and `remove_pid_file` checks that the recorded pid is still its own, so a server on its way out cannot delete a newer server's record.
+
+A record alone is not a running server.
+`server_record` requires the process to be alive *and* one of the recorded ports to still answer, because process ids come around again and the next thing the caller does is send a signal.
+Anything failing that test is a leftover, and `stop` clears the file and says so.
+
+`do_stop` then waits on the ports rather than on the process.
+The ports are what the next server needs back, they are the last thing `serve` lets go of, and a process that has finished but has not been reaped by its parent yet still answers every liveness test there is, which would spend the whole grace period waiting for something that already stopped.
+
+`alive` never calls `os.kill(pid, 0)` on Windows.
+Every signal there but the two console events is `TerminateProcess`, so asking whether a process exists would kill the process being asked about; `tasklist` answers instead.
+
+A Windows stop is abrupt and cannot be otherwise.
+Windows delivers no `SIGTERM` between processes, and the server is started detached with no console for a Ctrl event to reach, so the handler `install_stop_handler` registers never runs there.
+The session ends either way; what is lost is the drain of the last lines and the tidy close of the phones still connected.
 
 ## Things that look wrong but are not
 
@@ -200,13 +221,16 @@ Without it, a dead capture device leaves the websocket open and the session hang
 
 The 48 kHz fallback averages groups of three samples rather than taking every third one, because plain decimation would alias everything above 8 kHz back into the speech band.
 
-`transept start` runs `python3 -u`.
+`do_start` runs the server with `-u`.
 Python block buffers stdout when it is a file rather than a terminal, and both addresses with their tokens are printed once at startup, so without `-u` the log file stays empty until the server exits, which is exactly when those addresses stop being worth having.
-The script greps them back out of that log, and `status` does too, so the buffering is not a cosmetic problem but the difference between having an address for the room and not.
+`start` reads them back out of that log, and `status` does too, so the buffering is not a cosmetic problem but the difference between having an address for the room and not.
 
 `transept start` runs the whole of `stop` before it starts anything, which is also why `restart` is a synonym for `start` rather than a third code path.
 A server left from a previous meeting holds both ports, and by then there is rarely a terminal left to press Ctrl-C in, so refusing would send a volunteer hunting for a process five minutes before the meeting.
 Clearing first also means anything still holding either port afterwards is genuinely not Transept, which is the one case worth stopping for and what the `ss` check reports.
+
+`transept.log` and `transept.pid` sit beside the code rather than in `/tmp`.
+Windows has no `/tmp`, and two checkouts on one machine should not share a log that carries this run's tokens or a record of which process to signal.
 
 `transept stop` closes the funnel with `tailscale funnel reset` rather than naming the port.
 The per-port `tailscale funnel 8080 off` form was removed, and current versions answer it with "the CLI for serve and funnel has changed" and a nonzero exit, which when stopping means a meeting's address stays open to the internet afterwards.
@@ -261,7 +285,9 @@ One sentence per line in Markdown files, so diffs isolate the sentence that chan
 `selftest.py` is the whole suite, and it needs no keys, no audio device, and no network.
 The suite uses no test framework, only the standard library, and exits non-zero if anything fails.
 Run it after any change to the pipeline, the sinks, or the routes.
-`python3 selftest.py <section>` runs one of `lint`, `pipeline`, `session`, `store`, or `server`.
+`python3 selftest.py <section>` runs one of `lint`, `pipeline`, `session`, `store`, `server`, or `script`.
+The `script` section needs no funnel and starts no server: what it checks is the reasoning `transept.py` does on its own, above all that a stale record is never mistaken for a running server.
+The `server` section runs `server.py` in a directory of its own, because a selftest that overwrote the pid file of a real server would leave a running meeting with nothing able to stop it.
 The `lint` section shells out to `ruff check .` and reports its output as one check, which is what keeps linting in the regular workflow when there is no CI to enforce it.
 
 Adding a check means adding one `checks.check(label, condition, detail)` line.

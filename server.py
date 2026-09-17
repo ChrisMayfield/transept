@@ -39,6 +39,7 @@ import hashlib
 import hmac
 import io
 import json
+import os
 import secrets
 import sys
 import time
@@ -61,6 +62,14 @@ from pipeline import (SYSTEM_PROMPT, Segmenter, Translator,
                       resolve)
 
 STATIC = Path(__file__).parent / "static"
+# Where this process records itself so the transept script can stop it
+# later. In the working directory rather than beside the code, because that
+# is where config.toml, the glossary, and sessions.db already live, and "a
+# server running out of this directory" is the thing being identified.
+# transept.py spells the name out again rather than importing it, since
+# importing this file would pull aiohttp and the whole pipeline into a
+# script that only needs to send a signal.
+PID_FILE = Path("transept.pid")
 # Not a setting: the point of the second listener is that a tunnel cannot
 # be pointed at it by mistake.
 OPERATOR_HOST = "127.0.0.1"
@@ -940,6 +949,44 @@ def mint_token(pinned=""):
     return pinned or secrets.token_urlsafe(32)
 
 
+def write_pid_file(settings):
+    """Record this process, once it is really listening.
+
+    Written after the ports are bound, so a second server that fails on
+    "address already in use" cannot overwrite the record of the one that
+    holds them. The ports are in the file as well as the pid, which is how
+    stopping works without reading config.toml, and how a recycled pid is
+    told from a server that is still serving.
+
+    A directory that will not take the file costs the operator a convenient
+    stop, not the meeting, so the failure is reported and swallowed.
+    """
+    record = {"pid": os.getpid(), "port": settings["port"],
+              "operator_port": settings["operator_port"],
+              "started_at": time.time()}
+    try:
+        PID_FILE.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    except OSError as failure:
+        print(f"Could not write {PID_FILE}, so ./transept stop will not "
+              f"find this server: {failure}")
+        return False
+    return True
+
+
+def remove_pid_file():
+    """Take the record away again, but only if it is still ours.
+
+    A server that started after this one owns the file by then, and
+    deleting that record would leave the running server unstoppable.
+    """
+    try:
+        if json.loads(PID_FILE.read_text(encoding="utf-8"))["pid"] \
+                == os.getpid():
+            PID_FILE.unlink()
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+
+
 def reader_address(base, token):
     """The whole address a phone opens: a reachable base, path, and token.
 
@@ -967,16 +1014,20 @@ async def serve(config, tokens, settings):
          settings["operator_port"]),
     )
     runners = []
+    recorded = False
     try:
         for app, host, port in listeners:
             runner = web.AppRunner(app)
             await runner.setup()
             runners.append(runner)
             await web.TCPSite(runner, host, port).start()
+        recorded = write_pid_file(settings)
         stop = asyncio.Event()
         install_stop_handler(stop)
         await stop.wait()
     finally:
+        if recorded:
+            remove_pid_file()
         # Before the runners: stopping the session closes the Deepgram
         # socket and the translator, which needs the loop still running.
         await session.stop()

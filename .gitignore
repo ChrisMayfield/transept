@@ -6,6 +6,11 @@ config.toml
 glossary.txt
 keyterms.txt
 
+# What a running server leaves behind. The log holds both addresses with
+# the tokens that run minted, and the record names the process to stop.
+transept.log
+transept.pid
+
 # Recordings, transcripts, and review documents. A recorded session holds
 # every word said in the room, so it is more sensitive than the glossary.
 *.wav

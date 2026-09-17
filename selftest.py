@@ -18,6 +18,7 @@ Usage:
     python3 selftest.py session     a whole Session start and stop
     python3 selftest.py store       recording a session and reading it back
     python3 selftest.py server      boot server.py and exercise the routes
+    python3 selftest.py script      the operator script, without a funnel
 
 Exits non-zero if any check fails.
 """
@@ -42,6 +43,7 @@ import capture
 import pipeline
 import record
 import server
+import transept
 
 HERE = Path(__file__).parent
 
@@ -1021,13 +1023,18 @@ def check_server(checks):
         READER_TOKEN="",
         OPERATOR_TOKEN="",
     )
+    # In a directory of its own, because server.py records itself in the
+    # one it starts in, and a selftest that overwrote the record of a real
+    # server would leave a running meeting with nothing able to stop it.
+    home = Path(tempfile.mkdtemp())
+    pid_file = home / "transept.pid"
     process = subprocess.Popen(
-        [sys.executable, "-u", "server.py",
+        [sys.executable, "-u", str(HERE / "server.py"),
          "--config", "selftest-no-such-config.toml",
          "--model", "selftest-model", "--languages", "French,Swahili",
          "--host", "127.0.0.1", "--port", str(port),
          "--operator-port", str(operator), "--max-readers", "3"],
-        cwd=HERE, env=environment, stdout=subprocess.PIPE,
+        cwd=home, env=environment, stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT, text=True)
     lines, reader = drain(process)
     lingering = None
@@ -1051,6 +1058,19 @@ def check_server(checks):
         # room is handed also opens the controls.
         checks.check("the two addresses carry different tokens",
                      READER != TOKEN, f"{READER} {TOKEN}")
+
+        # The record ./transept finds the server by, on all three
+        # platforms, since no portable command answers "which python is
+        # running server.py out of this directory".
+        written = {}
+        if pid_file.exists():
+            written = json.loads(pid_file.read_text(encoding="utf-8"))
+        checks.check("a listening server left a record of itself",
+                     written.get("pid") == process.pid, written)
+        checks.check("the record carries both ports, so stopping one needs "
+                     "no config file",
+                     (written.get("port"), written.get("operator_port"))
+                     == (port, operator), written)
 
         status, body = request(port, "/api/channels", token=READER)
         checks.check("channels are fixed at startup",
@@ -1220,6 +1240,10 @@ def check_server(checks):
                  "Bound to this machine only" in output, output)
     checks.check("the server exited while a phone was still reading",
                  not forced, "it ignored the signal and had to be killed")
+    # A record left behind would send the next stop after whatever process
+    # the system has since given that number to.
+    checks.check("and took its record away on the way out",
+                 not pid_file.exists(), pid_file)
 
 
 # -- recording a session -----------------------------------------------------
@@ -1396,6 +1420,101 @@ async def check_store(checks):
                  session.error)
 
 
+# -- the operator script -----------------------------------------------------
+
+
+def check_script(checks):
+    """transept.py, which is how most Sundays start and end.
+
+    No funnel and no server here: what these check is the reasoning the
+    script does on its own, and above all the rule that keeps a stale
+    record from costing somebody an unrelated process.
+    """
+    home = Path(tempfile.mkdtemp())
+    kept = (transept.PID_FILE, transept.LOG_FILE)
+
+    checks.section("Reading the ports out of config.toml")
+    missing = home / "no-such-config.toml"
+    checks.check("a missing config leaves the defaults in place",
+                 transept.read_config(missing) == (8080, 8081, ""),
+                 transept.read_config(missing))
+    written = home / "config.toml"
+    written.write_text('[server]\nport = 9000\noperator_port = 9001\n'
+                       'public_url = "https://chapel.example/"\n')
+    checks.check("the ports and the address come out of the file",
+                 transept.read_config(written)
+                 == (9000, 9001, "https://chapel.example/"),
+                 transept.read_config(written))
+    # Both of these once reached ss as "sport = :" in the shell version.
+    for label, text in (("a port that is not a number",
+                         '[server]\nport = "eight thousand"\n'),
+                        ("a file that is not TOML", "[server\n")):
+        broken = home / "broken.toml"
+        broken.write_text(text)
+        refused = False
+        try:
+            transept.read_config(broken)
+        except SystemExit:
+            refused = True
+        checks.check(f"{label} is refused, not passed on", refused)
+
+    checks.section("Finding the server to stop")
+    transept.PID_FILE = home / "transept.pid"
+    checks.check("no record at all means no server",
+                 transept.server_record() is None)
+    holder = socket.socket()
+    holder.bind(("127.0.0.1", 0))
+    holder.listen(5)
+    held = holder.getsockname()[1]
+    quiet = free_port()
+    finished = subprocess.Popen([sys.executable, "-c", "pass"])
+    finished.wait()
+    try:
+        transept.PID_FILE.write_text(json.dumps(
+            {"pid": os.getpid(), "port": held, "operator_port": quiet}))
+        found = transept.server_record()
+        checks.check("a live process still holding a port is the server",
+                     found is not None and found["pid"] == os.getpid(), found)
+
+        transept.PID_FILE.write_text(json.dumps(
+            {"pid": os.getpid(), "port": quiet, "operator_port": quiet}))
+        checks.check("a record whose ports have gone quiet is a leftover",
+                     transept.server_record() is None)
+
+        # The whole reason the ports are consulted at all: process ids come
+        # around again, and the next thing the caller does is send a signal.
+        transept.PID_FILE.write_text(json.dumps(
+            {"pid": finished.pid, "port": held, "operator_port": quiet}))
+        checks.check("and so is one naming a process that has finished",
+                     transept.server_record() is None)
+
+        transept.PID_FILE.write_text("half a { file")
+        checks.check("an unreadable record is a leftover too",
+                     transept.server_record() is None)
+    finally:
+        holder.close()
+
+    checks.section("Reading the addresses back out of the log")
+    transept.LOG_FILE = home / "transept.log"
+    transept.LOG_FILE.write_text(
+        "Reader:   https://chapel.example/read?token=abc\n"
+        "That address carries a token minted for this run.\n"
+        "Operator: http://127.0.0.1:8081/operator?token=xyz\n")
+    checks.check("the reader address comes back whole",
+                 transept.banner("Reader:")
+                 == "Reader:   https://chapel.example/read?token=abc",
+                 transept.banner("Reader:"))
+    checks.check("and the operator address with its own token",
+                 transept.banner("Operator:").endswith("token=xyz"),
+                 transept.banner("Operator:"))
+    checks.check("a line that is not there is empty, not half an address",
+                 transept.banner("Funnel:") == "")
+    checks.check("there is an interpreter to start the server with",
+                 Path(transept.server_python()).exists(),
+                 transept.server_python())
+    transept.PID_FILE, transept.LOG_FILE = kept
+
+
 # -- the linter --------------------------------------------------------------
 
 
@@ -1422,7 +1541,7 @@ def check_lint(checks):
 # -- entry point -------------------------------------------------------------
 
 
-SECTIONS = ("lint", "pipeline", "session", "store", "server")
+SECTIONS = ("lint", "pipeline", "session", "store", "server", "script")
 
 
 def main():
@@ -1443,6 +1562,8 @@ def main():
         asyncio.run(check_store(checks))
     if "server" in wanted:
         check_server(checks)
+    if "script" in wanted:
+        check_script(checks)
     return checks.report()
 
 

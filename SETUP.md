@@ -32,6 +32,7 @@ python3 --version
 ```
 
 If the version printed is 3.11 or higher, skip to step 2.
+On Windows, try `python --version` as well, because a Windows machine with Python installed often has no `python3` on it, and typing `python3` there may open the Microsoft Store instead of answering.
 
 **Linux:** Python is usually already installed.
 If Python is missing, or if the next step complains about `venv`, run `sudo apt install python3 python3-venv` (or your distribution's equivalent).
@@ -295,7 +296,7 @@ You are now set up. 🎉
 
 ## Running a meeting
 
-**On Linux**, one script starts the server and the tunnel together, and stops both:
+One script starts the server and the tunnel together, and stops both, on all three systems:
 
 ```sh
 ./transept start      # the server, then the funnel
@@ -303,24 +304,10 @@ You are now set up. 🎉
 ./transept stop       # the funnel, then the server
 ```
 
+Run those from the Transept folder, in a terminal you have not had to activate anything in, since the script finds the virtual environment on its own.
 If `./transept start` says permission denied, the zip download lost the file's executable bit, and `bash transept start` works just as well.
 
-**On macOS and Windows**, run the two pieces yourself in two terminal windows, because the script leans on Linux-only tools to find the server process.
-In the first window, after activating the virtual environment as in step 3:
-
-```sh
-python server.py
-```
-
-In the second:
-
-```sh
-tailscale funnel 8080
-```
-
-Press Ctrl-C in each window at the end of the meeting, the tunnel first.
-
-Either way, starting prints two addresses, each carrying a token of its own:
+Starting prints two addresses, each carrying a token of its own:
 
 ```
 Reader:   https://chapel.your-tailnet.ts.net/read?token=...
@@ -444,15 +431,15 @@ The same pairing is how to judge a change: export what the room actually said, e
 
 **The server will not start, or says the address is already in use.**
 A server from a previous meeting is still holding the port, probably in a terminal window that has since been closed.
-On Linux, `./transept stop` clears the old server, and `./transept start` does the same before starting anything.
-Elsewhere, close the old terminal window or restart the laptop.
+`./transept stop` clears the old server, and `./transept start` does the same before starting anything.
+If the message names a port and `./transept status` says no server is running, something that is not Transept has the port, and the answer is to find that program rather than to restart anything.
 
 **`./transept start` warns that `public_url` does not match.**
 The address in `config.toml` is not the address the tunnel just published, so the QR code points somewhere that will not answer.
 Copy the address from the warning into `public_url` as in step 9.
 
 **Phones cannot reach the address.**
-Check `./transept status` on Linux, or `tailscale funnel status` anywhere, to see whether the tunnel is actually open.
+Check `./transept status`, or `tailscale funnel status`, to see whether the tunnel is actually open.
 Remember that the address only works with the token on the end, so hand out the whole line or the QR code rather than just the hostname.
 
 **Something is broken and you want to know whether Transept is the cause.**
