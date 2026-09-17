@@ -189,19 +189,15 @@ class SoundDeviceCapture:
 
     backend = "sounddevice"
 
-    def __init__(self, stream, queue, state, rate, ratio):
+    def __init__(self, stream, queue):
         self.stream = stream
         self.queue = queue
-        self.state = state
-        self.rate = rate
-        self.ratio = ratio
 
     @classmethod
     async def open(cls, device):
         sd = _import_sounddevice()
         loop = asyncio.get_running_loop()
         queue = asyncio.Queue(maxsize=64)
-        state = {"error": None, "dropped": 0}
 
         def push(data):
             # Drop the oldest chunk rather than let the queue grow without
@@ -212,13 +208,10 @@ class SoundDeviceCapture:
                     queue.get_nowait()
                 except asyncio.QueueEmpty:
                     pass
-                state["dropped"] += 1
             queue.put_nowait(data)
 
         def make_callback(ratio):
             def callback(indata, frames, time_info, status):
-                if status.input_overflow:
-                    state["dropped"] += 1
                 data = bytes(indata)
                 if ratio > 1:
                     data = _downsample(data, ratio)
@@ -248,7 +241,7 @@ class SoundDeviceCapture:
                     blocksize=CHUNK_FRAMES * ratio, device=target,
                     callback=make_callback(ratio), finished_callback=finished)
                 stream.start()
-                return cls(stream, queue, state, rate, ratio)
+                return cls(stream, queue)
             except Exception as exc:
                 last_error = exc
                 # RawInputStream opens the device and start() can still
@@ -263,8 +256,6 @@ class SoundDeviceCapture:
             f"Could not open audio device {device!r}: {last_error}")
 
     async def read(self):
-        if self.state["error"]:
-            raise CaptureError(self.state["error"])
         return await self.queue.get()
 
     async def close(self):

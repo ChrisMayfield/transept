@@ -213,12 +213,10 @@ book names and formatting of the target language.\
 class Unit:
     """One sentence-ish span of English, ready to translate."""
 
-    def __init__(self, seq, text, audio_end, emitted_at, reason,
-                 confidence=None):
+    def __init__(self, seq, text, audio_end, reason, confidence=None):
         self.seq = seq
         self.text = text
         self.audio_end = audio_end
-        self.emitted_at = emitted_at
         self.reason = reason
         # Lowest recognizer confidence among the fragments that formed this
         # sentence. The shakiest lines are where a mis-heard name lives, so
@@ -321,7 +319,6 @@ class Translator:
         self.url = base_url.rstrip("/") + "/chat/completions"
         self.model = model
         self.languages = languages
-        self.correct_english = correct_english
         # English first when enabled, so the model settles what was actually
         # said before deciding how to render it in another language.
         self.outputs = (["English"] if correct_english else []) + languages
@@ -571,8 +568,7 @@ async def listen(socket, segmenter, translator, sink, queue):
 
     async def emit(taken):
         seq, text, reason, audio_end, confidence = taken
-        unit = Unit(seq, text, audio_end, time.monotonic(), reason,
-                    confidence)
+        unit = Unit(seq, text, audio_end, reason, confidence)
         outputs = sink.unit(unit)
         task = None
         if outputs and translator is not None:

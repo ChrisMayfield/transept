@@ -347,7 +347,8 @@ async def check_pipeline(checks):
     checks.section("The reader cap")
     hub = server.Hub(["French"], max_readers=2)
     checks.check("an empty hub is not full", not hub.full())
-    first, second = hub.subscribe("English"), hub.subscribe("French")
+    hub.subscribe("English")
+    second = hub.subscribe("French")
     checks.check("the cap counts across channels, not per channel",
                  hub.full() and hub.listener_total() == 2,
                  hub.listener_count())
@@ -358,7 +359,6 @@ async def check_pipeline(checks):
         unlimited.subscribe("French")
     checks.check("no cap means no ceiling, which is the old behaviour",
                  not unlimited.full(), unlimited.listener_total())
-    del first
 
     checks.section("The language cap")
     everything = ["French", "Swahili", "Spanish", "Kurdish"]
@@ -480,7 +480,7 @@ async def check_pipeline(checks):
     session, hub = make_session(["French"], False, ["French"])
     session.translator = translator
     queue = asyncio.Queue()
-    unit = pipeline.Unit(1, FIRST_SENTENCE, 1.0, 0.0, "gap")
+    unit = pipeline.Unit(1, FIRST_SENTENCE, 1.0, "gap")
     task = asyncio.create_task(
         translator.translate(FIRST_SENTENCE, [], ["French"]))
     await queue.put((unit, task, ["French"]))
@@ -556,8 +556,12 @@ async def check_session(checks):
                      session.state == "running", session.state)
         checks.check("no error was recorded", session.error is None,
                      session.error)
-        checks.check("audio reached the recognizer", source.reads > 0,
-                     source.reads)
+        # What the socket saw, not what the source produced: source.reads
+        # alone stays above zero even if pump_audio forwards nothing.
+        checks.check("audio reached the recognizer",
+                     bool(sockets) and sockets[0].audio_chunks > 0,
+                     f"{source.reads} read, "
+                     f"{sockets[0].audio_chunks if sockets else 0} sent")
         # A failure to reach the recognizer at all is the interesting case,
         # so report it as failed checks rather than crashing on an empty list
         # and hiding everything after it.

@@ -436,7 +436,6 @@ class Session:
             "channels": self.hub.channels,
             "listeners": self.hub.listener_count(),
             "refused": self.hub.refused,
-            "max_readers": self.hub.max_readers,
             "uptime": (time.time() - self.started_at
                        if self.started_at and self.state != "stopped" else 0),
             "units": self.stats["units"],
@@ -454,7 +453,6 @@ class Session:
                           else 0),
             "skipped": self.stats["skipped"],
             "capped": self.stats["capped"],
-            "max_languages": self.config.get("max_languages") or 0,
             # On the page, not just in a config file somebody edited six
             # weeks ago. The operator is the person who has to tell the room
             # a transcript is being kept.
