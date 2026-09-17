@@ -78,9 +78,9 @@ LEAVING = object()
 class Hub:
     """Ring buffer plus live subscribers, one channel per language."""
 
-    def __init__(self, languages, max_listeners=0):
+    def __init__(self, languages, max_readers=0):
         self.channels = ["English"] + list(languages)
-        self.max_listeners = max_listeners     # 0 means no cap
+        self.max_readers = max_readers         # 0 means no cap
         self.refused = 0
         self.buffers = {name: deque(maxlen=HISTORY) for name in self.channels}
         self.subscribers = {name: set() for name in self.channels}
@@ -192,9 +192,9 @@ class Hub:
         return sum(len(queues) for queues in self.subscribers.values())
 
     def full(self):
-        """True once the listener cap is reached, across all channels."""
-        return (self.max_listeners > 0
-                and self.listener_total() >= self.max_listeners)
+        """True once the reader cap is reached, across all channels."""
+        return (self.max_readers > 0
+                and self.listener_total() >= self.max_readers)
 
     def clear(self):
         for buffer in self.buffers.values():
@@ -430,7 +430,7 @@ class Session:
             "channels": self.hub.channels,
             "listeners": self.hub.listener_count(),
             "refused": self.hub.refused,
-            "max_listeners": self.hub.max_listeners,
+            "max_readers": self.hub.max_readers,
             "uptime": (time.time() - self.started_at
                        if self.started_at and self.state != "stopped" else 0),
             "units": self.stats["units"],
@@ -958,7 +958,7 @@ async def serve(config, tokens, settings):
     The two apps share one Hub and one Session: two doors, one room, and a
     key cut for each door.
     """
-    hub = Hub(config["languages"], config.get("max_listeners") or 0)
+    hub = Hub(config["languages"], config.get("max_readers") or 0)
     session = Session(config, hub)
     listeners = (
         (build_reader_app(hub, session, tokens["reader"]),
@@ -1004,7 +1004,7 @@ def main():
         "languages", "grace", "max_languages",
         "glossary", "keyterms",
         "idle_stop", "record", "database",
-        "host", "port", "operator_port", "max_listeners",
+        "host", "port", "operator_port", "max_readers",
     ])
     args = parser.parse_args()
 

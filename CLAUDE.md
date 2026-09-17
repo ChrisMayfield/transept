@@ -1,7 +1,8 @@
 # CLAUDE.md
 
 Guidance for Claude Code (claude.ai/code) when working in this repository.
-`README.md` covers setup, tunnels, and tuning for the volunteer who runs this; the notes here are about the code.
+`README.md` is the introduction, for somebody deciding whether Transept suits their meeting, and `SETUP.md` is the volunteer's manual: installing, keys, tunnels, running a meeting, tuning, and troubleshooting.
+The notes here are about the code.
 
 ## What this is
 
@@ -19,7 +20,7 @@ This rule is stated first in `SYSTEM_PROMPT` and should stay there.
 If a change would loosen it, do not make the change.
 
 The English channel is a transcript, not a summary.
-It may be corrected for recognition errors using the glossary, but false starts, repetitions, and informal grammar stay as spoken, because for a deaf reader that line is the record of what was said.
+That channel may be corrected for recognition errors using the glossary, but false starts, repetitions, and informal grammar stay as spoken, because for a deaf reader that line is the record of what was said.
 Translations get latitude on grammar and phrasing because fluency requires it, never on content.
 
 Subtitles must never silently stall.
@@ -55,7 +56,7 @@ Both yield 16 kHz mono signed 16-bit chunks, and nothing downstream knows which 
 An empty chunk means end of stream, which is how a device that disappears becomes a reconnect rather than a hang.
 
 `pipeline.py` holds everything the entry points share: `SECRETS`, `SETTINGS`, `resolve`, `load_keys`, `Segmenter`, `Translator`, `SYSTEM_PROMPT`, and the three loops `pump_audio`, `listen`, and `publish`.
-It also runs standalone as a terminal tool, which is the fastest way to debug the pipeline without the web layer.
+`pipeline.py` also runs standalone as a terminal tool, which is the fastest way to debug the pipeline without the web layer.
 
 `server.py` adds `Hub` (ring buffers and subscribers), `Session` (start, stop, supervise, reconnect), and the aiohttp routes.
 
@@ -118,7 +119,7 @@ The address itself is built by `reader_address`, not typed into `config.toml`: `
 Handlers share their event loop with the capture pipeline, so anything that blocks in one stalls the subtitle fan-out to every phone in the room.
 `api_devices` runs `pactl` under `asyncio.to_thread` for that reason, and a handler that shells out, touches the disk, or calls a third party belongs in a thread too.
 
-`max_listeners` bounds how many event streams the `Hub` holds, since the reader token is on a card the room passes around and each stream costs a task, a queue, a socket, and a write on every published line.
+`max_readers` bounds how many event streams the `Hub` holds, since each stream costs a task, a queue, a socket, and a write on every published line, and the reader link can travel further than the room the link was handed out in.
 Past the cap `stream` answers 503 with a `Retry-After` before `prepare`, and `Hub.refused` reaches the operator page.
 A reader who leaves holds its slot until the next keepalive write fails, up to 15 seconds, which is why the default is generous rather than tight.
 
@@ -132,9 +133,9 @@ A language missing from the table falls back to English, so adding one to `confi
 
 ### The transept script
 
-`./transept start | stop | restart | status` is the weekly command for a room behind Tailscale Funnel, and `README.md` covers what it does for the operator.
-It is bash and it assumes Tailscale, which is a narrower bet than the rest of the project makes; everything else here runs on three platforms.
-Nothing else may depend on it, and `server.py` must stay runnable on its own, which is also the form a systemd unit would take.
+`./transept start | stop | restart | status` is the weekly command for a room behind Tailscale Funnel, and `SETUP.md` covers what the script does for the operator.
+The script is bash and assumes Tailscale, which is a narrower bet than the rest of the project makes; everything else here runs on three platforms.
+Nothing else may depend on the script, and `server.py` must stay runnable on its own, which is also the form a systemd unit would take.
 
 A command is one `do_*` function and one line in the `case` at the bottom, and the pieces they share sit in `read_config`, `server_pids`, `funnel_url`, and `gone`.
 `start` was a separate script that ran the stop script as a subprocess, so the shared half of that pair was a process boundary; `status` exists because once `server_pids` is a function, answering "is the room being subtitled" is three lines rather than a second copy of the rule.
@@ -160,7 +161,7 @@ Do not remove the buffer to reduce latency.
 Interim recognition results are disabled, because finalized results arrive 0.2 to 0.3 seconds behind the speaker and interim hypotheses add flicker for nothing.
 
 `Hub.publish` revises an existing entry in place when the sequence number already exists.
-That is how a glossary-corrected English line replaces the raw one on phones already showing it, and clients key on `seq`, so duplicates are replacements rather than new lines.
+Revising in place is how a glossary-corrected English line replaces the raw one on phones already showing that line, and clients key on `seq`, so duplicates are replacements rather than new lines.
 
 `Segmenter._take` returns the sequence number alongside the text instead of leaving the caller to read `segmenter.seq`.
 One fragment can close two sentences, the gap check closing the buffered one and the fragment itself closing the next, and both takes run before either unit is built.
@@ -221,7 +222,7 @@ Platform assumptions belong in `capture.py` and that function, nowhere else.
 ## Conventions
 
 The audio source is deliberately not a setting.
-It changes with a reboot or a replugged cable, so a name in `config.toml` would be stale more often than right; the operator picks it on the page, `pipeline.py` takes a plain `--device` and otherwise opens `capture.default_device`, and `Session` keeps the chosen name on itself rather than writing it back into the config.
+A device name changes with a reboot or a replugged cable, so a name in `config.toml` would be stale more often than right; the operator picks the source on the page, `pipeline.py` takes a plain `--device` and otherwise opens `capture.default_device`, and `Session` keeps the chosen name on itself rather than writing it back into the config.
 `capture.choose_default` holds the one rule for which input to offer first, since the operator page sorts by name and so no longer knows the order the backend listed them in.
 
 Settings live in `config.toml`, resolved by the `SETTINGS` table in `pipeline.py`.
@@ -258,7 +259,7 @@ One sentence per line in Markdown files, so diffs isolate the sentence that chan
 ## Testing
 
 `selftest.py` is the whole suite, and it needs no keys, no audio device, and no network.
-It uses no test framework, only the standard library, and exits non-zero if anything fails.
+The suite uses no test framework, only the standard library, and exits non-zero if anything fails.
 Run it after any change to the pipeline, the sinks, or the routes.
 `python3 selftest.py <section>` runs one of `lint`, `pipeline`, `session`, `store`, or `server`.
 The `lint` section shells out to `ruff check .` and reports its output as one check, which is what keeps linting in the regular workflow when there is no CI to enforce it.

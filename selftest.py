@@ -341,8 +341,8 @@ async def check_pipeline(checks):
                  hub.wanted("French", 90), hub.last_seen["French"])
     checks.check("grace runs out", not hub.wanted("French", 0))
 
-    checks.section("The listener cap")
-    hub = server.Hub(["French"], max_listeners=2)
+    checks.section("The reader cap")
+    hub = server.Hub(["French"], max_readers=2)
     checks.check("an empty hub is not full", not hub.full())
     first, second = hub.subscribe("English"), hub.subscribe("French")
     checks.check("the cap counts across channels, not per channel",
@@ -1026,7 +1026,7 @@ def check_server(checks):
          "--config", "selftest-no-such-config.toml",
          "--model", "selftest-model", "--languages", "French,Swahili",
          "--host", "127.0.0.1", "--port", str(port),
-         "--operator-port", str(operator), "--max-listeners", "3"],
+         "--operator-port", str(operator), "--max-readers", "3"],
         cwd=HERE, env=environment, stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT, text=True)
     lines, reader = drain(process)

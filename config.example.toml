@@ -17,7 +17,7 @@ deepgram_api_key = ""
 #   OpenAI            https://api.openai.com/v1
 #   Local Ollama      http://localhost:11434/v1
 #   LiteLLM proxy     http://your-proxy:4000/v1
-llm_base_url = ""
+llm_base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
 llm_api_key = ""
 
 # Both addresses carry a token, so a tunnel open to the internet serves the
@@ -119,11 +119,12 @@ port = 8080
 # machine wants an SSH forward rather than a wider bind here.
 operator_port = 8081
 
-# Most event streams to hold at once, 0 for no cap. The reader token is the
-# only thing between this and the internet, and it is on a card the room
-# passes around, so 500 is far more phones than a room holds. Anyone past
-# the cap gets a 503 and their browser retries.
-max_listeners = 500
+# Most readers to serve at once, 0 for no cap. Every reader costs a queue,
+# a socket, and a write on every published line, and the reader link can
+# travel further than the room the link was handed out in. A cap of 100 is
+# more phones than a room holds, and a reader past the cap gets a 503 that
+# the phone's browser retries.
+max_readers = 100
 
 # The address readers actually use, which is your tunnel's hostname, not the
 # address above. The operator page shows this as a QR code people can point a

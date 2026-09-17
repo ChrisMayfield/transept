@@ -9,29 +9,38 @@ A second or two after that, the same sentence appears in French, Swahili, or wha
 Nothing is projected on a screen and readers install nothing.
 Each person opens a link and chooses their own language and their own text size.
 
+**To install and configure Transept, see [SETUP.md](SETUP.md).**
+`SETUP.md` walks through the whole process, from installing Python to handing out the first QR code, and assumes no programming experience.
+
 ## How it works
 
 Audio goes from the sound card to [Deepgram](https://deepgram.com/) (Speech-to-text API) over a websocket.
 Deepgram returns finalized fragments, which often cut sentences in half, so a segmenter buffers them into whole sentences.
-It closes one when the recognizer reports an endpoint, when the text ends in terminal punctuation, when a silent gap opens, or when the ceiling expires.
-This matters more than it sounds: translating "on the heater" by itself produces nonsense in any language that needs a verb.
+The segmenter closes a sentence when the recognizer reports an endpoint, when the text ends in terminal punctuation, when a silent gap opens, or when the ceiling expires.
+Whole sentences matter more than they sound like they should: translating "on the heater" by itself produces nonsense in any language that needs a verb.
 
 Whole sentences go to the translation model, all languages in one call, running concurrently but published in source order.
 English publishes immediately, and translations arrive on their own channels a moment later.
 Phones subscribe over server-sent events, one channel per language, with the last sixty lines replayed on connect so somebody arriving late has context.
 
+Recognition runs continuously while a session is on, but a language is translated only while somebody is reading that language, so a language nobody opens costs nothing.
+
+Two addresses are served on two different ports, and each carries a token of its own.
+The operator opens one address on the laptop to pick a microphone and press Start, and that port is bound to the laptop alone, so the controls cannot be reached from the network or through a tunnel.
+Everyone else opens the other on their phone, which is the address behind the QR code.
+
 **Source files:** `server.py` is the web server and session manager, and the only thing you run on a normal Sunday, whether directly or through the `transept` script that also opens the tunnel.
 `pipeline.py` is the same pipeline without the web layer, which is the fastest way to check a microphone or tune segmentation.
 `review.py` translates a text file offline, `record.py` keeps a session and turns it into a review document, `capture.py` is the audio layer, `selftest.py` checks the software without a microphone or an API key, and `static/` holds the two web pages.
 
-**Config file:** Everything is in `config.toml`, keys included, so switching translation providers is one edit rather than two.
-It is gitignored, because it holds your keys once you fill them in.
-A fork that wants to commit its settings so a second room starts from a known-good file should take the keys back out first, or set them through the environment instead.
+**Config file:** Every setting is in `config.toml`, keys included, so switching translation providers is one edit rather than two.
+The file is gitignored, because the file holds your keys once you fill them in.
+A fork that wants to commit its settings so a second room starts from a known-good file should take the keys back out first, or set the keys through the environment instead.
 
 ## What you need
 
-Transept was built for a Sunday school class with hard-of-hearing members and members whose first language is not English, but nothing in it is specific to that setting.
-All it takes is a sound system, a laptop, and somebody willing to press a button before the meeting starts.
+Transept was built for a Sunday school class with hard-of-hearing members and members whose first language is not English, but nothing in the software is specific to that setting.
+Running Transept takes a sound system, a laptop, and somebody willing to press a button before the meeting starts.
 
 - A computer running Linux, macOS, or Windows, with Python 3.11 or newer.
   No GPU required, because the heavy work happens in the cloud.
@@ -40,242 +49,45 @@ All it takes is a sound system, a laptop, and somebody willing to press a button
 - A key from [console.deepgram.com](https://console.deepgram.com) for speech recognition.
 - A key for any provider with an OpenAI-compatible endpoint for translation.
   [Google AI Studio](https://aistudio.google.com/), [Claude Platform](https://platform.claude.com/), [OpenAI Platform](https://platform.openai.com/), a [LiteLLM](https://www.litellm.ai/) proxy, and a local [Ollama](https://ollama.com/) install all work.
+- A way for phones to reach the laptop over HTTPS, which in practice means a tunnel.
+  [Tailscale Funnel](https://tailscale.com/) needs no domain and costs nothing, and is what [SETUP.md](SETUP.md) uses.
 
 Capture goes through PortAudio by way of the `sounddevice` package, so the laptop already plugged into the chapel sound system for Zoom should generally work as is.
 A second backend, `parec`, is available on Linux and is used by default.
 On Linux you may also need `sudo apt install libportaudio2`.
 
-**What it costs (Sep 2026):** Speech recognition runs about $0.50 per hour through Deepgram, and new accounts include free credit that covers a great deal of use.
+**What it costs (Sep 2026):** Speech recognition runs about $0.50 per hour through Deepgram, and new accounts include $200 of free credit that covers a great deal of use.
 Translation through a small fast model runs a few cents per hour, and only for languages somebody is actually reading, so a language nobody opens costs nothing at all.
 A weekly ninety-minute class costs well under a dollar.
-
-## Setup
-
-```sh
-git clone <this repository>
-cd transept
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-cp config.example.toml config.toml  # the two API keys, and everything else
-```
-
-Open `config.toml` and paste the two keys in under `[keys]`.
-Everything below them has a working default.
-An environment variable of the same name in capitals, `DEEPGRAM_API_KEY` or `LLM_API_KEY`, overrides the file, which is how a systemd unit or a container supplies a key without one being written down here.
-
-Then see what audio sources this machine offers:
-
-```sh
-python3 server.py --list-devices
-```
-
-The source is not configured: the operator picks it on the operator page before each meeting, because the name changes with a reboot or a replugged cable.
-Note that anything marked as playback captures what the computer is playing rather than what the microphone hears.
-
-## Before your first meeting
-
-**Check the audio, in the actual room, with the actual microphones.**
-
-```sh
-python3 pipeline.py --no-translate
-```
-
-Talk into the microphone.
-Your words should appear within a fraction of a second, each line tagged with how far behind real time it arrived.
-If nothing appears, the problem is the audio source, not the software.
-
-**(optional) Fill in two files:** `keyterms.txt` biases the speech recognizer toward words it would otherwise mishear: names of people who speak often, place names, vocabulary specific to your congregation.
-`glossary.txt` guides the translation model, and is for names, terms that have an official published rendering in your target languages, and set phrases a general model would translate too literally.
-Copy `keyterms.example.txt` and `glossary.example.txt` and edit.
-
-With the `--correct-english` option, the glossary also cleans up recognition errors on the English channel, so a name the recognizer spelled wrong gets fixed for everyone.
-
-Both files are easier to fill in after a real meeting than before one.
-If you turn on `record`, this generates a list of suggested edits:
-
-```sh
-python3 record.py --session last --out review/sunday.md
-```
-
-The document leads with names the correction introduced that were not in the audio, then the terms the recognizer missed and the glossary had to repair, which are exactly the ones to add to `keyterms.txt` so they come out right the first time.
-
-**(optional) Review a language before you offer it.**
-You cannot evaluate a translation you cannot read, and neither can anyone else in the room.
-Run a real transcript through `review.py` and have a native speaker mark up the result:
-
-```sh
-python3 record.py --session last --plain sunday.txt   # if you record
-python3 review.py --input sunday.txt --review review.md
-```
-
-That pairing is also how to judge a change to the glossary or the prompt: export what the room actually said, edit, re-run, and compare against what shipped on the day.
-
-Ask reviewers for wrong meaning first and awkward phrasing second.
-Wrong meaning usually means a glossary entry is missing, and awkward phrasing usually means a different model would serve better.
-Settle with your speakers which variety of a language they actually use, because Standard Swahili and Congolese Swahili are not the same and the model follows whichever you name in `--languages`.
-
-## Running a meeting
-
-```sh
-python3 server.py
-```
-
-That is the whole weekly command, and everything it needs is in `config.toml`.
-Any setting can still be overridden for a one-off, for example `python3 server.py --ceiling 6`.
-Once a tunnel is set up, the `transept` script under [One command on a Sunday](#one-command-on-a-sunday) runs the server and the funnel together, which is the shorter version of this page.
-
-Two addresses are printed, on two different ports, and each carries a token of its own.
-
-The operator opens the `/operator` one on the laptop, picks the audio source, and presses Start.
-That port is bound to this machine only, so the controls cannot be reached from the network or through your tunnel.
-Its token is minted for the run, so copy the address from the terminal each week rather than saving a bookmark.
-Setting `operator_token` under `[keys]` pins it instead of minting one, which saves clicking a fresh link on every restart while developing; leave it empty for a meeting, so a link that leaks expires when the server does.
-
-Everyone else opens the `/read` one on their phone and picks a language.
-That is the address behind the QR code, and the token in it is what the reader port answers to: the bare address gives a bot a 404, and nothing serves a subtitle without the token.
-Minted per run by default, so last week's link stops working; set `reader_token` under `[keys]` when the room reads from a printed card that has to keep working.
-Anyone holding the card can read the meeting, which is the same bargain as a card left in the foyer, and it is a much smaller bargain than an address anyone can find.
-
-The language list is fixed when the server starts, so a reader's saved link keeps landing on the same set of channels from week to week.
-Listing a language does not mean paying for it.
-
-## Getting it onto phones
-
-The intended setup is a tunnel, which gives a fixed HTTPS address that works whether phones are on wifi or cellular.
-The server binds to `127.0.0.1` by default to suit this: readers arrive through the tunnel, and the operator uses `http://127.0.0.1:8081/operator` on the machine itself, which browsers treat as a secure context without a certificate.
-Point the tunnel at the reader port only, which is what the commands below do; the operator port is not meant to leave the laptop.
-
-Two tunnels are worth considering, and the difference is whether you want to own a domain.
-
-**Tailscale Funnel** needs no domain and costs nothing.
-The address is your machine's own name, `https://<machine>.<tailnet>.ts.net`, and it is the same every time the tunnel starts.
-Readers install nothing and need no account, since only the laptop runs Tailscale.
-A funnel is open to the internet by design, which is why the reader address carries a token and why the operator port never goes through it: what reaches the room is a link people are handed, not a hostname somebody scanning the internet can open.
-
-Install Tailscale from [tailscale.com/download](https://tailscale.com/download), then connect this machine and see what it is called:
-
-```sh
-sudo tailscale up
-tailscale status                        # the first line is this machine
-sudo tailscale set --hostname chapel    # optional, and it changes the address
-```
-
-The machine name becomes the address readers see, so it is worth picking one you would print on a card before you print the card.
-
-Funnel then has to be turned on once for the tailnet, and the command that uses it is also the command that walks you through turning it on:
-
-```sh
-tailscale funnel 8080
-```
-
-When the tailnet is not set up yet, that prints a link to the admin console, and opening it enables HTTPS certificates and grants this machine the Funnel attribute.
-Run the same command again afterwards and the address appears.
-In this foreground form the funnel closes when you press Ctrl-C, which makes it the right way to test before handing the job to the script below.
-
-One more command saves a `sudo` every week:
-
-```sh
-sudo tailscale set --operator=$USER
-```
-
-Changing the funnel is a privileged operation, so without this every `tailscale funnel` command needs root, including the ones the `transept` script runs for you.
-
-**Cloudflare Tunnel** needs a domain whose DNS Cloudflare manages, which is roughly ten to fifteen dollars a year.
-Cloudflare's free Quick Tunnel needs no domain but mints a new random `trycloudflare.com` address every restart, so a printed QR code would stop working the first time the laptop reboots.
-
-```sh
-cloudflared tunnel create chapel
-cloudflared tunnel route dns chapel subtitles.example.org
-```
-
-Whichever you pick, put the resulting address in `config.toml`:
-
-```toml
-[server]
-public_url = "https://chapel.your-tailnet.ts.net/"
-```
-
-The operator page then shows the reader address as a QR code, next to the link itself.
-That is this address plus `/read` and the reader token, built for you, because the token half of it changes every run unless `reader_token` pins it.
-Pin it before printing a card, and the card keeps working as long as the hostname does.
-
-Without a tunnel, you can instead set `host = "0.0.0.0"` and have phones connect directly at the `http://<laptop-ip>:8080/read?token=...` address printed at startup.
-That is fine for a first test, but it is plain HTTP, and the screen wake lock that keeps a phone from going dark mid-sentence only works in a secure context.
-Over plain HTTP your readers will be tapping their screens every thirty seconds for an hour, which is a poor experience for exactly the people this is meant to serve.
-
-### One command on a Sunday
-
-With Tailscale, the server and the funnel are two things to start and two things to remember to stop, so one script does both:
-
-```sh
-./transept start        # the server, then the funnel
-./transept stop         # the funnel, then the server
-./transept status       # whether either is up, and the addresses
-./transept restart      # the same as start
-```
-
-`transept start` clears anything left from last time, starts `server.py` in the background, waits until it is really listening, opens the funnel, and prints both addresses with this run's tokens and where the log went.
-Starting is therefore also how you restart, including after a server somebody left running in a terminal that is now closed, which is why `restart` is only another name for it.
-If the server or the funnel does not come up, it stops what it started and says why, so a failed start never leaves half a meeting running.
-It also warns when `public_url` in `config.toml` is not the address the funnel just published, because the QR code the room scans is built from `public_url`.
-
-Run it from anywhere, since it moves to the repository itself.
-It uses the repository's `.venv/bin/python3` when there is one and otherwise the `python3` on your PATH, so a virtual environment kept somewhere else has to be active in the terminal you run it from.
-The server keeps running after the script exits, with its output in `/tmp/transept-server.log`, so closing the terminal does not end the meeting.
-Both addresses are worth copying before the terminal scrolls, and `./transept status` reads them back out of that log, which is the only place they exist once the terminal is gone.
-
-`transept stop` closes the funnel first, so nobody reaches a server on its way down, then stops the server the same way Ctrl-C would.
-It is safe to run when nothing is running, and it says so.
-Run it at the end of every meeting: the server costs nothing once the session is stopped, but a funnel left open leaves the address answering all week.
-
-`transept status` answers the two questions worth asking mid-meeting, whether the room is being subtitled and what address to hand somebody, and it names the funnel separately because a funnel can outlive the server that was behind it.
-It reads both addresses back out of the log, and gives the hostname alone when nothing is running, since a stopped server has no token to hand out.
-
-## Tuning
-
-Most defaults are fine.
-These are the ones that matter, all in `config.toml`.
-
-`ceiling` (4 seconds) is how long a half-finished sentence waits before being translated anyway.
-The operator page and the terminal both tag each sentence with why it closed.
-A lot of `ceiling` means people are talking over each other, and raising it trades latency for coherence.
-
-`gap` (0.6 seconds) is the silence that separates one person's abandoned sentence from the next person's new one.
-Lower it if unrelated turns are being glued together.
-
-`idle_stop_minutes` (10) stops a session that has heard nothing for that long.
-Somebody will eventually forget to press Stop, and recognition is billed by audio duration whether anyone is talking or not.
-Set a spend limit in the Deepgram console as a second line of defense.
-
-`grace` (90 seconds) is how long a language keeps running after its last reader leaves, so a phone locking its screen does not restart the language.
-
-`reasoning_effort = "low"` is worth setting on models that think by default.
-Translation does not benefit from deliberation, and on one test it cut median latency from about two seconds to under one with no loss in quality.
 
 ## Privacy and accuracy
 
 Audio from your meeting is sent to Deepgram, and the resulting text is sent to your translation provider.
 Both are commercial services with their own retention policies.
-This is worth raising with whoever leads the meeting before you deploy it, particularly in a setting where people say personal things out loud.
+Sending the room's words to two companies is worth raising with whoever leads the meeting beforehand, particularly where people say personal things out loud.
 
 By default nothing is stored on disk, so subtitles live in memory and disappear when the session stops.
-Turning on `record` in `config.toml` changes that, and it is a decision to make with whoever leads the meeting.
+Turning on `record` in `config.toml` changes that, and is a decision to make with whoever leads the meeting.
 A recorded session keeps every English sentence, every translation, and how long each one took, in `sessions.db` next to the code.
-It is not encrypted, `.gitignore` keeps it out of your fork, and nothing is ever deleted automatically.
+That file is not encrypted, `.gitignore` keeps the file out of your fork, and nothing is ever deleted automatically.
 The operator page says "Recording this session to disk" the whole time one is being kept, because the person at the laptop is the one who has to tell the room.
 `python3 record.py --purge --older-than 30` is the only thing that deletes anything.
 
+The reader address carries a token, because a tunnel is open to the internet by design.
+What reaches the room is a link people are handed, not a hostname somebody scanning the internet can open.
+The token is a shared secret for a room rather than a credential for a person: a leaked token is not meant to survive the card being photographed, and a fresh token is minted every run unless you pin one.
+
 The translation prompt forbids the model from inventing names, numbers, dates, or scripture references that are not in the source.
-This is deliberate and it matters: a reader of a translated channel cannot hear the room and has no way to catch a confident wrong name.
+The rule is deliberate and it matters: a reader of a translated channel cannot hear the room and has no way to catch a confident wrong name.
 When the audio is unclear, the intended behavior is visible confusion rather than a plausible guess.
 
 Subtitles are an aid, not a record.
-Tell people that.
+Tell people so.
 
 ## About the name
 
 A *transept* is the section of a church that crosses the nave, giving the building its characteristic cross-shaped layout.
-The word also plays on *transcription* and *translation*, reflecting the tool's purpose of carrying spoken words across languages and delivering them to people wherever they are in the meeting.
+The word also plays on *transcription* and *translation*, reflecting the tool's purpose of carrying spoken words across languages and delivering the words to people wherever they sit in the meeting.
 
 ## License
 
