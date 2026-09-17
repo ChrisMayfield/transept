@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Self test for the shared pipeline, a whole session, and the running server.
+Self test for the shared pipeline, a whole session, the recording it keeps,
+the running server, and the script that starts it.
 
 Needs no API keys, no audio device, and no network. A fake recognizer and a
 fake translator stand in where the real ones would go, so the whole thing
@@ -890,10 +891,11 @@ def check_keys(checks):
 def check_device_listing(checks):
     """The device list names one source to pre-select, so the page can.
 
-    parec marks no device as default, and the page sorts by name and so has
-    lost the backend's order. Without a suggestion from here the browser
-    falls to the first option, which on a PulseAudio machine is the
-    playback monitor rather than the microphone.
+    The page sorts by name and so has lost the backend's order, and without
+    a suggestion from here the browser falls to the first option, which on a
+    PulseAudio machine is the playback monitor rather than the microphone.
+    capture.choose_default holds the rule; this checks that api_devices
+    hands the answer over.
     """
 
     class StubRequest:
@@ -1195,7 +1197,7 @@ def check_server(checks):
                                        token=READER)
             except Exception as exc:
                 # A stream that opened is the failure this is looking for,
-                # and urllib blocks on it rather than returning a status.
+                # and it arrives here as a timeout rather than a status.
                 status, body = 200, f"held open: {type(exc).__name__}"
             checks.check("a reader past the cap is refused, not left hanging",
                          status == 503, f"{status} {body}")
@@ -1445,7 +1447,9 @@ def check_script(checks):
                  transept.read_config(written)
                  == (9000, 9001, "https://chapel.example/"),
                  transept.read_config(written))
-    # Both of these once reached ss as "sport = :" in the shell version.
+    # A config that will not parse and a port that is not a number both have
+    # to stop here, rather than be passed on to something that probes ports
+    # and sends signals.
     for label, text in (("a port that is not a number",
                          '[server]\nport = "eight thousand"\n'),
                         ("a file that is not TOML", "[server\n")):

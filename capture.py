@@ -2,9 +2,10 @@
 """
 Audio capture, one interface over two backends.
 
-sounddevice (PortAudio) works everywhere and is the default. parec is Linux
-only and stays as a second path, because PortAudio through PipeWire's
-compatibility layer can be inconsistent about device names and buffer sizes.
+parec is preferred on Linux where it exists, because PortAudio through
+PipeWire's compatibility layer can be inconsistent about device names and
+buffer sizes. sounddevice (PortAudio) is the fallback there and the only
+backend on macOS and Windows.
 
 Both deliver the same thing: 16 kHz mono signed 16-bit chunks, one per
 CHUNK_MS, which is what the speech recognizer expects.

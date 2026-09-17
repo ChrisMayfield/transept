@@ -239,8 +239,7 @@ resume.onclick = () => {
   feed.scrollTop = feed.scrollHeight;
 };
 
-// Put this page's own two lines into the language being read. An unlisted
-// language keeps the English wording rather than showing nothing.
+// Put this page's own two lines into the language being read.
 function speak(channel) {
   const [waiting, newest] = PHRASES[channel] || PHRASES["English"];
   const rtl = RTL.includes(channel);
@@ -291,9 +290,6 @@ function connect(channel) {
   feed.innerHTML = '<p class="waiting" id="waiting"></p>';
   speak(channel);
   localStorage.setItem("subtitleChannel", channel);
-  // The reader id tells the server this stream replaces the one this phone
-  // already had, so a language somebody has just left stops being paid for
-  // rather than running out its grace period with nobody reading it.
   source = new EventSource("/stream/" + encodeURIComponent(channel)
                            + "?reader=" + encodeURIComponent(reader)
                            + "&token=" + encodeURIComponent(token));

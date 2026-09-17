@@ -31,12 +31,13 @@ import tomllib
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-# Both beside the code rather than in /tmp: Windows has no /tmp, and two
-# checkouts on one machine should not share a log or a record.
+# Beside the code rather than in /tmp: Windows has no /tmp, and two checkouts
+# on one machine should not share a log that carries this run's tokens.
 LOG_FILE = HERE / "transept.log"
-# Written by server.py, which spells the same name out rather than sharing
-# a constant, because importing server.py would pull aiohttp and the whole
-# pipeline into a script that only needs to send a signal.
+# Written by server.py into its working directory, which do_start makes this
+# one. The name is spelled out again rather than imported, because importing
+# server.py would pull aiohttp and the whole pipeline into a script that only
+# needs to send a signal.
 PID_FILE = HERE / "transept.pid"
 # Seconds to wait for each half of the work. A server on its way down has
 # lines to drain; a server on its way up has two ports to bind.
@@ -299,6 +300,7 @@ def do_stop(indent=""):
     # of, and a process that has finished but has not been reaped by its
     # parent yet still answers every liveness test there is, which would
     # spend the whole grace period waiting for something already stopped.
+
     def quiet():
         return not any(listening(port) for port in ports)
 

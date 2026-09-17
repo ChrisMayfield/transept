@@ -50,7 +50,7 @@ try:
     import websockets
     from aiohttp import web
 except ImportError:
-    sys.exit("Missing dependencies: pip install websockets httpx aiohttp")
+    sys.exit("Missing dependencies: pip install -r requirements.txt")
 
 import capture
 import record
@@ -66,9 +66,6 @@ STATIC = Path(__file__).parent / "static"
 # later. In the working directory rather than beside the code, because that
 # is where config.toml, the glossary, and sessions.db already live, and "a
 # server running out of this directory" is the thing being identified.
-# transept.py spells the name out again rather than importing it, since
-# importing this file would pull aiohttp and the whole pipeline into a
-# script that only needs to send a signal.
 PID_FILE = Path("transept.pid")
 # Not a setting: the point of the second listener is that a tunnel cannot
 # be pointed at it by mistake.
@@ -743,9 +740,8 @@ async def api_devices(request):
     except capture.CaptureError as exc:
         return web.json_response({"devices": [], "error": str(exc)})
     # Which one to pre-select, decided here rather than on the page: the
-    # "default" flag is whatever the backend considers default and parec
-    # marks nothing at all, and the page sorts the list by name anyway, so
-    # it no longer knows the order the backend offered them in.
+    # page sorts the list by name and so no longer knows the order the
+    # backend offered them in. capture.choose_default holds the rule.
     return web.json_response({"devices": devices,
                               "suggested": capture.choose_default(devices)})
 

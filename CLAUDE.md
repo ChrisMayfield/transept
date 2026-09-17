@@ -51,7 +51,7 @@ There is no build step and no CI, so `selftest.py` is the whole mechanical check
 capture -> Deepgram websocket -> Segmenter -> Translator -> Hub -> SSE -> phones
 ```
 
-`capture.py` presents one interface over two backends: `sounddevice` (PortAudio, all platforms) and `parec` (Linux only).
+`capture.py` presents one interface over two backends: `parec`, which `auto` prefers on Linux where it exists, and `sounddevice` (PortAudio) everywhere else.
 Both yield 16 kHz mono signed 16-bit chunks, and nothing downstream knows which produced them.
 An empty chunk means end of stream, which is how a device that disappears becomes a reconnect rather than a hang.
 
@@ -70,7 +70,7 @@ Recording is off unless `[session] record` is set, and nothing is ever deleted w
 Both entry points run the same three tasks over one websocket and differ only in where finished text goes, so that difference sits behind a sink.
 A sink provides `fragment(text)`, `unit(unit)` returning the output names worth requesting, `translated`, `timed_out`, and `failed`.
 `TerminalSink` prints; `Session` is its own sink, publishing to the `Hub` and keeping the counters the operator page shows.
-An empty list from `unit` means do not call the model for that sentence at all, which is how an unread language costs nothing.
+An empty list from `unit` means do not call the model for that sentence at all.
 
 New behavior belongs in the shared loop or in a sink method, never in a second copy of the loop.
 These loops were duplicated once and the copies drifted until one was building a Deepgram URL from names its own file had never imported, so every session start raised `NameError` and the supervisor retried forever.
@@ -104,14 +104,13 @@ A check inside the handlers could not replace this, because the tunnel daemon co
 
 Every route on both listeners is behind `authorized`, which reads the token its own application was given, so the link the whole room is handed opens nothing on the operator port.
 The one exception is `/` on the reader port, which is `nothing_here`: a tunnel puts that address on the public internet, and a bot that finds it gets a 404 rather than a language picker.
-Two separate tokens rather than one, because they are shared with different people and expire on different schedules: `reader_token` may be pinned so a printed card keeps working, while `operator_token` pinned in a meeting is a weak or forgotten password on the machine that runs it.
 
 On the reader port the token is what stands between a public hostname and a meeting, and `stream` checks it before it looks the channel up, because opening a stream is what makes a language be translated and paid for.
 On the operator port it also stops a page in another tab of the operator's browser from posting a cross-origin form at the loopback port, which needs no CORS preflight and would otherwise reach `Session.start`, and it covers the two routes that only read: `/api/status` carries the device, the model, the raw exception text and the last lines spoken, and `/api/devices` names the sound hardware and forks a process per request.
-`/qr.svg` is behind it too, now that the image encodes the reader token; the operator page passes the token in the query string there because an `<img>` cannot carry a header.
+`/qr.svg` is behind it too, now that the image encodes the reader token.
 A refusal has to keep the shape the page destructures, `ok` and `message` for status, `devices` and `error` for the device list, and `channels` and `error` for the channel list, or the page renders a blank panel instead of saying the token is wrong.
 
-The reader page takes its token from `location.search` rather than storing it, since the address is what the QR code and the shared link both carry, and it puts it in the query string of the stream and the channel list because an `EventSource` cannot set a header either.
+The reader page takes its token from `location.search` rather than storing it, since the address is what the QR code and the shared link both carry, and it passes the token on to the stream and the channel list.
 
 The address itself is built by `reader_address`, not typed into `config.toml`: `public_url` is the hostname a phone can reach, and the path and the token are this run's.
 `main` puts the result in `config["reader_url"]`, which is what `/qr.svg` renders and what the operator page shows as the link to hand somebody, and it is empty until `public_url` is set so the page shows no share block rather than a link to nowhere.
@@ -155,7 +154,7 @@ Both addresses are read back out of the log rather than built here, because each
 
 `server.py` writes `transept.pid` in the directory it starts in, once both ports are bound, and removes the file on the way out.
 The pid file replaced a search through `pgrep`, `ps`, and `/proc/<pid>/cwd` that only Linux could answer: macOS has no `/proc`, and Windows has no per-process working directory to ask about at all.
-Writing it from the server rather than from the script keeps what that search was for, since the copy somebody started by hand in a terminal they have since closed writes the same file.
+Writing it from the server rather than from the script keeps what that search was for, since the copy somebody started by hand out of this directory, in a terminal they have since closed, writes the same file.
 
 The file is written after the listeners bind, so a second server that dies of "address already in use" cannot overwrite the record of the one holding the ports, and `remove_pid_file` checks that the recorded pid is still its own, so a server on its way out cannot delete a newer server's record.
 
@@ -227,10 +226,11 @@ Python block buffers stdout when it is a file rather than a terminal, and both a
 
 `transept start` runs the whole of `stop` before it starts anything, which is also why `restart` is a synonym for `start` rather than a third code path.
 A server left from a previous meeting holds both ports, and by then there is rarely a terminal left to press Ctrl-C in, so refusing would send a volunteer hunting for a process five minutes before the meeting.
-Clearing first also means anything still holding either port afterwards is genuinely not Transept, which is the one case worth stopping for and what the `ss` check reports.
+Clearing first also means anything still holding either port afterwards is genuinely not Transept, which is the one case worth stopping for and what the `listening` check before the launch reports.
 
 `transept.log` and `transept.pid` sit beside the code rather than in `/tmp`.
 Windows has no `/tmp`, and two checkouts on one machine should not share a log that carries this run's tokens or a record of which process to signal.
+`transept.py` anchors both to its own directory and starts `server.py` there, and `server.py` writes the record into whatever directory it starts in.
 
 `transept stop` closes the funnel with `tailscale funnel reset` rather than naming the port.
 The per-port `tailscale funnel 8080 off` form was removed, and current versions answer it with "the CLI for serve and funnel has changed" and a nonzero exit, which when stopping means a meeting's address stays open to the internet afterwards.
@@ -293,7 +293,7 @@ The `lint` section shells out to `ruff check .` and reports its output as one ch
 Adding a check means adding one `checks.check(label, condition, detail)` line.
 `FakeSocket`, `FakeSource`, and `FakeTranslator` are already there, and `FakeTranslator` takes `mode="fail"`, `mode="empty"`, and a `delay`, so the failure, dropped language, and timeout paths cost nothing to exercise.
 
-The `store` section ends with a `Recorder` that raises on every method, asserted against the `Hub` buffers.
+The `store` section includes a `Recorder` that raises on every method, asserted against the `Hub` buffers.
 An isolation wrapper with no test that exercises the raising path is a wrapper nobody knows works; this one was written before the guard existed and failed until it did.
 
 A check that cannot fail is worse than no check, because it reads like coverage.
@@ -310,7 +310,7 @@ Latency claims should come from an actual run: `python3 pipeline.py --no-transla
 The reader view is a plain web page by choice, not an installable app.
 A manifest and service worker would add install friction and offline machinery that a live subtitle feed cannot use anyway.
 HTTPS is still required, because the screen wake lock needs a secure context, and a tunnel in front is the current answer.
-`public_url` exists because the bind address is not the address a phone can reach, and the QR endpoint renders `reader_address` of that value rather than the listener.
+`public_url` exists because the address this process binds is not the address a phone can reach.
 
 `operator_port` is a setting; the operator host is not, because the point of the second listener is that a tunnel cannot be pointed at it by mistake.
 A headless machine wants an SSH forward rather than a wider bind.
@@ -321,6 +321,6 @@ Pinning the reader one is ordinary, because a printed card has to keep working; 
 They sit with the keys rather than among the settings, and `mint_token()` takes the pinned value as an argument rather than reading the environment itself, so the one place that decides where a secret comes from stays `load_keys`.
 Neither is a `SETTINGS` row and so neither has a flag, because a setting invites a weak or forgotten token on the machine that runs the meetings.
 
-Both tokens travel in a query string, which is what reaches browser history, and on the reader side every request carries one because neither an `EventSource` nor an `<img>` can set a header.
+Both tokens travel in the address that hands them over, which is what reaches browser history, and they stay in a query string on the requests that cannot carry a header: the reader page's `EventSource` streams, and the `<img>` holding the QR code on the operator page.
 Stripping it from the address bar is not a client-side fix while the page itself is gated on it, and on a phone it would break the reload that a locked screen eventually causes.
 The reader token is a shared secret for a room, not a credential for a person: it keeps a public hostname from being a public meeting, and it is not meant to survive the card being photographed.

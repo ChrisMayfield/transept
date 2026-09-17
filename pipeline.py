@@ -312,7 +312,6 @@ class Segmenter:
         return self.seq, text, reason, self.audio_end, confidence
 
 
-
 class Translator:
     """Concurrent translation calls over one pooled HTTP client."""
 
@@ -799,7 +798,7 @@ def main():
         epilog="Any setting may live in config.toml instead. The command "
                "line wins where both are given.")
     parser.add_argument("--list-devices", action="store_true",
-                        help="show PipeWire sources and exit")
+                        help="list audio input devices and exit")
     parser.add_argument("--no-translate", action="store_true",
                         help="transcribe only, no translation model needed")
     parser.add_argument("--no-color", action="store_true")

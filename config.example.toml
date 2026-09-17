@@ -13,7 +13,7 @@ deepgram_api_key = ""
 # /chat/completions. The model it serves is translation.model below.
 #
 #   Google            https://generativelanguage.googleapis.com/v1beta/openai
-#   Anthropic         https://api.anthropic.com/v1
+#   Claude            https://api.anthropic.com/v1
 #   OpenAI            https://api.openai.com/v1
 #   Local Ollama      http://localhost:11434/v1
 #   LiteLLM proxy     http://your-proxy:4000/v1
