@@ -20,7 +20,7 @@ Whole sentences go to the translation model, all languages in one call, running 
 English publishes immediately, and translations arrive on their own channels a moment later.
 Phones subscribe over server-sent events, one channel per language, with the last sixty lines replayed on connect so somebody arriving late has context.
 
-**Source files:** `server.py` is the web server and session manager, and the only thing you run on a normal Sunday, whether directly or through the two shell scripts that also open the tunnel.
+**Source files:** `server.py` is the web server and session manager, and the only thing you run on a normal Sunday, whether directly or through the `transept` script that also opens the tunnel.
 `pipeline.py` is the same pipeline without the web layer, which is the fastest way to check a microphone or tune segmentation.
 `review.py` translates a text file offline, `record.py` keeps a session and turns it into a review document, `capture.py` is the audio layer, `selftest.py` checks the software without a microphone or an API key, and `static/` holds the two web pages.
 
@@ -122,7 +122,7 @@ python3 server.py
 
 That is the whole weekly command, and everything it needs is in `config.toml`.
 Any setting can still be overridden for a one-off, for example `python3 server.py --ceiling 6`.
-Once a tunnel is set up, the two scripts under [Two commands on a Sunday](#two-commands-on-a-sunday) run the server and the funnel together, which is the shorter version of this page.
+Once a tunnel is set up, the `transept` script under [One command on a Sunday](#one-command-on-a-sunday) runs the server and the funnel together, which is the shorter version of this page.
 
 Two addresses are printed, on two different ports.
 The operator opens the `/operator` one on the laptop, picks the audio source, and presses Start.
@@ -165,7 +165,7 @@ tailscale funnel 8080
 
 When the tailnet is not set up yet, that prints a link to the admin console, and opening it enables HTTPS certificates and grants this machine the Funnel attribute.
 Run the same command again afterwards and the address appears.
-In this foreground form the funnel closes when you press Ctrl-C, which makes it the right way to test before handing the job to the scripts below.
+In this foreground form the funnel closes when you press Ctrl-C, which makes it the right way to test before handing the job to the script below.
 
 One more command saves a `sudo` every week:
 
@@ -173,7 +173,7 @@ One more command saves a `sudo` every week:
 sudo tailscale set --operator=$USER
 ```
 
-Changing the funnel is a privileged operation, so without this every `tailscale funnel` command needs root, including the ones inside the start and stop scripts.
+Changing the funnel is a privileged operation, so without this every `tailscale funnel` command needs root, including the ones the `transept` script runs for you.
 
 **Cloudflare Tunnel** needs a domain whose DNS Cloudflare manages, which is roughly ten to fifteen dollars a year.
 Cloudflare's free Quick Tunnel needs no domain but mints a new random `trycloudflare.com` address every restart, so a printed QR code would stop working the first time the laptop reboots.
@@ -197,28 +197,32 @@ Without a tunnel, you can instead set `host = "0.0.0.0"` and have phones connect
 That is fine for a first test, but it is plain HTTP, and the screen wake lock that keeps a phone from going dark mid-sentence only works in a secure context.
 Over plain HTTP your readers will be tapping their screens every thirty seconds for an hour, which is a poor experience for exactly the people this is meant to serve.
 
-### Two commands on a Sunday
+### One command on a Sunday
 
-With Tailscale, the server and the funnel are two things to start and two things to remember to stop, so there is a script for each direction:
+With Tailscale, the server and the funnel are two things to start and two things to remember to stop, so one script does both:
 
 ```sh
-./transept-start.sh     # the server, then the funnel
-./transept-stop.sh      # the funnel, then the server
+./transept start        # the server, then the funnel
+./transept stop         # the funnel, then the server
+./transept status       # whether either is up, and the addresses
+./transept restart      # the same as start
 ```
 
-`transept-start.sh` clears anything left from last time, starts `server.py` in the background, waits until it is really listening, opens the funnel, and prints the reader address, the operator address with this run's token, and where the log went.
-Starting is therefore also how you restart, including after a server somebody left running in a terminal that is now closed.
+`transept start` clears anything left from last time, starts `server.py` in the background, waits until it is really listening, opens the funnel, and prints the reader address, the operator address with this run's token, and where the log went.
+Starting is therefore also how you restart, including after a server somebody left running in a terminal that is now closed, which is why `restart` is only another name for it.
 If the server or the funnel does not come up, it stops what it started and says why, so a failed start never leaves half a meeting running.
 It also warns when `public_url` in `config.toml` is not the address the funnel just published, because the QR code the room scans is built from `public_url`.
 
 Run it from anywhere, since it moves to the repository itself.
 It uses the repository's `.venv/bin/python3` when there is one and otherwise the `python3` on your PATH, so a virtual environment kept somewhere else has to be active in the terminal you run it from.
 The server keeps running after the script exits, with its output in `/tmp/transept-server.log`, so closing the terminal does not end the meeting.
-The operator address is the one thing worth copying before the terminal scrolls, and `grep Operator /tmp/transept-server.log` brings it back if it does.
+The operator address is the one thing worth copying before the terminal scrolls, and `./transept status` prints it again if the terminal scrolls past it.
 
-`transept-stop.sh` closes the funnel first, so nobody reaches a server on its way down, then stops the server the same way Ctrl-C would.
+`transept stop` closes the funnel first, so nobody reaches a server on its way down, then stops the server the same way Ctrl-C would.
 It is safe to run when nothing is running, and it says so.
 Run it at the end of every meeting: the server costs nothing once the session is stopped, but a funnel left open leaves the address answering all week.
+
+`transept status` answers the two questions worth asking mid-meeting, whether the room is being subtitled and what address to hand somebody, and it names the funnel separately because a funnel can outlive the server that was behind it.
 
 ## Tuning
 

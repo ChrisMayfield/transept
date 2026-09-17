@@ -33,10 +33,11 @@ python3 server.py --list-devices      find an audio source
 python3 pipeline.py --no-translate    check the audio path, no translation key needed
 python3 selftest.py [section]         lint, pipeline, session, store, server
 ruff check .                          the linter alone, as selftest runs it
-python3 review.py --input t.txt --review review.md    offline translation review
+python3 review.py --input t.txt --review review.md         offline translation review
 python3 record.py --session last --out review/sunday.md    read a session back
-./transept-start.sh                   stop leftovers, start, open the funnel
-./transept-stop.sh                    the funnel, then the server
+./transept start                      stop leftovers, start, open the funnel
+./transept stop                       the funnel, then the server
+./transept status                     whether either is up, and the addresses
 ```
 
 Any setting may be overridden for a one-off, for example `python3 server.py --ceiling 6`.
@@ -119,16 +120,25 @@ A language missing from the table falls back to English, so adding one to `confi
 
 ### Operator scripts
 
-`transept-start.sh` and `transept-stop.sh` are the weekly pair for a room behind Tailscale Funnel, and `README.md` covers what they do for the operator.
-They are bash and they assume Tailscale, which is a narrower bet than the rest of the project makes; everything else here runs on three platforms.
-Nothing else may depend on them, and `server.py` must stay runnable on its own.
+### The transept script
 
-Both ports and `public_url` are read from `config.toml` with `tomllib`, never copied into the scripts, since a second copy of the port is a copy that will one day disagree with the one the server binds.
-The start script warns when `public_url` differs from the address the funnel just published, which is the one setup mistake that survives a successful start and only shows up as a QR code nobody can open.
+`./transept start | stop | restart | status` is the weekly command for a room behind Tailscale Funnel, and `README.md` covers what it does for the operator.
+It is bash and it assumes Tailscale, which is a narrower bet than the rest of the project makes; everything else here runs on three platforms.
+Nothing else may depend on it, and `server.py` must stay runnable on its own, which is also the form a systemd unit would take.
+
+A command is one `do_*` function and one line in the `case` at the bottom, and the pieces they share sit in `read_config`, `server_pids`, `funnel_url`, and `gone`.
+`start` was a separate script that ran the stop script as a subprocess, so the shared half of that pair was a process boundary; `status` exists because once `server_pids` is a function, answering "is the room being subtitled" is three lines rather than a second copy of the rule.
+
+The script does not `set -e`.
+The stop path has to attempt every step even when an earlier one failed, because the point is to leave nothing running and nothing exposed, and the start path checks each step it cares about and says what went wrong, which is worth more to a volunteer than a silent nonzero exit.
+`read_config` checks that the ports it read are digits for that reason: `read` succeeds on empty input, so a `config.toml` that would not parse otherwise reaches `ss` as `sport = :`.
+
+Both ports and `public_url` are read from `config.toml` with `tomllib`, never copied into the script, since a second copy of the port is a copy that will one day disagree with the one the server binds.
+`start` warns when `public_url` differs from the address the funnel just published, which is the one setup mistake that survives a successful start and only shows up as a QR code nobody can open.
 
 There is no PID file.
-`transept-stop.sh` finds its target the way the operator would describe it, a python whose working directory is this one, running `server.py`, which also catches the copy somebody started by hand in a terminal they have since closed.
-Both halves of that test earn their place, because matching the command line alone would also match an editor or a shell with the same words in it, and the next thing the script does is send that process a signal.
+`server_pids` finds its target the way the operator would describe it, a python whose working directory is this one, running `server.py`, which also catches the copy somebody started by hand in a terminal they have since closed.
+Both halves of that test earn their place, because matching the command line alone would also match an editor or a shell with the same words in it, and the next thing the caller does is send that process a signal.
 
 ## Things that look wrong but are not
 
@@ -178,15 +188,15 @@ Without it, a dead capture device leaves the websocket open and the session hang
 
 The 48 kHz fallback averages groups of three samples rather than taking every third one, because plain decimation would alias everything above 8 kHz back into the speech band.
 
-`transept-start.sh` runs `python3 -u`.
+`transept start` runs `python3 -u`.
 Python block buffers stdout when it is a file rather than a terminal, and the operator address with its token is printed once at startup, so without `-u` the log file stays empty until the server exits, which is exactly when that address stops being worth having.
 
-`transept-start.sh` runs `transept-stop.sh` before it starts anything.
+`transept start` runs the whole of `stop` before it starts anything, which is also why `restart` is a synonym for `start` rather than a third code path.
 A server left from a previous meeting holds both ports, and by then there is rarely a terminal left to press Ctrl-C in, so refusing would send a volunteer hunting for a process five minutes before the meeting.
 Clearing first also means anything still holding either port afterwards is genuinely not Transept, which is the one case worth stopping for and what the `ss` check reports.
 
-`transept-stop.sh` closes the funnel with `tailscale funnel reset` rather than naming the port.
-The per-port `tailscale funnel 8080 off` form was removed, and current versions answer it with "the CLI for serve and funnel has changed" and a nonzero exit, which in a stop script means a meeting's address stays open to the internet afterwards.
+`transept stop` closes the funnel with `tailscale funnel reset` rather than naming the port.
+The per-port `tailscale funnel 8080 off` form was removed, and current versions answer it with "the CLI for serve and funnel has changed" and a nonzero exit, which when stopping means a meeting's address stays open to the internet afterwards.
 
 `serve` calls `hub.close()` between stopping the session and cleaning up the runners.
 A phone holds its event stream open for as long as the page is up, `AppRunner.cleanup` waits on the connections its site still has, and an event stream ends only when the handler returns.
