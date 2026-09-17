@@ -296,7 +296,7 @@ You are now set up. 🎉
 
 ## Running a meeting
 
-One script starts the server and the tunnel together, and stops both, on all three systems:
+One script starts the server and the tunnel together, and stops both:
 
 ```sh
 ./transept start      # the server, then the funnel
