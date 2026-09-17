@@ -182,6 +182,12 @@ const resume = document.getElementById("resume");
 const reader = (crypto.randomUUID ? crypto.randomUUID()
   : String(Math.random()).slice(2) + String(Date.now()));
 
+// The token this page was opened with. Every route on this port is behind
+// it, and an event stream cannot carry a header, so it travels in the query
+// string the way it arrived. Taken from the address rather than stored,
+// since the address is what the QR code and the shared link both carry.
+const token = new URLSearchParams(location.search).get("token") || "";
+
 // The dot is the only thing on this page that says whether subtitles are
 // still arriving, and a pause in the room looks exactly like a dropped
 // connection. The title is what tells the two apart, so it moves with the
@@ -289,7 +295,8 @@ function connect(channel) {
   // already had, so a language somebody has just left stops being paid for
   // rather than running out its grace period with nobody reading it.
   source = new EventSource("/stream/" + encodeURIComponent(channel)
-                           + "?reader=" + encodeURIComponent(reader));
+                           + "?reader=" + encodeURIComponent(reader)
+                           + "&token=" + encodeURIComponent(token));
   source.onopen = () => connected(true);
   source.onerror = () => connected(false);
   source.onmessage = (event) => {
@@ -314,7 +321,8 @@ document.addEventListener("visibilitychange", () => {
 });
 keepAwake();
 
-fetch("/api/channels").then((r) => r.json()).then(({ channels }) => {
+fetch("/api/channels?token=" + encodeURIComponent(token))
+    .then((r) => r.json()).then(({ channels }) => {
   // Alphabetical, English included: the server lists English first because
   // that is the order the pipeline works in, but a reader looking for
   // Swahili scans a list, and a name out of order is a name they scan past.

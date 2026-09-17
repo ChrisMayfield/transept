@@ -89,26 +89,36 @@ A reader who picks a different language is not a reader who left, so the switch 
 The reader page sends an id with each stream and `Hub.subscribe` retires that reader's previous stream with the `LEAVING` sentinel, which is what lets `unsubscribe` tell a deliberate departure from a dropped one and leave `last_seen` alone for the first.
 Without it a phone switching language holds both channels until the old handler's next keepalive write, up to fifteen seconds later, and then buys the abandoned language a further `grace` seconds nobody is reading.
 
-Demand is unauthenticated, so `max_languages` caps how many run at once: without it one client opening every channel makes every sentence pay for the whole list, in tokens and in the latency more output adds for real readers.
+Demand comes from whoever holds the reader link, which is everyone in the room, so `max_languages` caps how many run at once: without it one client opening every channel makes every sentence pay for the whole list, in tokens and in the latency more output adds for real readers.
 `demand` keeps the languages the operator forced on, then the ones with the most readers, and returns the rest as capped.
 A capped language gets the English line rather than a gap, and the default is 0 because showing English to a real reader is worse than the tokens a cap saves.
 
 ### Web layer
 
-Two listeners share one `Hub` and one `Session`.
-`build_reader_app` serves `/`, `/stream/<channel>`, and `/api/channels` on the port a tunnel points at, and nothing on it can change anything.
+Two listeners share one `Hub` and one `Session`, and each holds a token of its own under `app["token"]`.
+`build_reader_app` serves `/read`, `/stream/<channel>`, and `/api/channels` on the port a tunnel points at, and nothing on it can change anything.
 `build_operator_app` serves `/operator`, `/api/status`, `/api/devices`, `/api/start`, `/api/stop`, `/api/language`, and `/qr.svg` on `OPERATOR_HOST`, which is always `127.0.0.1`.
 A check inside the handlers could not replace this, because the tunnel daemon connects from this machine, so a visitor from the public internet arrives from `127.0.0.1` exactly as the operator does.
 `serve` runs both under `AppRunner`, since `web.run_app` takes one application.
 
-Every operator route is behind `authorized`, including the two that only read: `/api/status` carries the device, the model, the raw exception text and the last lines spoken, and `/api/devices` names the sound hardware and forks a process per request.
-The token also stops a page in another tab of the operator's browser from posting a cross-origin form at the loopback port, which needs no CORS preflight and would otherwise reach `Session.start`.
-A refusal has to keep the shape the operator page destructures, `ok` and `message` for status and `devices` and `error` for the device list, or the page renders a blank panel instead of saying the token is wrong.
+Every route on both listeners is behind `authorized`, which reads the token its own application was given, so the link the whole room is handed opens nothing on the operator port.
+The one exception is `/` on the reader port, which is `nothing_here`: a tunnel puts that address on the public internet, and a bot that finds it gets a 404 rather than a language picker.
+Two separate tokens rather than one, because they are shared with different people and expire on different schedules: `reader_token` may be pinned so a printed card keeps working, while `operator_token` pinned in a meeting is a weak or forgotten password on the machine that runs it.
+
+On the reader port the token is what stands between a public hostname and a meeting, and `stream` checks it before it looks the channel up, because opening a stream is what makes a language be translated and paid for.
+On the operator port it also stops a page in another tab of the operator's browser from posting a cross-origin form at the loopback port, which needs no CORS preflight and would otherwise reach `Session.start`, and it covers the two routes that only read: `/api/status` carries the device, the model, the raw exception text and the last lines spoken, and `/api/devices` names the sound hardware and forks a process per request.
+`/qr.svg` is behind it too, now that the image encodes the reader token; the operator page passes the token in the query string there because an `<img>` cannot carry a header.
+A refusal has to keep the shape the page destructures, `ok` and `message` for status, `devices` and `error` for the device list, and `channels` and `error` for the channel list, or the page renders a blank panel instead of saying the token is wrong.
+
+The reader page takes its token from `location.search` rather than storing it, since the address is what the QR code and the shared link both carry, and it puts it in the query string of the stream and the channel list because an `EventSource` cannot set a header either.
+
+The address itself is built by `reader_address`, not typed into `config.toml`: `public_url` is the hostname a phone can reach, and the path and the token are this run's.
+`main` puts the result in `config["reader_url"]`, which is what `/qr.svg` renders and what the operator page shows as the link to hand somebody, and it is empty until `public_url` is set so the page shows no share block rather than a link to nowhere.
 
 Handlers share their event loop with the capture pipeline, so anything that blocks in one stalls the subtitle fan-out to every phone in the room.
 `api_devices` runs `pactl` under `asyncio.to_thread` for that reason, and a handler that shells out, touches the disk, or calls a third party belongs in a thread too.
 
-`max_listeners` bounds how many event streams the `Hub` holds, since nothing authenticates to open one and each costs a task, a queue, a socket, and a write on every published line.
+`max_listeners` bounds how many event streams the `Hub` holds, since the reader token is on a card the room passes around and each stream costs a task, a queue, a socket, and a write on every published line.
 Past the cap `stream` answers 503 with a `Retry-After` before `prepare`, and `Hub.refused` reaches the operator page.
 A reader who leaves holds its slot until the next keepalive write fails, up to 15 seconds, which is why the default is generous rather than tight.
 
@@ -135,6 +145,7 @@ The stop path has to attempt every step even when an earlier one failed, because
 
 Both ports and `public_url` are read from `config.toml` with `tomllib`, never copied into the script, since a second copy of the port is a copy that will one day disagree with the one the server binds.
 `start` warns when `public_url` differs from the address the funnel just published, which is the one setup mistake that survives a successful start and only shows up as a QR code nobody can open.
+Both addresses are read back out of the log rather than built here, because each carries a token the server minted, and the funnel hostname on its own now opens nothing.
 
 There is no PID file.
 `server_pids` finds its target the way the operator would describe it, a python whose working directory is this one, running `server.py`, which also catches the copy somebody started by hand in a terminal they have since closed.
@@ -189,7 +200,8 @@ Without it, a dead capture device leaves the websocket open and the session hang
 The 48 kHz fallback averages groups of three samples rather than taking every third one, because plain decimation would alias everything above 8 kHz back into the speech band.
 
 `transept start` runs `python3 -u`.
-Python block buffers stdout when it is a file rather than a terminal, and the operator address with its token is printed once at startup, so without `-u` the log file stays empty until the server exits, which is exactly when that address stops being worth having.
+Python block buffers stdout when it is a file rather than a terminal, and both addresses with their tokens are printed once at startup, so without `-u` the log file stays empty until the server exits, which is exactly when those addresses stop being worth having.
+The script greps them back out of that log, and `status` does too, so the buffering is not a cosmetic problem but the difference between having an address for the room and not.
 
 `transept start` runs the whole of `stop` before it starts anything, which is also why `restart` is a synonym for `start` rather than a third code path.
 A server left from a previous meeting holds both ports, and by then there is rarely a terminal left to press Ctrl-C in, so refusing would send a volunteer hunting for a process five minutes before the meeting.
@@ -222,7 +234,7 @@ Every argparse default is `None` so `resolve` can distinguish an absent flag fro
 The keys live in the same file, in `[keys]`, resolved by `load_keys` against the `SECRETS` table rather than by `resolve`.
 A separate `.env` meant that changing translation providers was two edits in two files, one for the base URL and the key and one for the model name, which is the change most likely to be made in a hurry.
 They are not rows in `SETTINGS` because `SETTINGS` becomes command line flags, and a key on a command line lands in the process list and in shell history.
-An environment variable of the same name in capitals overrides the file, which is what a systemd unit, a container, or `selftest.py` uses; an empty variable counts as set, which is how a run asks for a minted operator token on a machine whose `config.toml` pins one.
+An environment variable of the same name in capitals overrides the file, which is what a systemd unit, a container, or `selftest.py` uses; an empty variable counts as set, which is how a run asks for a freshly minted reader or operator token on a machine whose `config.toml` pins one.
 `config.toml` is gitignored for this reason and the file itself says so at the top.
 The third column of `SECRETS` is always the second in capitals, spelled out rather than derived so that grepping for `DEEPGRAM_API_KEY` finds the table, and `selftest.py` asserts the two agree so the rule the config file states cannot drift.
 
@@ -271,14 +283,17 @@ Latency claims should come from an actual run: `python3 pipeline.py --no-transla
 The reader view is a plain web page by choice, not an installable app.
 A manifest and service worker would add install friction and offline machinery that a live subtitle feed cannot use anyway.
 HTTPS is still required, because the screen wake lock needs a secure context, and a tunnel in front is the current answer.
-`public_url` exists because the bind address is not the address a phone can reach, and the QR endpoint renders that value rather than the listener.
+`public_url` exists because the bind address is not the address a phone can reach, and the QR endpoint renders `reader_address` of that value rather than the listener.
 
 `operator_port` is a setting; the operator host is not, because the point of the second listener is that a tunnel cannot be pointed at it by mistake.
 A headless machine wants an SSH forward rather than a wider bind.
 
-The operator token is minted every run and printed with the address, and there is no tokenless mode.
-`operator_token` under `[keys]` pins it, which exists for development, where a fresh address every restart is a fresh link to click every restart.
-It sits with the keys rather than among the settings, and `operator_token()` takes the pinned value as an argument rather than reading the environment itself, so the one place that decides where a secret comes from stays `load_keys`.
-It is not a `SETTINGS` row and so has no flag, because a setting invites a weak or forgotten token on the machine that runs the meetings.
-A meeting leaves it empty.
-The token still travels in the query string on that first load, so it reaches browser history, and stripping it from the address bar is not a client-side fix while `/operator` itself is gated on it.
+Both tokens are minted every run and printed with their addresses, and there is no tokenless mode on either listener.
+`reader_token` and `operator_token` under `[keys]` pin them.
+Pinning the reader one is ordinary, because a printed card has to keep working; pinning the operator one exists for development, where a fresh address every restart is a fresh link to click every restart, and a meeting leaves it empty.
+They sit with the keys rather than among the settings, and `mint_token()` takes the pinned value as an argument rather than reading the environment itself, so the one place that decides where a secret comes from stays `load_keys`.
+Neither is a `SETTINGS` row and so neither has a flag, because a setting invites a weak or forgotten token on the machine that runs the meetings.
+
+Both tokens travel in a query string, which is what reaches browser history, and on the reader side every request carries one because neither an `EventSource` nor an `<img>` can set a header.
+Stripping it from the address bar is not a client-side fix while the page itself is gated on it, and on a phone it would break the reload that a locked screen eventually causes.
+The reader token is a shared secret for a room, not a credential for a person: it keeps a public hostname from being a public meeting, and it is not meant to survive the card being photographed.

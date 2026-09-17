@@ -158,7 +158,10 @@ do_start() {
         echo "Warning: public_url in config.toml is \"$PUBLIC_URL\","
         echo "but this funnel serves $url"
     fi
-    echo "Readers:  ${url:-$PUBLIC_URL}"
+    # Both addresses come out of the log rather than being built here. Each
+    # carries a token this run minted, and the funnel hostname on its own
+    # now opens nothing.
+    grep -m1 '^Reader: ' "$LOG_FILE" || echo "Reader:   ${url:-$PUBLIC_URL}"
     grep -m1 '^Operator: ' "$LOG_FILE" || true
     echo "Log:      $LOG_FILE"
     echo "Stop the server, and the funnel, with ./transept stop"
@@ -185,10 +188,15 @@ do_status() {
         echo "Funnel:   closed"
     fi
 
+    # The addresses carry a token minted for the run, so a stopped server
+    # has none to give and the hostname alone is all there is to say.
     local url
     url=$(funnel_url)
-    echo "Readers:  ${url:-${PUBLIC_URL:-unknown}}"
-    if [ -n "$pids" ]; then
+    if [ -z "$pids" ]; then
+        echo "Reader:   ${url:-${PUBLIC_URL:-unknown}}, once a server is up"
+    else
+        grep -m1 '^Reader: ' "$LOG_FILE" 2>/dev/null ||
+            echo "Reader:   unknown, since this server was not started here"
         grep -m1 '^Operator: ' "$LOG_FILE" 2>/dev/null ||
             echo "Operator: unknown, since this server was not started here"
         echo "Log:      $LOG_FILE"

@@ -8,16 +8,20 @@ stop it from a browser and listeners can read subtitles on their phones.
 Two listeners. The reader port carries the pages phones use, and is the
 one to point a tunnel at; the operator port stays on 127.0.0.1.
 
-    /                   reader view with a language picker
+    /read               reader view with a language picker
     /stream/<channel>   server-sent events for one language
     /operator           start and stop controls, status, language toggles
+
+Both addresses carry a token, so a tunnel open to the internet serves the
+meeting rather than whoever finds it. The bare / is a 404: a visitor who
+was not handed the address gets nothing.
 
 Speech recognition runs continuously while a session is on. Translation runs
 per language, only while somebody is reading that language or the operator
 has forced it on, so an unread language costs nothing.
 
-The operator address is printed at startup with a token minted for that
-run, unless operator_token in config.toml pins one for development.
+Both addresses are printed at startup with tokens minted for that run,
+unless reader_token and operator_token in config.toml pin them.
 
 Usage:
     python3 server.py --model gemini-3.8-flash --reasoning-effort low \\
@@ -435,7 +439,9 @@ class Session:
             "timeouts": self.stats["timeouts"],
             "reconnects": self.stats["reconnects"],
             "corrections": self.stats["corrections"],
-            "public_url": self.config.get("public_url", ""),
+            # The address on the card, token and all, because that is what
+            # the operator hands somebody who cannot scan the code.
+            "reader_url": self.config.get("reader_url", ""),
             "idle_stop": self.config["idle_stop"],
             "quiet_for": (time.monotonic() - self.last_activity
                           if self.last_activity and self.state != "stopped"
@@ -651,10 +657,14 @@ class Session:
 
 
 def authorized(request):
-    """True if this request carries the token minted for this run.
+    """True if this request carries the token its listener was given.
 
-    No tokenless mode: loopback alone would still let a page in another
-    browser tab post a cross-origin form at these routes.
+    One rule, two tokens: each application holds its own under app["token"],
+    so a reader link opens nothing on the operator port and the reverse.
+    No tokenless mode on either. The reader port is on the public internet
+    through the tunnel, and on the operator port loopback alone would still
+    let a page in another browser tab post a cross-origin form at these
+    routes.
     """
     token = request.app["token"]
     supplied = (request.headers.get("X-Subtitle-Token")
@@ -668,7 +678,24 @@ async def page(request, filename):
     return web.FileResponse(STATIC / filename)
 
 
+async def nothing_here(request):
+    """The bare root of the reader port, which is what a bot reaches.
+
+    A tunnel puts this address on the public internet, so the front door
+    says only that there is no page here. The meeting is at /read, behind
+    the token on the card the room was handed.
+    """
+    return web.Response(status=404, text="Not found.")
+
+
 async def reader_page(request):
+    if not authorized(request):
+        # A reader who mistyped a link or kept last week's, told what to do
+        # about it. It names nothing a visitor without the token could use.
+        return web.Response(
+            status=403,
+            text="This link is not for this meeting. Scan the QR code or "
+                 "use the link for today.")
     return await page(request, "reader.html")
 
 
@@ -758,6 +785,11 @@ async def api_language(request):
 
 async def stream(request):
     """Server-sent events for one language channel."""
+    if not authorized(request):
+        # First, before the channel is even looked up: opening a stream is
+        # what makes a language be translated, and this is the route that
+        # spends money on behalf of whoever calls it.
+        return web.Response(status=403, text="Not authorized.")
     hub = request.app["hub"]
     channel = request.match_info["channel"]
     if channel not in hub.channels:
@@ -814,9 +846,16 @@ async def qr_code(request):
     """QR for the reader address, rendered on demand as SVG.
 
     Drawn from public_url rather than the bind address, because the address
-    this server listens on is not the one a phone can reach.
+    this server listens on is not the one a phone can reach, and carrying
+    the reader token, because without it that address answers nothing.
+
+    Behind the operator token like the rest of this listener, now that the
+    image encodes the reader token: a page in another tab of the operator's
+    browser can point an <img> at a loopback port without asking anybody.
     """
-    url = request.app["session"].config.get("public_url")
+    if not authorized(request):
+        return web.Response(status=403, text="Not authorized.")
+    url = request.app["session"].config.get("reader_url")
     if not url:
         return web.Response(status=404, text="No public_url configured.")
     try:
@@ -834,20 +873,30 @@ async def qr_code(request):
 
 
 async def api_channels(request):
+    if not authorized(request):
+        # The channels-and-error shape the reader page destructures, so a
+        # refusal leaves it with an empty picker rather than a thrown script.
+        return web.json_response({"channels": [], "error": "Not authorized."},
+                                 status=403)
     return web.json_response({"channels": request.app["hub"].channels})
 
 
-def build_reader_app(hub, session):
+def build_reader_app(hub, session, token):
     """What a phone needs, and nothing else.
 
-    A tunnel points here, so assume every route is public. None can change
-    anything, and none require the token.
+    A tunnel points here, so this listener is on the public internet. No
+    route can change anything, and every route that answers with a subtitle
+    or with what the channels are is behind the reader token, so a meeting
+    is read by the room it was handed to rather than by whoever finds the
+    address. The bare / is the one exception, and it is a 404.
     """
     app = web.Application()
     app["hub"] = hub
     app["session"] = session
+    app["token"] = token
     app.add_routes([
-        web.get("/", reader_page),
+        web.get("/", nothing_here),
+        web.get("/read", reader_page),
         web.get("/api/channels", api_channels),
         web.get("/stream/{channel}", stream),
     ])
@@ -860,7 +909,8 @@ def build_operator_app(hub, session, token):
     A separate listener rather than a check in the handlers: the tunnel
     daemon connects from this machine, so a public visitor and the
     operator both arrive from 127.0.0.1 and no check can tell them apart.
-    Every route here goes through authorized as well.
+    A token of its own, not the reader's: the link the whole room is given
+    must not be the link that can press Start.
     """
     app = web.Application()
     app["hub"] = hub
@@ -878,28 +928,42 @@ def build_operator_app(hub, session, token):
     return app
 
 
-def operator_token(pinned=""):
-    """The token the operator address carries.
+def mint_token(pinned=""):
+    """A token for one of the two addresses.
 
-    Minted for the run unless [keys] operator_token pins one, so a link that
-    leaks expires when the server does. The override exists for development,
-    where a new address every restart is a new link to click every restart,
-    and a meeting should leave it empty.
+    Minted for the run unless [keys] pins one, so a link that leaks expires
+    when the server does. The overrides exist for development, where a new
+    address every restart is a new link to click every restart, and for a
+    room that prints its reader card once and wants it to keep working; a
+    pinned operator token should be left empty for a meeting.
     """
     return pinned or secrets.token_urlsafe(32)
 
 
-async def serve(config, token, settings):
+def reader_address(base, token):
+    """The whole address a phone opens: a reachable base, path, and token.
+
+    Built here rather than typed into config.toml, because the token half
+    of it changes every run unless reader_token pins one. An empty base
+    means no public address is configured yet, and stays empty rather than
+    becoming a link to nowhere.
+    """
+    return f"{base.rstrip('/')}/read?token={token}" if base else ""
+
+
+async def serve(config, tokens, settings):
     """Run both listeners until Ctrl-C, then stop the session.
 
     AppRunner rather than web.run_app, which takes a single application.
-    The two apps share one Hub and one Session: two doors, one room.
+    The two apps share one Hub and one Session: two doors, one room, and a
+    key cut for each door.
     """
     hub = Hub(config["languages"], config.get("max_listeners") or 0)
     session = Session(config, hub)
     listeners = (
-        (build_reader_app(hub, session), settings["host"], settings["port"]),
-        (build_operator_app(hub, session, token), OPERATOR_HOST,
+        (build_reader_app(hub, session, tokens["reader"]),
+         settings["host"], settings["port"]),
+        (build_operator_app(hub, session, tokens["operator"]), OPERATOR_HOST,
          settings["operator_port"]),
     )
     runners = []
@@ -965,12 +1029,26 @@ def main():
     config["llm_key"] = keys["llm_key"]
     config["llm_base"] = keys["llm_base"]
 
-    token = operator_token(keys["operator_token"])
-    reader = settings["public_url"] or (
-        f"http://{settings['host']}:{settings['port']}/")
-    print(f"Reader:   {reader}")
+    tokens = {"reader": mint_token(keys["reader_token"]),
+              "operator": mint_token(keys["operator_token"])}
+    # What the QR code and the operator page show, which is the address on
+    # the card rather than the one this process binds. Empty until a tunnel
+    # is configured, and the banner falls back to the local address so that
+    # a first run on one machine still has something to open.
+    config["reader_url"] = reader_address(settings["public_url"],
+                                          tokens["reader"])
+    print("Reader:   " + (config["reader_url"] or reader_address(
+        f"http://{settings['host']}:{settings['port']}", tokens["reader"])))
+    if keys["reader_token"]:
+        print("That address carries reader_token from config.toml, so a "
+              "printed card\nkeeps working. Clear it to have one minted per "
+              "run instead.")
+    else:
+        print("That address carries a token minted for this run, so any "
+              "card or link\nfrom a previous run stops working. Nothing "
+              "answers without it.")
     print(f"Operator: http://{OPERATOR_HOST}:{settings['operator_port']}"
-          f"/operator?token={token}")
+          f"/operator?token={tokens['operator']}")
     if keys["operator_token"]:
         print("That address carries operator_token from config.toml, so it "
               "is the same\nevery restart. Clear it to have one minted per "
@@ -983,7 +1061,7 @@ def main():
               "tunnel;\nset server.host to 0.0.0.0 to allow direct "
               "connections on this network.")
     try:
-        asyncio.run(serve(config, token, settings))
+        asyncio.run(serve(config, tokens, settings))
     except KeyboardInterrupt:
         pass
 

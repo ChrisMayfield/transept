@@ -124,14 +124,19 @@ That is the whole weekly command, and everything it needs is in `config.toml`.
 Any setting can still be overridden for a one-off, for example `python3 server.py --ceiling 6`.
 Once a tunnel is set up, the `transept` script under [One command on a Sunday](#one-command-on-a-sunday) runs the server and the funnel together, which is the shorter version of this page.
 
-Two addresses are printed, on two different ports.
+Two addresses are printed, on two different ports, and each carries a token of its own.
+
 The operator opens the `/operator` one on the laptop, picks the audio source, and presses Start.
 That port is bound to this machine only, so the controls cannot be reached from the network or through your tunnel.
-Its address carries a token minted for that run, so copy it from the terminal each week rather than saving a bookmark.
-Setting `operator_token` under `[keys]` pins it instead, which saves clicking a fresh link on every restart while developing; leave it empty for a meeting, so a link that leaks expires when the server does.
-Everyone else opens `/` on their phone and picks a language.
+Its token is minted for the run, so copy the address from the terminal each week rather than saving a bookmark.
+Setting `operator_token` under `[keys]` pins it instead of minting one, which saves clicking a fresh link on every restart while developing; leave it empty for a meeting, so a link that leaks expires when the server does.
 
-The language list is fixed when the server starts, which keeps the reader URLs stable so a printed card or a saved bookmark keeps working week to week.
+Everyone else opens the `/read` one on their phone and picks a language.
+That is the address behind the QR code, and the token in it is what the reader port answers to: the bare address gives a bot a 404, and nothing serves a subtitle without the token.
+Minted per run by default, so last week's link stops working; set `reader_token` under `[keys]` when the room reads from a printed card that has to keep working.
+Anyone holding the card can read the meeting, which is the same bargain as a card left in the foyer, and it is a much smaller bargain than an address anyone can find.
+
+The language list is fixed when the server starts, so a reader's saved link keeps landing on the same set of channels from week to week.
 Listing a language does not mean paying for it.
 
 ## Getting it onto phones
@@ -145,7 +150,7 @@ Two tunnels are worth considering, and the difference is whether you want to own
 **Tailscale Funnel** needs no domain and costs nothing.
 The address is your machine's own name, `https://<machine>.<tailnet>.ts.net`, and it is the same every time the tunnel starts.
 Readers install nothing and need no account, since only the laptop runs Tailscale.
-A funnel is open to the internet by design: anyone who has the address can read the subtitles, which is the same bargain as a printed card in the foyer, and it is why the operator port never goes through it.
+A funnel is open to the internet by design, which is why the reader address carries a token and why the operator port never goes through it: what reaches the room is a link people are handed, not a hostname somebody scanning the internet can open.
 
 Install Tailscale from [tailscale.com/download](https://tailscale.com/download), then connect this machine and see what it is called:
 
@@ -190,10 +195,11 @@ Whichever you pick, put the resulting address in `config.toml`:
 public_url = "https://chapel.your-tailnet.ts.net/"
 ```
 
-The operator page then shows that address as a QR code, next to the link itself.
-Print it on a card, leave it in the room, and it keeps working as long as the hostname does.
+The operator page then shows the reader address as a QR code, next to the link itself.
+That is this address plus `/read` and the reader token, built for you, because the token half of it changes every run unless `reader_token` pins it.
+Pin it before printing a card, and the card keeps working as long as the hostname does.
 
-Without a tunnel, you can instead set `host = "0.0.0.0"` and have phones connect directly at `http://<laptop-ip>:8080/`.
+Without a tunnel, you can instead set `host = "0.0.0.0"` and have phones connect directly at the `http://<laptop-ip>:8080/read?token=...` address printed at startup.
 That is fine for a first test, but it is plain HTTP, and the screen wake lock that keeps a phone from going dark mid-sentence only works in a secure context.
 Over plain HTTP your readers will be tapping their screens every thirty seconds for an hour, which is a poor experience for exactly the people this is meant to serve.
 
@@ -208,7 +214,7 @@ With Tailscale, the server and the funnel are two things to start and two things
 ./transept restart      # the same as start
 ```
 
-`transept start` clears anything left from last time, starts `server.py` in the background, waits until it is really listening, opens the funnel, and prints the reader address, the operator address with this run's token, and where the log went.
+`transept start` clears anything left from last time, starts `server.py` in the background, waits until it is really listening, opens the funnel, and prints both addresses with this run's tokens and where the log went.
 Starting is therefore also how you restart, including after a server somebody left running in a terminal that is now closed, which is why `restart` is only another name for it.
 If the server or the funnel does not come up, it stops what it started and says why, so a failed start never leaves half a meeting running.
 It also warns when `public_url` in `config.toml` is not the address the funnel just published, because the QR code the room scans is built from `public_url`.
@@ -216,13 +222,14 @@ It also warns when `public_url` in `config.toml` is not the address the funnel j
 Run it from anywhere, since it moves to the repository itself.
 It uses the repository's `.venv/bin/python3` when there is one and otherwise the `python3` on your PATH, so a virtual environment kept somewhere else has to be active in the terminal you run it from.
 The server keeps running after the script exits, with its output in `/tmp/transept-server.log`, so closing the terminal does not end the meeting.
-The operator address is the one thing worth copying before the terminal scrolls, and `./transept status` prints it again if the terminal scrolls past it.
+Both addresses are worth copying before the terminal scrolls, and `./transept status` reads them back out of that log, which is the only place they exist once the terminal is gone.
 
 `transept stop` closes the funnel first, so nobody reaches a server on its way down, then stops the server the same way Ctrl-C would.
 It is safe to run when nothing is running, and it says so.
 Run it at the end of every meeting: the server costs nothing once the session is stopped, but a funnel left open leaves the address answering all week.
 
 `transept status` answers the two questions worth asking mid-meeting, whether the room is being subtitled and what address to hand somebody, and it names the funnel separately because a funnel can outlive the server that was behind it.
+It reads both addresses back out of the log, and gives the hostname alone when nothing is running, since a stopped server has no token to hand out.
 
 ## Tuning
 

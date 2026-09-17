@@ -62,6 +62,7 @@ SECRETS = [
     ("deepgram_key", "deepgram_api_key", "DEEPGRAM_API_KEY"),
     ("llm_base", "llm_base_url", "LLM_BASE_URL"),
     ("llm_key", "llm_api_key", "LLM_API_KEY"),
+    ("reader_token", "reader_token", "READER_TOKEN"),
     ("operator_token", "operator_token", "OPERATOR_TOKEN"),
 ]
 
@@ -147,8 +148,8 @@ def load_keys(config):
     A real environment variable overrides the file, so a systemd unit, a
     container, or one shell export can supply a key without editing the
     file, and so selftest can run a server on keys of its own. An empty
-    variable counts as set, which is how a run asks for a minted operator
-    token on a machine whose config.toml pins one.
+    variable counts as set, which is how a run asks for a freshly minted
+    reader or operator token on a machine whose config.toml pins one.
     """
     section = config.get("keys", {})
     keys = {}

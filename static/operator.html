@@ -321,12 +321,15 @@ function render(status) {
   el("stop").disabled = status.state === "stopped";
 
   // The QR is fetched once. Its contents do not change between polls.
-  if (status.public_url && !el("qr").src) {
-    el("qr").src = "/qr.svg";
-    el("qrBig").src = "/qr.svg";
-    el("qrUrl").textContent = status.public_url;
-    el("publicUrl").textContent = status.public_url;
-    el("publicUrl").href = status.public_url;
+  // In the query string because an <img> cannot carry a header, which is
+  // how every other call on this page presents the token.
+  if (status.reader_url && !el("qr").src) {
+    const qr = "/qr.svg?token=" + encodeURIComponent(token);
+    el("qr").src = qr;
+    el("qrBig").src = qr;
+    el("qrUrl").textContent = status.reader_url;
+    el("publicUrl").textContent = status.reader_url;
+    el("publicUrl").href = status.reader_url;
     el("share").style.display = "flex";
   }
 

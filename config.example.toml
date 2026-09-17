@@ -20,6 +20,15 @@ deepgram_api_key = ""
 llm_base_url = ""
 llm_api_key = ""
 
+# Both addresses carry a token, so a tunnel open to the internet serves the
+# room rather than whoever finds it. Empty means one is minted per run and
+# printed at startup, and last week's link stops working.
+#
+# Pin reader_token when the room reads from a printed card that has to keep
+# working. Anyone with the card can read the meeting, which is the same
+# bargain as a card in the foyer.
+reader_token = ""
+
 # Pins the /operator address across restarts, for development. Leave empty
 # for a meeting, so a link that leaks expires when the server does.
 operator_token = ""
@@ -110,8 +119,9 @@ port = 8080
 # machine wants an SSH forward rather than a wider bind here.
 operator_port = 8081
 
-# Most event streams to hold at once, 0 for no cap. Nothing authenticates
-# to open one, and 500 is far more phones than a room holds. Anyone past
+# Most event streams to hold at once, 0 for no cap. The reader token is the
+# only thing between this and the internet, and it is on a card the room
+# passes around, so 500 is far more phones than a room holds. Anyone past
 # the cap gets a 503 and their browser retries.
 max_listeners = 500
 

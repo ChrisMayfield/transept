@@ -203,7 +203,7 @@ def fake_config(**overrides):
         "endpointing": 400, "keyterms": ["Kalema"], "glossary": "",
         "model": "fake-model", "max_tokens": 2000, "timeout": 15.0,
         "reasoning_effort": "low", "idle_stop": 0, "public_url": "",
-        "max_languages": 0,
+        "reader_url": "", "max_languages": 0,
         "deepgram_key": "fake", "llm_key": "fake",
         "llm_base": "http://invalid/v1",
     }
@@ -685,18 +685,19 @@ def request(port, path, method="GET", body=None, timeout=5.0, token=None):
         return exc.code, exc.read().decode("utf-8")
 
 
-def open_stream(port, channel="English", timeout=5.0):
+def open_stream(port, token, channel="English", timeout=5.0):
     """A raw event stream held open, so the cap can be reached on purpose."""
     sock = socket.create_connection(("127.0.0.1", port), timeout=timeout)
-    sock.sendall(f"GET /stream/{channel} HTTP/1.1\r\nHost: x\r\n"
+    sock.sendall(f"GET /stream/{channel}?token={token} HTTP/1.1\r\n"
+                 f"Host: x\r\n"
                  f"Accept: text/event-stream\r\n\r\n".encode())
     sock.recv(64)
     return sock
 
 
-def sse_preamble(port, channel, size=13, timeout=5.0):
+def sse_preamble(port, token, channel, size=13, timeout=5.0):
     """The first bytes of an event stream, plus its content type."""
-    url = f"http://127.0.0.1:{port}/stream/{channel}"
+    url = f"http://127.0.0.1:{port}/stream/{channel}?token={token}"
     with urllib.request.urlopen(url, timeout=timeout) as response:
         return (response.headers.get("Content-Type"),
                 response.read(size).decode("utf-8"))
@@ -717,16 +718,16 @@ def drain(process):
     return lines, thread
 
 
-def operator_address(lines, timeout=10.0):
-    """The operator address once the banner prints it.
+def banner_address(lines, label, timeout=10.0):
+    """One of the two addresses, once the banner prints it.
 
-    The token is minted per run, so the banner is the only place to get
-    it, and reading it here is what the volunteer does.
+    Both tokens are minted per run, so the banner is the only place to get
+    them, and reading it here is what the volunteer does.
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         for line in list(lines):
-            if line.startswith("Operator:"):
+            if line.startswith(label + ":"):
                 return line.strip()
         time.sleep(0.05)
     return ""
@@ -741,7 +742,7 @@ def check_authorization(checks):
             self.query = {"token": query} if query else {}
             self.headers = {"X-Subtitle-Token": header} if header else {}
 
-    checks.section("The operator token")
+    checks.section("The token rule")
     checks.check("a configured token refuses a request without one",
                  not server.authorized(StubRequest("secret")))
     checks.check("the token is accepted in the query string",
@@ -750,6 +751,11 @@ def check_authorization(checks):
                  server.authorized(StubRequest("secret", header="secret")))
     checks.check("a wrong token is refused",
                  not server.authorized(StubRequest("secret", query="wrong")))
+    # The two listeners hold different tokens under the same key, which is
+    # the whole of what keeps a card handed to the room off the controls.
+    checks.check("the token for the other listener is just a wrong token",
+                 not server.authorized(StubRequest("operator-secret",
+                                                   query="reader-secret")))
 
     def refuses(query):
         # Report a raise as a failed check, not as a crashed run.
@@ -781,6 +787,25 @@ def check_authorization(checks):
                  allowed.status == 200
                  and json.loads(allowed.text)["state"] == "stopped",
                  allowed.status)
+
+    # The reader routes answer with subtitles and with what the channels
+    # are, and opening a stream is what makes a language be paid for, so
+    # the same rule applies to them.
+    refused = asyncio.run(server.api_channels(StubRequest("secret")))
+    payload = json.loads(refused.text)
+    checks.check("the channel list without the token is refused",
+                 refused.status == 403 and payload["channels"] == [],
+                 f"{refused.status} {payload}")
+    # The reader page destructures channels off this, so a refusal that
+    # dropped the key would throw before the page could show anything.
+    checks.check("a refused channel list keeps the shape the page reads",
+                 "channels" in payload and "error" in payload, payload)
+    refused = asyncio.run(server.reader_page(StubRequest("secret")))
+    checks.check("the reader page without the token is refused",
+                 refused.status == 403, refused.status)
+    blank = asyncio.run(server.nothing_here(StubRequest("secret")))
+    checks.check("the bare root is a 404 even with the token",
+                 blank.status == 404, blank.status)
 
 
 def check_example_config(checks):
@@ -961,15 +986,28 @@ def check_server(checks):
     check_example_config(checks)
     check_keys(checks)
     check_device_listing(checks)
-    checks.section("The operator token")
-    minted = {server.operator_token() for _ in range(3)}
+    checks.section("Minting the two tokens")
+    minted = {server.mint_token() for _ in range(3)}
     checks.check("a token with nothing set is minted fresh every run",
                  len(minted) == 3 and all(len(one) >= 32
                                           for one in minted), minted)
-    checks.check("an empty operator_token still mints one",
-                 len(server.operator_token("")) >= 32)
-    checks.check("operator_token pins the address across restarts",
-                 server.operator_token("bench") == "bench")
+    checks.check("an empty setting still mints one",
+                 len(server.mint_token("")) >= 32)
+    checks.check("a pinned token is kept across restarts",
+                 server.mint_token("bench") == "bench")
+
+    checks.section("The address on the card")
+    checks.check("the reader address carries a path and a token",
+                 server.reader_address("https://chapel.example/", "abc")
+                 == "https://chapel.example/read?token=abc",
+                 server.reader_address("https://chapel.example/", "abc"))
+    checks.check("a base without a trailing slash builds the same address",
+                 server.reader_address("https://chapel.example", "abc")
+                 == "https://chapel.example/read?token=abc")
+    # Rather than a link to /read?token= on nowhere, which the operator
+    # page would render as something to hand somebody.
+    checks.check("no public_url means no address at all",
+                 server.reader_address("", "abc") == "")
 
     checks.section("The running server")
     port, operator = free_port(), free_port()
@@ -980,6 +1018,7 @@ def check_server(checks):
         LLM_BASE_URL="http://invalid.invalid/v1",
         # Explicitly empty, so the minted-token checks below test minting
         # rather than whatever this machine happens to have in config.toml.
+        READER_TOKEN="",
         OPERATOR_TOKEN="",
     )
     process = subprocess.Popen(
@@ -999,13 +1038,21 @@ def check_server(checks):
                          False, "".join(lines))
             return
 
-        # Everything below needs this, so a bad banner fails here first.
-        address = operator_address(lines)
+        # Everything below needs these, so a bad banner fails here first.
+        address = banner_address(lines, "Operator")
         TOKEN = address.split("token=", 1)[-1] if "token=" in address else ""
         checks.check("the banner prints an operator address with a token",
                      len(TOKEN) >= 32, address or "".join(lines))
+        card = banner_address(lines, "Reader")
+        READER = card.split("token=", 1)[-1] if "token=" in card else ""
+        checks.check("the banner prints a reader address with a token",
+                     len(READER) >= 32, card or "".join(lines))
+        # Two doors, two keys. One token for both would mean the card the
+        # room is handed also opens the controls.
+        checks.check("the two addresses carry different tokens",
+                     READER != TOKEN, f"{READER} {TOKEN}")
 
-        status, body = request(port, "/api/channels")
+        status, body = request(port, "/api/channels", token=READER)
         checks.check("channels are fixed at startup",
                      json.loads(body)["channels"] == ["English", "French",
                                                       "Swahili"], body)
@@ -1019,8 +1066,9 @@ def check_server(checks):
                          for language in state["languages"]),
                      state["languages"])
 
-        status, _ = request(port, "/")
-        checks.check("/ answers 200 on the reader port", status == 200, status)
+        status, _ = request(port, "/read", token=READER)
+        checks.check("/read answers 200 on the reader port",
+                     status == 200, status)
         for path in ("/operator", "/api/devices"):
             status, _ = request(operator, path, token=TOKEN)
             checks.check(f"{path} answers 200 on the operator port",
@@ -1037,24 +1085,47 @@ def check_server(checks):
         # The token rule through real routing. Every other check of it calls
         # the handlers directly, so none of them would notice a route left
         # out of add_routes or a decorator that never ran.
-        for path in ("/operator", "/api/status", "/api/devices"):
+        for path in ("/operator", "/api/status", "/api/devices", "/qr.svg"):
             status, _ = request(operator, path)
             checks.check(f"{path} is refused without the token",
                          status == 403, status)
-        for path in ("/", "/api/channels"):
-            status, _ = request(port, path)
-            checks.check(f"{path} stays open, as a reader needs it",
-                         status == 200, status)
 
-        status, body = request(operator, "/qr.svg")
+        def answered(path, token=None):
+            """The status for one reader route, or what went wrong instead.
+
+            A stream that opens has no status to return: urllib blocks on
+            it, and a gate missing from that route is exactly that hang, so
+            it has to come back as a failed check rather than a stuck run.
+            """
+            try:
+                return request(port, path, timeout=3, token=token)[0]
+            except Exception as exc:
+                return f"held open: {type(exc).__name__}"
+
+        # The reader port is the one on the public internet, so this is the
+        # loop that decides whether a stranger who finds the address gets a
+        # meeting. The wrong-token pass is what a link from last week is.
+        for path in ("/read", "/api/channels", "/stream/English"):
+            status = answered(path)
+            checks.check(f"{path} is refused without the reader token",
+                         status == 403, status)
+            status = answered(path, token=TOKEN)
+            checks.check(f"{path} is refused with the wrong token",
+                         status == 403, status)
+
+        status, body = request(port, "/")
+        checks.check("the bare address gives a bot nothing",
+                     status == 404, f"{status} {body}")
+
+        status, body = request(operator, "/qr.svg", token=TOKEN)
         checks.check("the QR endpoint explains a missing public_url",
                      status == 404 and "public_url" in body,
                      f"{status} {body}")
 
-        status, _ = request(port, "/stream/Klingon")
+        status, _ = request(port, "/stream/Klingon", token=READER)
         checks.check("an unknown channel is a 404", status == 404, status)
 
-        content_type, preamble = sse_preamble(port, "English")
+        content_type, preamble = sse_preamble(port, READER, "English")
         checks.check("the event stream announces itself correctly",
                      content_type == "text/event-stream", content_type)
         checks.check("the event stream opens with a reconnect interval",
@@ -1097,10 +1168,11 @@ def check_server(checks):
 
         # Last, because these hold the cap full for as long as they are
         # open and every check above wants a slot.
-        held = [open_stream(port) for _ in range(3)]
+        held = [open_stream(port, READER) for _ in range(3)]
         try:
             try:
-                status, body = request(port, "/stream/English", timeout=3)
+                status, body = request(port, "/stream/English", timeout=3,
+                                       token=READER)
             except Exception as exc:
                 # A stream that opened is the failure this is looking for,
                 # and urllib blocks on it rather than returning a status.
@@ -1119,7 +1191,7 @@ def check_server(checks):
         # page still up is the normal state of the room when the operator
         # presses Ctrl-C, and a stream nobody ends is a connection the
         # runner will wait on.
-        lingering = open_stream(port)
+        lingering = open_stream(port, READER)
     finally:
         process.terminate()
         forced = False
@@ -1135,13 +1207,15 @@ def check_server(checks):
         output = "".join(lines)
 
     checks.check("the startup banner prints the reader address",
-                 f"http://127.0.0.1:{port}/" in output, output)
+                 f"http://127.0.0.1:{port}/read?token=" in output, output)
     checks.check("the banner sends the operator to the loopback port",
                  f"http://127.0.0.1:{operator}/operator" in output, output)
     checks.check("the banner says the operator address is not a bookmark",
                  "changes" in output and "every restart" in output, output)
     checks.check("a minted token is not the empty OPERATOR_TOKEN",
                  len(TOKEN) >= 32, TOKEN)
+    checks.check("a minted token is not the empty READER_TOKEN",
+                 len(READER) >= 32, READER)
     checks.check("binding to loopback says so, since a phone cannot reach it",
                  "Bound to this machine only" in output, output)
     checks.check("the server exited while a phone was still reading",
