@@ -10,14 +10,14 @@ Nothing is projected on a screen and readers install nothing.
 Each person opens a link and chooses their own language and their own text size.
 
 **To install and configure Transept, see [SETUP.md](SETUP.md).**
-`SETUP.md` walks through the whole process, from installing Python to handing out the first QR code, and assumes no programming experience.
+That file walks through the whole process, from installing Python to handing out the first QR code, and assumes no programming experience.
 
 ## How it works
 
 Audio goes from the sound card to [Deepgram](https://deepgram.com/) (Speech-to-text API) over a websocket.
 Deepgram returns finalized fragments, which often cut sentences in half, so a segmenter buffers them into whole sentences.
 The segmenter closes a sentence when the recognizer reports an endpoint, when the text ends in terminal punctuation, when a silent gap opens, or when the ceiling expires.
-Whole sentences matter more than they sound like they should: translating "on the heater" by itself produces nonsense in any language that needs a verb.
+Whole sentences matter more than they sound like they should: translating "on the heater" by itself may produce nonsense in other languages.
 
 Whole sentences go to the translation model, all languages in one call, running concurrently but published in source order.
 English publishes immediately, and translations arrive on their own channels a moment later.
@@ -29,7 +29,7 @@ Two addresses are served on two different ports, and each carries a token of its
 The operator opens one address on the laptop to pick a microphone and press Start, and that port is bound to the laptop alone, so the controls cannot be reached from the network or through a tunnel.
 Everyone else opens the other on their phone, which is the address behind the QR code.
 
-**Source files:** `server.py` is the web server and session manager, and the only thing you run on a normal Sunday, whether directly or through the `transept` script that also opens the tunnel.
+**Source files:** `server.py` is the web server and session manager, and the only thing you run on a normal Sunday, whether directly or through the `transept.py` script that also opens the tunnel.
 `pipeline.py` is the same pipeline without the web layer, which is the fastest way to check a microphone or tune segmentation.
 `review.py` translates a text file offline, `record.py` keeps a session and turns it into a review document, `capture.py` is the audio layer, `selftest.py` checks the software without a microphone or an API key, and `static/` holds the two web pages.
 
@@ -57,8 +57,8 @@ A second backend, `parec`, is available on Linux and is used by default.
 On Linux you may also need `sudo apt install libportaudio2`.
 
 **What it costs (Sep 2026):** Speech recognition runs about $0.50 per hour through Deepgram, and new accounts include $200 of free credit that covers a great deal of use.
-Translation through a small fast model runs a few cents per hour, and only for languages somebody is actually reading, so a language nobody opens costs nothing at all.
-A weekly ninety-minute class costs well under a dollar.
+Translation through a small fast model runs a few cents per hour per language, and only for languages somebody is actually reading, so a language nobody opens costs nothing at all.
+A weekly sixty-minute meeting should cost under a dollar.
 
 ## Privacy and accuracy
 
@@ -81,9 +81,6 @@ The translation prompt forbids the model from inventing names, numbers, dates, o
 The rule is deliberate and it matters: a reader of a translated channel cannot hear the room and has no way to catch a confident wrong name.
 When the audio is unclear, the intended behavior is visible confusion rather than a plausible guess.
 
-Subtitles are an aid, not a record.
-Tell people so.
-
 ## About the name
 
 A *transept* is the section of a church that crosses the nave, giving the building its characteristic cross-shaped layout.
@@ -91,4 +88,4 @@ The word also plays on *transcription* and *translation*, reflecting the tool's 
 
 ## License
 
-MIT. See `LICENSE`.
+MIT. See [LICENSE](LICENSE).

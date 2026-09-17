@@ -2,8 +2,8 @@
 # Free text, inserted into the prompt as written.
 #
 # Use it for three things: names the recognizer mangles, terms with an
-# official rendering in your target languages, and anything a general
-# model would translate literally when your congregation uses a set phrase.
+# official rendering in your target languages, and local phrasing that
+# should not be translated literally.
 #
 # Copy to glossary.txt and edit.
 

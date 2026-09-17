@@ -3,11 +3,11 @@ httpx>=0.27
 aiohttp>=3.9
 
 # Cross-platform audio capture. Not needed if you only ever use the parec
-# backend on Linux. On Linux this also wants: sudo apt install libportaudio2
+# backend on Linux; you might need to `sudo apt install libportaudio2`.
 sounddevice>=0.4.6
 
 # QR code for the reader address, shown on the operator page.
-# Pure Python, no dependencies of its own. Optional.
+# Pure Python, no dependencies of its own.
 segno>=1.6
 
 # The linter, configured in ruff.toml. Not needed to run a meeting, but

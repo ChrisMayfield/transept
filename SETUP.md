@@ -1,18 +1,18 @@
 # Setting up Transept
 
-This page is the one-time setup: installing the software, getting API keys, and giving phones an address they can reach.
-Plan on about half an hour.
+This page is the one-time setup: installing the software, getting API keys, and creating a web address phones can reach.
+Plan on about 30–60 minutes.
 Do the setup at a desk rather than in the meeting room, because only the audio check near the end needs the real microphones.
 
-`README.md` covers what Transept is, what it costs, and what it sends where.
-Read `README.md` first if you have not.
+[`README.md`](README.md) covers what Transept is, what it costs, and what it sends where.
+Read that file first if you have not already.
 
 Transept is written in Python, but you don't need to know Python.
 Everything below is typed at a command line, one line at a time.
 
 ## Before you begin
 
-**Windows users:** install [Git Bash](https://git-scm.com/install/windows) and use Git Bash for every command on this page, rather than Command Prompt or PowerShell.
+**Windows users:** install [Git Bash](https://git-scm.com/install/windows) and use it for every command on this page, rather than Command Prompt or PowerShell.
 Git Bash gives Windows the same commands Linux and macOS already have, so there is one set of instructions instead of three.
 Paths in Git Bash are written with forward slashes, so your home folder is `/c/Users/<username>`.
 
@@ -46,7 +46,7 @@ Close Git Bash and open a new window afterwards, so the new window picks up the 
 
 ### 2. Download the code
 
-Download and unzip the [transept code](https://github.com/ChrisMayfield/transept/archive/refs/heads/main.zip).
+Download and unzip the [**transept code**](https://github.com/ChrisMayfield/transept/archive/refs/heads/main.zip).
 The zip unpacks into a folder called `transept-main`.
 Put that folder somewhere you can find again, because your settings and keys will live inside the folder.
 
@@ -84,7 +84,7 @@ From here on `python` means the Python inside that environment, on every operati
 Switching the environment on lasts only as long as that terminal window.
 Every time you open a new window, `cd` back to this folder and run the `activate` line again before running any `python` command.
 
-Exception: The `./transept` script under [Running a meeting](#running-a-meeting) finds the virtual environment on its own, and is the one command that does not need the `activate` line first.
+Note: The `./transept` script under [Running a meeting](#running-a-meeting) finds the virtual environment on its own, and is the one command that does not need the `activate` line first.
 
 ### 4. Install the packages
 
@@ -171,7 +171,7 @@ llm_api_key = "paste-your-key-here"
 
 4. Set up billing on the key's project and put about $10 of credit on the account.
 
-That last step is not optional.
+**The last step is not optional.**
 A free Google key is limited to a few requests per minute, and the faster models cut off after a couple of dozen requests a day.
 A meeting sends a request every few seconds, so a free key stops translating within the first minute or two and readers spend the rest of the hour looking at English.
 A paid key raises that ceiling far above anything a meeting will reach.
@@ -225,7 +225,7 @@ The run costs a few cents and is the only check that proves both keys work befor
 The audio source is deliberately not a setting in `config.toml`.
 A device name changes with a reboot or a replugged cable, so you pick the source on the operator page before each meeting instead.
 
-### 9. Give phones an address
+### 9. Create a web address
 
 Phones need an HTTPS address that works whether they are on the building's wifi or on cellular, and Transept does not provide one by itself.
 The usual solution is a tunnel, which is a small program on the laptop that publishes one port of the laptop at a fixed public address.
@@ -332,7 +332,7 @@ A tunnel left open leaves the address answering all week.
 Transept stops a session that has heard nothing for ten minutes as a backstop, but a watchdog is a safety net rather than a plan.
 
 **Watch what you are spending**, especially for the first month, at [console.deepgram.com](https://console.deepgram.com/) and [aistudio.google.com](https://aistudio.google.com/).
-Deepgram lets you set a spending limit in the console, which is worth doing.
+Both dashboards let you set a spending limit, which is worth doing.
 
 ## Optional tuning
 
