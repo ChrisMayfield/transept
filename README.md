@@ -9,10 +9,25 @@ A second or two after that, the same sentence appears in French, Swahili, or wha
 Nothing is projected on a screen and readers install nothing.
 Each person opens a link and chooses their own language and their own text size.
 
+![A phone reading the German channel](images/reader.png)
+
+## Getting started
+
 **To install and configure Transept, see [SETUP.md](SETUP.md).**
 That file walks through the whole process, from installing Python to handing out the first QR code, and assumes no programming experience.
 
 ## How it works
+
+```mermaid
+flowchart LR
+  mic(["Microphone"]) -->|audio| capture["<b>Capture</b><br/>on the laptop"]
+  capture --> dg["<b>Deepgram</b><br/>speech to text"]
+  dg -->|fragments| seg["<b>Segmenter</b><br/>whole sentences"]
+  seg -->|English| hub["<b>Channels</b><br/>one per language"]
+  seg --> llm["<b>Translation model</b><br/>languages being read"]
+  llm -->|translations| hub
+  hub --> phones(["Phones"])
+```
 
 Audio goes from the sound card to [Deepgram](https://deepgram.com/) (Speech-to-text API) over a websocket.
 Deepgram returns finalized fragments, which often cut sentences in half, so a segmenter buffers them into whole sentences.

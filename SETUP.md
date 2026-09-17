@@ -320,8 +320,19 @@ That page also shows the reader link as a QR code people can point a camera at.
 The tokens are new every run, so copy the address from the terminal each week rather than saving a bookmark.
 (If the QR code does not appear, `public_url` in `config.toml` is empty or wrong; see step 9.)
 
+![The top of the operator page, with the audio source, the buttons, and the counters](images/operator.png)
+
+Further down the same page is one row per language.
+Each row says how many people have that language open, and whether the language translates on demand, always, or not at all:
+
+![The language controls on the operator page](images/languages.png)
+
+Below that, the page shows the last sentences the recognizer heard, which is how you tell at a glance that the microphone is still being heard:
+
+![The transcript feed on the operator page](images/mic-feed.png)
+
 **The Reader address is for everyone else.**
-Hand the address out, or hold up the QR code.
+Hand the address out, or hold up the QR code (not shown in the screenshots).
 Readers install nothing: they open the link, pick a language and a text size, and that is the whole experience.
 The address stops working when the run ends, which is deliberate.
 If your room reads from a printed card that has to keep working week after week, set `reader_token` under `[keys]` in `config.toml` to any long random string, and the address stays the same.
