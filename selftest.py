@@ -1001,12 +1001,12 @@ def check_server(checks):
     checks.section("The address on the card")
     checks.check("the reader address carries a path and a token",
                  server.reader_address("https://chapel.example/", "abc")
-                 == "https://chapel.example/read?token=abc",
+                 == "https://chapel.example/reader?token=abc",
                  server.reader_address("https://chapel.example/", "abc"))
     checks.check("a base without a trailing slash builds the same address",
                  server.reader_address("https://chapel.example", "abc")
-                 == "https://chapel.example/read?token=abc")
-    # Rather than a link to /read?token= on nowhere, which the operator
+                 == "https://chapel.example/reader?token=abc")
+    # Rather than a link to /reader?token= on nowhere, which the operator
     # page would render as something to hand somebody.
     checks.check("no public_url means no address at all",
                  server.reader_address("", "abc") == "")
@@ -1086,8 +1086,8 @@ def check_server(checks):
                          for language in state["languages"]),
                      state["languages"])
 
-        status, _ = request(port, "/read", token=READER)
-        checks.check("/read answers 200 on the reader port",
+        status, _ = request(port, "/reader", token=READER)
+        checks.check("/reader answers 200 on the reader port",
                      status == 200, status)
         for path in ("/operator", "/api/devices"):
             status, _ = request(operator, path, token=TOKEN)
@@ -1125,7 +1125,7 @@ def check_server(checks):
         # The reader port is the one on the public internet, so this is the
         # loop that decides whether a stranger who finds the address gets a
         # meeting. The wrong-token pass is what a link from last week is.
-        for path in ("/read", "/api/channels", "/stream/English"):
+        for path in ("/reader", "/api/channels", "/stream/English"):
             status = answered(path)
             checks.check(f"{path} is refused without the reader token",
                          status == 403, status)
@@ -1227,7 +1227,7 @@ def check_server(checks):
         output = "".join(lines)
 
     checks.check("the startup banner prints the reader address",
-                 f"http://127.0.0.1:{port}/read?token=" in output, output)
+                 f"http://127.0.0.1:{port}/reader?token=" in output, output)
     checks.check("the banner sends the operator to the loopback port",
                  f"http://127.0.0.1:{operator}/operator" in output, output)
     checks.check("the banner says the operator address is not a bookmark",
@@ -1497,12 +1497,12 @@ def check_script(checks):
     checks.section("Reading the addresses back out of the log")
     transept.LOG_FILE = home / "transept.log"
     transept.LOG_FILE.write_text(
-        "Reader:   https://chapel.example/read?token=abc\n"
+        "Reader:   https://chapel.example/reader?token=abc\n"
         "That address carries a token minted for this run.\n"
         "Operator: http://127.0.0.1:8081/operator?token=xyz\n")
     checks.check("the reader address comes back whole",
                  transept.banner("Reader:")
-                 == "Reader:   https://chapel.example/read?token=abc",
+                 == "Reader:   https://chapel.example/reader?token=abc",
                  transept.banner("Reader:"))
     checks.check("and the operator address with its own token",
                  transept.banner("Operator:").endswith("token=xyz"),

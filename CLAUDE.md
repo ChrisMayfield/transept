@@ -97,7 +97,7 @@ A capped language gets the English line rather than a gap, and the default is 0 
 ### Web layer
 
 Two listeners share one `Hub` and one `Session`, and each holds a token of its own under `app["token"]`.
-`build_reader_app` serves `/read`, `/stream/<channel>`, and `/api/channels` on the port a tunnel points at, and nothing on it can change anything.
+`build_reader_app` serves `/reader`, `/stream/<channel>`, and `/api/channels` on the port a tunnel points at, and nothing on it can change anything.
 `build_operator_app` serves `/operator`, `/api/status`, `/api/devices`, `/api/start`, `/api/stop`, `/api/language`, and `/qr.svg` on `OPERATOR_HOST`, which is always `127.0.0.1`.
 A check inside the handlers could not replace this, because the tunnel daemon connects from this machine, so a visitor from the public internet arrives from `127.0.0.1` exactly as the operator does.
 `serve` runs both under `AppRunner`, since `web.run_app` takes one application.

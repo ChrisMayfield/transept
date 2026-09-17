@@ -8,7 +8,7 @@ stop it from a browser and listeners can read subtitles on their phones.
 Two listeners. The reader port carries the pages phones use, and is the
 one to point a tunnel at; the operator port stays on 127.0.0.1.
 
-    /read               reader view with a language picker
+    /reader             reader view with a language picker
     /stream/<channel>   server-sent events for one language
     /operator           start and stop controls, status, language toggles
 
@@ -691,7 +691,7 @@ async def nothing_here(request):
     """The bare root of the reader port, which is what a bot reaches.
 
     A tunnel puts this address on the public internet, so the front door
-    says only that there is no page here. The meeting is at /read, behind
+    says only that there is no page here. The meeting is at /reader, behind
     the token on the card the room was handed.
     """
     return web.Response(status=404, text="Not found.")
@@ -905,7 +905,7 @@ def build_reader_app(hub, session, token):
     app["token"] = token
     app.add_routes([
         web.get("/", nothing_here),
-        web.get("/read", reader_page),
+        web.get("/reader", reader_page),
         web.get("/api/channels", api_channels),
         web.get("/stream/{channel}", stream),
     ])
@@ -995,7 +995,7 @@ def reader_address(base, token):
     means no public address is configured yet, and stays empty rather than
     becoming a link to nowhere.
     """
-    return f"{base.rstrip('/')}/read?token={token}" if base else ""
+    return f"{base.rstrip('/')}/reader?token={token}" if base else ""
 
 
 async def serve(config, tokens, settings):
