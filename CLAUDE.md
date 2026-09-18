@@ -2,6 +2,7 @@
 
 Guidance for Claude Code (claude.ai/code) when working in this repository.
 `README.md` is the introduction, for somebody deciding whether Transept suits their meeting, and `SETUP.md` is the volunteer's manual: installing, keys, tunnels, running a meeting, tuning, and troubleshooting.
+`HOSTED.md` proposes an optional deployment, not yet built, for a room whose network cannot carry a meeting.
 The notes here are about the code.
 
 ## What this is
