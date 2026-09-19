@@ -196,9 +196,14 @@ This is the same "one interface, two implementations" the codebase already uses 
 
 ## The control protocol
 
-One websocket per room, `/control`, gated on `control_token` with an `Origin` check.
+One websocket per room, `/control`, gated on `control_token` and an `Origin` check.
 Binary frames are audio and nothing else.
 Text frames are JSON.
+
+The `Origin` check refuses any handshake that carries the header at all, rather than allowing a list of origins.
+Websockets are not subject to the same-origin policy, so a page on any site the operator visits can open one to any host without a CORS preflight standing in the way.
+The only legitimate client here is `sender.py`, which is a Python program and sends no `Origin`, while a browser stamps every handshake with its own and cannot be made not to.
+So a page that somehow learned the control token, from a pasted address or a shared screen, still cannot use it.
 
 Sender to server:
 
@@ -226,23 +231,25 @@ The server keeps two listeners, as it does now, and which pair it builds follows
 Local, which is the default deployment and unchanged:
 
 ```
-reader     host:port                 reader_token     the pages and streams
+reader     host:reader_port          reader_token     the pages and streams
 operator   127.0.0.1:operator_port   operator_token   the page and its API
 ```
 
 Hosted:
 
 ```
-reader     host:port                 reader_token     the pages and streams
+reader     host:reader_port          reader_token     the pages and streams
 control    host:control_port         control_token    WS /control, one route
 ```
 
 `control_port` is a new `SETTINGS` row, defaulting to 8081, rather than a number written into the code.
 It joins `SETTINGS`, `ARGUMENT_HELP`, and `config.example.toml` in the same position in each, since `selftest.py` fails on drift between the first and the last.
 
-`OPERATOR_HOST` stays `127.0.0.1` and stays applied to `build_operator_app`, because in the hosted deployment the operator page is not on the server at all.
-The control application is a different application: it serves no page and exactly one websocket route, and it binds where the reader binds.
-So the rule that a tunnel cannot be pointed at the controls is not loosened, it simply has nothing to protect on the rented server.
+`OPERATOR_HOST` stays `127.0.0.1` and stays applied to `build_operator_app`, which the hosted server never builds, so the rule that a tunnel cannot be pointed at the operator page is unchanged.
+
+The control application is governed separately, because it has a different problem to solve.
+It has to bind publicly, since the sender that reaches it is in another building, and what guards it is `control_token` and the `Origin` check rather than the address it binds to.
+It serves no page and exactly one websocket route, which is what keeps that a small thing to guard.
 
 Three tokens, with three jobs:
 
@@ -423,13 +430,14 @@ The gap and attach rules are exactly the kind of state where a check that always
 
 ## Order of work
 
-1. `RemoteCapture` and the control socket, with a throwaway Python client.
+1. The `room` setting, the `room` column, and its migration.
+   This depends on nothing else here and is worth landing on its own, so that recording carries the name from the first hosted meeting rather than from the second.
+2. `RemoteCapture` and the control socket, with a throwaway Python client.
    Testable on a single laptop, loopback to loopback, before anything is rented.
-2. `sender.py`: capture, the loopback operator page, the forwarded controls.
-3. The `room` column and its migration, which is independent of the rest and can land first if convenient.
+3. `sender.py`: capture, the loopback operator page, the forwarded controls.
 4. Deploy one room.
    VM, domain, Caddy, one systemd unit, `chapel.toml`.
 5. Add a second room, which is a second config file, a second unit, and a second Caddy route.
 
-Steps 1 and 2 are the whole of the code.
+Steps 2 and 3 are the bulk of the code.
 Steps 4 and 5 are configuration, and step 5 is the test of whether a room really is just a process.
