@@ -2,7 +2,7 @@
 
 Guidance for Claude Code (claude.ai/code) when working in this repository.
 `README.md` is the introduction, for somebody deciding whether Transept suits their meeting, and `SETUP.md` is the volunteer's manual: installing, keys, tunnels, running a meeting, tuning, and troubleshooting.
-`HOSTED.md` proposes an optional deployment, not yet built, for a room whose network cannot carry a meeting.
+`HOSTED.md` proposes an optional deployment for a room whose network cannot carry a meeting, of which the first two steps of its order of work are built and the rest is not.
 The notes here are about the code.
 
 ## What this is
@@ -52,9 +52,11 @@ There is no build step and no CI, so `selftest.py` is the whole mechanical check
 capture -> Deepgram websocket -> Segmenter -> Translator -> Hub -> SSE -> phones
 ```
 
-`capture.py` presents one interface over two backends: `parec`, which `auto` prefers on Linux where it exists, and `sounddevice` (PortAudio) everywhere else.
-Both yield 16 kHz mono signed 16-bit chunks, and nothing downstream knows which produced them.
+`capture.py` presents one interface over three backends: `parec`, which `auto` prefers on Linux where it exists, `sounddevice` (PortAudio) everywhere else, and `remote`, which is audio arriving over the control socket from a sender on a laptop in the room.
+All three yield 16 kHz mono signed 16-bit chunks, and nothing downstream knows which produced them, but each also says what it yields in `encoding`, because a sender may be sending compressed audio and `build_asr_url` has to declare the format actually going up the socket.
+`auto` never chooses `remote`, which is a deployment rather than a preference and has to be asked for by name.
 An empty chunk means end of stream, which is how a device that disappears becomes a reconnect rather than a hang.
+`None` means a gap, which only `remote` produces: nothing has arrived just now and the sender is still inside `control_grace`, so `pump_audio` sends a `KeepAlive` rather than ending the run, and sends no silence, which would be billed as audio.
 
 `pipeline.py` holds everything the entry points share: `SECRETS`, `SETTINGS`, `resolve`, `load_keys`, `Segmenter`, `Translator`, `SYSTEM_PROMPT`, and the three loops `pump_audio`, `listen`, and `publish`.
 `pipeline.py` also runs standalone as a terminal tool, which is the fastest way to debug the pipeline without the web layer.
@@ -102,6 +104,13 @@ Two listeners share one `Hub` and one `Session`, and each holds a token of its o
 `build_operator_app` serves `/operator`, `/api/status`, `/api/devices`, `/api/start`, `/api/stop`, `/api/language`, and `/qr.svg` on `OPERATOR_HOST`, which is always `127.0.0.1`.
 A check inside the handlers could not replace this, because the tunnel daemon connects from this machine, so a visitor from the public internet arrives from `127.0.0.1` exactly as the operator does.
 `serve` runs both under `AppRunner`, since `web.run_app` takes one application.
+
+Which listener joins the reader one follows from where the audio comes from and from nothing else.
+A local device means the operator page on loopback; `capture = "remote"` means `build_control_app`, whose one route is the `/control` websocket a sender connects to, bound where that sender can reach it.
+A separate `mode` setting could be changed without the backend being changed to match, which would leave a server opening a sound card while a sender waited, or waiting for a sender while a sound card ran.
+That listener has to bind publicly, so what guards it is `control_token` and a refusal of any handshake carrying an `Origin` header at all, rather than the address it binds to: websockets are not subject to the same-origin policy and need no CORS preflight, the only legitimate client is a Python program that sends no `Origin`, and a browser stamps every handshake with one and cannot be made not to.
+`ControlRoom` holds the one sender, its audio, and its grace, and hands `Session` a source per recognizer run rather than per sender, because a run that ends closes its source and audio arriving between runs has no socket to go up.
+`HOSTED.md` describes that deployment; steps 1 and 2 of its order of work are built.
 
 Every route on both listeners is behind `authorized`, which reads the token its own application was given, so the link the whole room is handed opens nothing on the operator port.
 The one exception is `/` on the reader port, which is `nothing_here`: a tunnel puts that address on the public internet, and a bot that finds it gets a 404 rather than a language picker.
@@ -241,6 +250,13 @@ A phone holds its event stream open for as long as the page is up, `AppRunner.cl
 Without it the process does not exit at all while one reader still has the page open, which is every meeting, and Ctrl-C appears to do nothing.
 The operator then closes the terminal on a process that goes on holding the operator port, and next week's run dies of `address already in use` against an owner that has no window left to press Ctrl-C in.
 
+`control_port` defaults to the same 8081 as `operator_port`.
+A server raises one of those listeners or the other and never both, since which pair it builds follows from the capture backend, so the two numbers cannot collide.
+
+A control message that succeeds is not answered.
+What happened reaches the sender a moment later in the status it is already being pushed, and a second path saying the same thing is a second path that can disagree.
+Only failures get an `error` frame, which is what the operator page has to show.
+
 `install_stop_handler` exists because `loop.add_signal_handler` raises `NotImplementedError` on Windows.
 Platform assumptions belong in `capture.py` and that function, nowhere else.
 
@@ -289,6 +305,7 @@ Run it after any change to the pipeline, the sinks, or the routes.
 `python3 selftest.py <section>` runs one of `lint`, `pipeline`, `session`, `store`, `server`, or `script`.
 The `script` section needs no funnel and starts no server: what it checks is the reasoning `transept.py` does on its own, above all that a stale record is never mistaken for a running server.
 The `server` section runs `server.py` in a directory of its own, because a selftest that overwrote the pid file of a real server would leave a running meeting with nothing able to stop it.
+It boots it twice, once as the default deployment and once with `--capture remote`, because the control listener binds publicly and so what it serves and what it turns away is the whole of its guard.
 The `lint` section shells out to `ruff check .` and reports its output as one check, which is what keeps linting in the regular workflow when there is no CI to enforce it.
 
 Adding a check means adding one `checks.check(label, condition, detail)` line.
@@ -317,7 +334,8 @@ HTTPS is still required, because the screen wake lock needs a secure context, an
 A headless machine wants an SSH forward rather than a wider bind.
 
 Both tokens are minted every run and printed with their addresses, and there is no tokenless mode on either listener.
-`reader_token` and `operator_token` under `[keys]` pin them.
+`reader_token` and `operator_token` under `[keys]` pin them, and `control_token` is the third, for the sender a hosted server takes its audio from.
+A minted control token is printed like the other two, which is enough to try the thing on one laptop, but a real room pins it, because the sender is configured once and has to keep working.
 Pinning the reader one is ordinary, because a printed card has to keep working; pinning the operator one exists for development, where a fresh address every restart is a fresh link to click every restart, and a meeting leaves it empty.
 They sit with the keys rather than among the settings, and `mint_token()` takes the pinned value as an argument rather than reading the environment itself, so the one place that decides where a secret comes from stays `load_keys`.
 Neither is a `SETTINGS` row and so neither has a flag, because a setting invites a weak or forgotten token on the machine that runs the meetings.

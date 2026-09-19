@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """
-Audio capture, one interface over two backends.
+Audio capture, one interface over three backends.
 
 parec is preferred on Linux where it exists, because PortAudio through
 PipeWire's compatibility layer can be inconsistent about device names and
 buffer sizes. sounddevice (PortAudio) is the fallback there and the only
-backend on macOS and Windows.
+backend on macOS and Windows. remote is neither: the audio arrives over
+the room's control socket from a laptop somewhere else, which is what a
+hosted server captures from.
 
-Both deliver the same thing: 16 kHz mono signed 16-bit chunks, one per
-CHUNK_MS, which is what the speech recognizer expects.
+All three deliver the same thing: 16 kHz mono signed 16-bit chunks, one
+per CHUNK_MS, which is what the speech recognizer expects, and each says
+what it yields, because a sender may hand over encoded audio that the
+recognizer has to be told about.
 """
 
 import array
@@ -16,6 +20,7 @@ import asyncio
 import shutil
 import subprocess
 import sys
+import time
 
 SAMPLE_RATE = 16000
 CHANNELS = 1
@@ -27,6 +32,16 @@ CHUNK_BYTES = CHUNK_FRAMES * CHANNELS * BYTES_PER_SAMPLE
 # Not every input device will open at 16 kHz. 48 kHz is nearly universal and
 # divides evenly, so the fallback is a clean 3:1 decimation.
 FALLBACK_RATE = 48000
+
+# Chunks a source may hold before the oldest is dropped. A reader who has
+# fallen seconds behind is already lost, and unbounded memory would be
+# worse.
+QUEUE_CHUNKS = 64
+
+# How often a remote source reports a gap rather than a chunk, so the
+# caller can keep its own upstream connection warm. Well inside the ten
+# seconds a recognizer socket waits before closing on silence.
+GAP_TICK = 3.0
 
 
 class CaptureError(RuntimeError):
@@ -41,9 +56,14 @@ def default_backend():
 
 
 def resolve_backend(name):
+    """Which backend a setting names. auto never chooses remote.
+
+    remote is a deployment rather than a preference: it means the audio is
+    coming from a sender in another building, so it has to be asked for.
+    """
     if not name or name == "auto":
         return default_backend()
-    if name not in ("parec", "sounddevice"):
+    if name not in ("parec", "sounddevice", "remote"):
         raise CaptureError(f"Unknown capture backend: {name}")
     return name
 
@@ -54,6 +74,12 @@ def resolve_backend(name):
 def list_devices(backend="auto"):
     """Return [{"name", "detail", "monitor", "default"}] for input devices."""
     backend = resolve_backend(backend)
+    if backend == "remote":
+        # The sound hardware is on the sender's laptop, which is the only
+        # machine that can enumerate it. A hosted server has none of its
+        # own and must not offer a list that would be the rented VM's.
+        raise CaptureError("The audio devices are on the sender, not on "
+                           "this server.")
     if backend == "parec":
         return _parec_devices()
     return _sounddevice_devices()
@@ -137,6 +163,12 @@ def _import_sounddevice():
 
 async def open_capture(device, backend="auto"):
     backend = resolve_backend(backend)
+    if backend == "remote":
+        # A remote source has no device to open: the control socket hands
+        # one over when a sender attaches, and the session asks the room
+        # for it rather than coming through here.
+        raise CaptureError("A remote source is opened by the control "
+                           "socket, not by name.")
     if not device:
         raise CaptureError("No audio device configured.")
     if backend == "parec":
@@ -148,6 +180,7 @@ class ParecCapture:
     """Reads raw PCM from the parec subprocess."""
 
     backend = "parec"
+    encoding = "pcm"
 
     def __init__(self, process):
         self.process = process
@@ -188,6 +221,7 @@ class SoundDeviceCapture:
     """Reads from PortAudio, which hands chunks over on its own thread."""
 
     backend = "sounddevice"
+    encoding = "pcm"
 
     def __init__(self, stream, queue):
         self.stream = stream
@@ -197,12 +231,11 @@ class SoundDeviceCapture:
     async def open(cls, device):
         sd = _import_sounddevice()
         loop = asyncio.get_running_loop()
-        queue = asyncio.Queue(maxsize=64)
+        queue = asyncio.Queue(maxsize=QUEUE_CHUNKS)
 
         def push(data):
             # Drop the oldest chunk rather than let the queue grow without
-            # bound. A reader who has fallen seconds behind is already lost;
-            # unbounded memory would be worse.
+            # bound, for the reason QUEUE_CHUNKS gives.
             if queue.full():
                 try:
                     queue.get_nowait()
@@ -263,6 +296,81 @@ class SoundDeviceCapture:
             self.stream.stop()
             self.stream.close()
         except Exception:
+            pass
+
+
+class RemoteCapture:
+    """Audio arriving over the room's control socket, from a sender.
+
+    The same chunks the local backends produce, except that they come off a
+    websocket rather than a device, which changes what silence means. A
+    device that stops has died and the session should reconnect; a socket
+    that stops has usually blinked, and the sentence in progress is not
+    over. So a gap is reported as a gap, and only a gap longer than the
+    grace period ends the stream.
+
+    The encoding is whatever the sender declared, because a sender on a
+    constrained uplink may be sending compressed audio, and the recognizer
+    has to be told which it is getting.
+    """
+
+    backend = "remote"
+
+    def __init__(self, grace, encoding="pcm", tick=GAP_TICK):
+        self.grace = grace
+        self.encoding = encoding
+        # A parameter so a check can exercise a gap without waiting three
+        # seconds for one. Nothing in a meeting passes it.
+        self.tick = tick
+        self.queue = asyncio.Queue(maxsize=QUEUE_CHUNKS)
+        self.last_chunk = time.monotonic()
+        self.closed = False
+
+    def feed(self, chunk):
+        """One chunk off the control socket. Never blocks, never raises.
+
+        Called from the task draining the sender's socket, so anything
+        that blocked here would stop the room's audio being read.
+        """
+        if self.closed:
+            return
+        if self.queue.full():
+            try:
+                self.queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+        self.queue.put_nowait(chunk)
+
+    async def read(self):
+        """A chunk, None for a gap, or empty bytes when the sender is gone.
+
+        None is the middle case the local backends never produce: nothing
+        has arrived just now, but the sender is still inside its grace
+        period and the caller should hold its recognizer socket open rather
+        than end the session or send silence, which is billed as audio.
+        """
+        while True:
+            if self.closed:
+                return b""
+            try:
+                chunk = await asyncio.wait_for(self.queue.get(),
+                                               timeout=self.tick)
+            except TimeoutError:
+                if time.monotonic() - self.last_chunk >= self.grace:
+                    return b""
+                return None
+            if chunk is None:
+                return b""
+            self.last_chunk = time.monotonic()
+            return chunk
+
+    async def close(self):
+        self.closed = True
+        # Wakes a read that is waiting, so the pump does not sit out the
+        # rest of a tick after the session has already ended.
+        try:
+            self.queue.put_nowait(None)
+        except asyncio.QueueFull:
             pass
 
 

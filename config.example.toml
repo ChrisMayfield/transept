@@ -33,9 +33,20 @@ reader_token = ""
 # for a meeting, so a link that leaks expires when the server does.
 operator_token = ""
 
+# What a remote sender authenticates with, for the hosted deployment
+# HOSTED.md describes, where the audio comes over a socket from a laptop in
+# the room rather than from a sound card on this machine. Pinned rather
+# than minted, because the sender is configured once and has to keep
+# working; only read when [audio] backend is "remote".
+control_token = ""
+
 [audio]
 # auto picks parec on Linux when available and sounddevice everywhere else.
 # Force one with "sounddevice" or "parec" if the other misbehaves.
+#
+# "remote" is the hosted deployment instead: no sound card here, the audio
+# arrives over the control socket from a sender in the room, and this
+# server raises the control listener below in place of the operator one.
 backend = "auto"
 
 [recognition]
@@ -118,6 +129,19 @@ port = 8080
 # pointing a tunnel at the port above cannot expose them. A headless
 # machine wants an SSH forward rather than a wider bind here.
 operator_port = 8081
+
+# Where a remote sender connects, when backend is "remote". Unlike the
+# operator port this one has to be reachable, since the sender is in
+# another building; control_token and a refusal of any browser handshake
+# are what guard it. The same number as operator_port because a server
+# raises one listener or the other, never both.
+control_port = 8081
+
+# Seconds a session keeps running after its sender's socket drops, before
+# the server gives up and stops it. The recognizer socket is held open
+# meanwhile, so a wifi blip costs a gap in the transcript rather than the
+# meeting.
+control_grace = 30
 
 # Most readers to serve at once, 0 for no cap. Every reader costs a queue,
 # a socket, and a write on every published line, and the reader link can

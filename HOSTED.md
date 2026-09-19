@@ -432,8 +432,10 @@ The gap and attach rules are exactly the kind of state where a check that always
 
 1. The `room` setting, the `room` column, and its migration. Built.
    This depended on nothing else here and was worth landing on its own, so that recording carries the name from the first hosted meeting rather than from the second.
-2. `RemoteCapture` and the control socket, with a throwaway Python client.
-   Testable on a single laptop, loopback to loopback, before anything is rented.
+2. `RemoteCapture` and the control socket, with a throwaway Python client. Built.
+   Tested on a single laptop, loopback to loopback, before anything was rented.
+   The encoder is not part of it: nothing yet produces Opus, so there is no `encoding` setting, and a sender that declares `opus` in its hello gets a recognizer URL built for it and nothing else.
+   That setting belongs with the `ffmpeg` encoder, which sits on the machine that captures, and so lands with the sender.
 3. `sender.py`: capture, the loopback operator page, the forwarded controls.
 4. Deploy one room.
    VM, domain, Caddy, one systemd unit, `chapel.toml`.

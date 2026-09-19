@@ -12,6 +12,15 @@ one to point a tunnel at; the operator port stays on 127.0.0.1.
     /stream/<channel>   server-sent events for one language
     /operator           start and stop controls, status, language toggles
 
+With [audio] backend set to "remote" the audio arrives over a websocket
+from a sender on a laptop in the room rather than from a sound card here,
+and the second listener is the control socket that sender connects to,
+bound where it can reach it. The operator page then belongs to the sender.
+HOSTED.md describes that deployment; everything below is the same either
+way, because only where the audio comes from has changed.
+
+    /control            one sender: audio up, controls and status down
+
 Both addresses carry a token, so a tunnel open to the internet serves the
 meeting rather than whoever finds it. The bare / is a 404: a visitor who
 was not handed the address gets nothing.
@@ -75,6 +84,14 @@ RECONNECT_BACKOFF = [1, 2, 5, 10, 20]
 # Seconds a run must last to count as healthy and reset the backoff. Without
 # it, a few blips early in a meeting make a later one cost twenty seconds.
 HEALTHY_RUN = 60
+# Seconds a control socket may stay silent before it is pinged, how long a
+# sender has to say hello once connected, and how often the status the
+# sender's page renders is pushed down to it. The hello is bounded because
+# a socket that connects and says nothing would otherwise hold the room's
+# one slot against the sender that means to use it.
+HEARTBEAT = 30
+HELLO_TIMEOUT = 10
+STATUS_INTERVAL = 1.0
 # Queued in place of a subtitle to tell a stream handler its reader has
 # moved on. A sentinel object rather than None, which json.dumps would
 # happily turn into a subtitle reading "null".
@@ -210,9 +227,13 @@ class Hub:
 class Session:
     """The capture pipeline, startable and stoppable at runtime."""
 
-    def __init__(self, config, hub):
+    def __init__(self, config, hub, source=None):
         self.config = config
         self.hub = hub
+        # How a run gets its audio, when it is not a device on this
+        # machine: an async callable returning an open capture object,
+        # which is what a ControlRoom hands over for a remote sender.
+        self.source = source
         self.state = "stopped"
         self.error = None
         self.device = ""
@@ -503,10 +524,15 @@ class Session:
         except asyncio.CancelledError:
             raise
 
+    async def _open_source(self):
+        """The audio for one run: a local device, or the room's sender."""
+        if self.source is not None:
+            return await self.source()
+        return await capture.open_capture(self.device, self.config["capture"])
+
     async def _run_once(self):
         config = self.config
-        source = await capture.open_capture(self.device,
-                                            config["capture"])
+        source = await self._open_source()
         # Only the counter carries over. Reusing one segmenter would carry
         # the buffered fragments and audio_end too, and audio_end is relative
         # to the stream, so on the next stream the gap check would compare
@@ -517,7 +543,10 @@ class Session:
         queue = asyncio.Queue()
         try:
             async with websockets.connect(
-                build_asr_url(config, config["keyterms"]),
+                # The source says what it yields, and the URL has to
+                # declare that rather than what a local device would have
+                # produced, because a sender may be sending encoded audio.
+                build_asr_url(config, config["keyterms"], source.encoding),
                 additional_headers={
                     "Authorization": f"Token {config['deepgram_key']}"},
             ) as socket:
@@ -660,6 +689,105 @@ class Session:
             for language in languages:
                 self._record("translation", seq=unit.seq, language=language,
                              text=unit.text, source=source)
+
+
+class ControlRoom:
+    """The one sender for this room: its socket, its audio, and its grace.
+
+    One sender at a time, because two laptops feeding one session would
+    interleave two rooms into one transcript. The socket may come and go:
+    a hotspot blinking is a gap in the audio rather than the end of a
+    meeting, so a session outlives its socket by control_grace seconds and
+    only then does the server decide the sender has gone home.
+    """
+
+    def __init__(self, config, hub):
+        self.config = config
+        self.hub = hub
+        # The session reads whatever this room hands it, rather than
+        # opening a sound card the rented machine does not have.
+        self.session = Session(config, hub, source=self.open_source)
+        self.socket = None
+        self.source = None
+        self.encoding = "pcm"
+        self.watch = None
+
+    async def open_source(self):
+        """A fresh source for one recognizer run.
+
+        Per run rather than per sender, because a run that ends closes its
+        source, and audio that arrives between runs has no socket to go up.
+        Dropping it is the whole of the right behavior.
+        """
+        self.source = capture.RemoteCapture(self.config["control_grace"],
+                                            self.encoding)
+        return self.source
+
+    def feed(self, chunk):
+        """Audio from the socket, dropped while no run is reading."""
+        if self.source is not None:
+            self.source.feed(chunk)
+
+    def attach(self, socket, hello):
+        """Give this sender the room, or say why not."""
+        name = str(hello.get("room") or "")
+        mine = self.config.get("room") or ""
+        if mine and name != mine:
+            return False, (f"This server serves {mine}, "
+                           f"not {name or 'an unnamed room'}.")
+        encoding = str(hello.get("encoding") or "pcm")
+        if encoding not in ("pcm", "opus"):
+            return False, f"Unknown encoding {encoding!r}."
+        if self.socket is not None:
+            return False, "Another sender is connected to this room."
+        running = self.session.state != "stopped"
+        if running and hello.get("intent") == "start":
+            # A sender that reconnects to a meeting already in progress
+            # means to rejoin it. Starting would be a second laptop taking
+            # a running session over, which is worth refusing out loud.
+            return False, ("This room is already running. Attach to rejoin "
+                           "it, or stop it first.")
+        if running and encoding != self.encoding:
+            # The recognizer was told the format when its socket opened and
+            # has no way to be told another, so a sender that has since
+            # fallen back has to rejoin as what this session is carrying.
+            return False, (f"This room is running on {self.encoding}. "
+                           f"Reconnect with the same encoding.")
+        self.socket = socket
+        self.encoding = encoding
+        if self.watch is not None:
+            self.watch.cancel()
+            self.watch = None
+        return True, "Attached."
+
+    async def release(self, socket):
+        """This sender's socket closed; hold the room open for it briefly."""
+        if socket is not self.socket:
+            return
+        self.socket = None
+        if self.session.state == "stopped":
+            return
+        self.watch = asyncio.create_task(self._watch_gone())
+
+    async def _watch_gone(self):
+        """Stop a session whose sender did not come back.
+
+        The audio stops the moment the socket does, and the recognizer
+        socket is held open with KeepAlives meanwhile, so a blip costs a
+        gap in the transcript rather than the meeting. What must not
+        survive is a session left running on a sender that went home: it
+        would hold the room against the next sender and go on paying for a
+        stream of nothing.
+        """
+        try:
+            await asyncio.sleep(self.config["control_grace"])
+        except asyncio.CancelledError:
+            return
+        if self.socket is not None or self.session.state == "stopped":
+            return
+        self.session.error = ("The sender disconnected and did not come "
+                              "back.")
+        await self.session.stop()
 
 
 # -- web layer -------------------------------------------------------------
@@ -936,6 +1064,160 @@ def build_operator_app(hub, session, token):
     return app
 
 
+# -- the control socket, for a sender in another building --------------------
+
+
+async def first_message(socket):
+    """The sender's hello, or None if what arrived was not one."""
+    try:
+        frame = await socket.receive(timeout=HELLO_TIMEOUT)
+    except TimeoutError:
+        return None
+    if frame.type is not web.WSMsgType.TEXT:
+        return None
+    try:
+        hello = json.loads(frame.data)
+    except ValueError:
+        return None
+    if not isinstance(hello, dict) or hello.get("type") != "hello":
+        return None
+    return hello
+
+
+async def send_error(socket, message):
+    """Say what went wrong, if the socket is still there to hear it."""
+    try:
+        await socket.send_json({"type": "error", "message": message})
+    except (ConnectionResetError, RuntimeError):
+        pass
+
+
+async def push_status(socket, session):
+    """Keep the sender's copy of the operator page fed.
+
+    Session.status() unchanged rather than a shape of its own: the page
+    the sender serves is the page this server serves today, and it has to
+    go on rendering what it renders now.
+    """
+    try:
+        while True:
+            await socket.send_json({"type": "status",
+                                    "status": session.status()})
+            await asyncio.sleep(STATUS_INTERVAL)
+    except (ConnectionResetError, RuntimeError):
+        pass
+
+
+async def handle_message(room, socket, data):
+    """One text frame from the sender: stop, or a language override.
+
+    Start is not here. It is the intent on the hello, because a sender
+    that reconnects has to say whether it means to begin a session or to
+    rejoin the one it was already feeding.
+
+    Only failures are answered. What happened reaches the sender a moment
+    later in the status it is already being pushed, and a second path
+    saying the same thing is a second path that can disagree.
+    """
+    try:
+        message = json.loads(data)
+    except ValueError:
+        message = None
+    if not isinstance(message, dict):
+        await send_error(socket, "Not a JSON object.")
+        return
+    kind = message.get("type")
+    if kind == "stop":
+        ok, text = await room.session.stop()
+    elif kind == "language":
+        ok, text = room.session.set_override(message.get("name"),
+                                             message.get("mode"))
+    else:
+        ok, text = False, f"Unknown message {kind!r}."
+    if not ok:
+        await send_error(socket, text)
+
+
+async def control(request):
+    """The sender's socket: this room's audio, and its controls.
+
+    Binary frames are audio and nothing else. Text frames are JSON, and
+    the first of them has to be a hello naming the room, the encoding, and
+    whether this sender means to start a session or rejoin one.
+    """
+    if not authorized(request):
+        return web.Response(status=403, text="Not authorized.")
+    if "Origin" in request.headers:
+        # Any Origin at all, rather than a list of allowed ones. Websockets
+        # are not subject to the same-origin policy, so a page on any site
+        # the operator visits can open one to any host with no CORS
+        # preflight standing in the way. The only legitimate client here is
+        # a Python program, which sends no Origin, while a browser stamps
+        # every handshake with its own and cannot be made not to. So a page
+        # that somehow learned the control token still cannot use it.
+        return web.Response(status=403, text="Not a route for a browser.")
+
+    room = request.app["room"]
+    socket = web.WebSocketResponse(heartbeat=HEARTBEAT)
+    await socket.prepare(request)
+    hello = await first_message(socket)
+    if hello is None:
+        await send_error(socket, "The first message has to be a hello.")
+        await socket.close()
+        return socket
+    taken, message = room.attach(socket, hello)
+    if not taken:
+        await send_error(socket, message)
+        await socket.close()
+        return socket
+
+    await socket.send_json({
+        "type": "ready",
+        "room": room.config.get("room", ""),
+        # The address on the card, which this server knows and the sender
+        # does not: it holds no reader token and no public_url.
+        "reader_url": room.config.get("reader_url", ""),
+        "languages": room.config["languages"],
+        "state": room.session.state,
+    })
+    if hello.get("intent") == "start":
+        started, message = await room.session.start(hello.get("device"))
+        if not started:
+            await send_error(socket, message)
+
+    pushing = asyncio.create_task(push_status(socket, room.session))
+    try:
+        async for frame in socket:
+            if frame.type is web.WSMsgType.BINARY:
+                room.feed(frame.data)
+            elif frame.type is web.WSMsgType.TEXT:
+                await handle_message(room, socket, frame.data)
+    finally:
+        pushing.cancel()
+        # Not the session: a drop is usually a blip, and the room decides
+        # how long to wait for this sender before giving up on it.
+        await room.release(socket)
+    return socket
+
+
+def build_control_app(room, token):
+    """One route, for the one program allowed to reach it.
+
+    This listener has to bind publicly, because the sender is in another
+    building, so what guards it is the control token and the refusal of
+    any handshake a browser would send, rather than the address it binds
+    to. It serves no page and nothing a reader link could reach, which is
+    what keeps a publicly bound control port a small thing to guard.
+    """
+    app = web.Application()
+    app["room"] = room
+    app["hub"] = room.hub
+    app["session"] = room.session
+    app["token"] = token
+    app.add_routes([web.get("/control", control)])
+    return app
+
+
 def mint_token(pinned=""):
     """A token for one of the two addresses.
 
@@ -1001,16 +1283,27 @@ async def serve(config, tokens, settings):
     """Run both listeners until Ctrl-C, then stop the session.
 
     AppRunner rather than web.run_app, which takes a single application.
-    The two apps share one Hub and one Session: two doors, one room, and a
-    key cut for each door.
+    The reader listener is always the same one. Which listener joins it
+    follows from where the audio comes from, and from nothing else: a
+    local device means the operator page on loopback, and a sender means
+    the control socket, bound where that sender can reach it. Both apps
+    share one Hub and one Session: two doors, one room, and a key cut for
+    each door.
     """
     hub = Hub(config["languages"], config.get("max_readers") or 0)
-    session = Session(config, hub)
+    if config["capture"] == "remote":
+        room = ControlRoom(config, hub)
+        session = room.session
+        second = (build_control_app(room, tokens["control"]),
+                  settings["host"], settings["control_port"])
+    else:
+        session = Session(config, hub)
+        second = (build_operator_app(hub, session, tokens["operator"]),
+                  OPERATOR_HOST, settings["operator_port"])
     listeners = (
         (build_reader_app(hub, session, tokens["reader"]),
          settings["host"], settings["port"]),
-        (build_operator_app(hub, session, tokens["operator"]), OPERATOR_HOST,
-         settings["operator_port"]),
+        second,
     )
     runners = []
     recorded = False
@@ -1054,7 +1347,8 @@ def main():
         "languages", "grace", "max_languages",
         "glossary", "keyterms",
         "idle_stop", "record", "database",
-        "host", "port", "operator_port", "max_readers", "room",
+        "host", "port", "operator_port", "control_port", "max_readers",
+        "room",
     ])
     args = parser.parse_args()
 
@@ -1080,7 +1374,8 @@ def main():
     config["llm_base"] = keys["llm_base"]
 
     tokens = {"reader": mint_token(keys["reader_token"]),
-              "operator": mint_token(keys["operator_token"])}
+              "operator": mint_token(keys["operator_token"]),
+              "control": mint_token(keys["control_token"])}
     # What the QR code and the operator page show, which is the address on
     # the card rather than the one this process binds. Empty until a tunnel
     # is configured, and the banner falls back to the local address so that
@@ -1097,15 +1392,30 @@ def main():
         print("That address carries a token minted for this run, so any "
               "card or link\nfrom a previous run stops working. Nothing "
               "answers without it.")
-    print(f"Operator: http://{OPERATOR_HOST}:{settings['operator_port']}"
-          f"/operator?token={tokens['operator']}")
-    if keys["operator_token"]:
-        print("That address carries operator_token from config.toml, so it "
-              "is the same\nevery restart. Clear it to have one minted per "
-              "run.")
+    if settings["capture"] == "remote":
+        # No operator page here at all: the audio comes from a sender, and
+        # the page that starts and stops a meeting belongs beside the
+        # microphone, on the laptop in the room.
+        print(f"Control:  ws://{settings['host']}:{settings['control_port']}"
+              f"/control?token={tokens['control']}")
+        if keys["control_token"]:
+            print("That address carries control_token from config.toml, "
+                  "which is what the\nsender is configured with.")
+        else:
+            print("No control_token is set, so that token was minted for "
+                  "this run and the\nsender has to be given it again. Pin "
+                  "one under [keys] for a real room.")
     else:
-        print("That address carries a token minted for this run, so it "
-              "changes\nevery restart. Copy it rather than saving a bookmark.")
+        print(f"Operator: http://{OPERATOR_HOST}:{settings['operator_port']}"
+              f"/operator?token={tokens['operator']}")
+        if keys["operator_token"]:
+            print("That address carries operator_token from config.toml, so "
+                  "it is the same\nevery restart. Clear it to have one "
+                  "minted per run.")
+        else:
+            print("That address carries a token minted for this run, so it "
+                  "changes\nevery restart. Copy it rather than saving a "
+                  "bookmark.")
     if settings["host"] in ("127.0.0.1", "localhost", "::1"):
         print("Bound to this machine only. Readers reach it through your "
               "tunnel;\nset server.host to 0.0.0.0 to allow direct "

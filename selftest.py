@@ -41,6 +41,9 @@ import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
 
+import websockets
+from websockets.sync.client import connect as ws_connect
+
 import capture
 import pipeline
 import record
@@ -123,6 +126,7 @@ class FakeSocket:
         self.messages = messages
         self.stay_open = stay_open
         self.audio_chunks = 0
+        self.keepalives = 0
         self.close_stream_sent = False
 
     async def __aenter__(self):
@@ -134,6 +138,10 @@ class FakeSocket:
     async def send(self, data):
         if isinstance(data, str) and "CloseStream" in data:
             self.close_stream_sent = True
+        elif isinstance(data, str) and "KeepAlive" in data:
+            # Counted apart from audio, because the whole point of it is
+            # that it holds the socket open without being audio.
+            self.keepalives += 1
         else:
             self.audio_chunks += 1
 
@@ -149,6 +157,8 @@ class FakeSocket:
 
 class FakeSource:
     """A capture device that never runs out of silence."""
+
+    encoding = "pcm"
 
     def __init__(self):
         self.reads = 0
@@ -208,6 +218,7 @@ def fake_config(**overrides):
         "model": "fake-model", "max_tokens": 2000, "timeout": 15.0,
         "reasoning_effort": "low", "idle_stop": 0, "public_url": "",
         "reader_url": "", "max_languages": 0, "room": "",
+        "control_grace": 30.0,
         "deepgram_key": "fake", "llm_key": "fake",
         "llm_base": "http://invalid/v1",
     }
@@ -509,6 +520,74 @@ async def check_pipeline(checks):
         await task
 
 
+    checks.section("Audio that arrives over a control socket")
+    socket = FakeSocket([])
+    # A grace and a tick measured in fractions of a second rather than the
+    # thirty seconds and three a meeting uses, so the gap and the giving up
+    # both happen while the suite is still running.
+    remote = capture.RemoteCapture(0.5, tick=0.05)
+    for _ in range(3):
+        remote.feed(b"\x00\x00" * capture.CHUNK_FRAMES)
+    pump = asyncio.create_task(pipeline.pump_audio(remote, socket))
+    await asyncio.sleep(0.2)
+    checks.check("what the sender sent reaches the recognizer",
+                 socket.audio_chunks == 3, socket.audio_chunks)
+    checks.check("a gap is a KeepAlive, not silence and not an ending",
+                 socket.keepalives >= 1 and not pump.done(),
+                 f"{socket.keepalives} keepalives, ended={pump.done()}")
+    checks.check("and no silence was invented to fill it",
+                 socket.audio_chunks == 3, socket.audio_chunks)
+    await asyncio.wait([pump], timeout=2.0)
+    checks.check("a gap longer than the grace ends the stream",
+                 pump.done(), "the pump is still waiting on a sender "
+                              "that stopped sending")
+    checks.check("and the recognizer is told the stream is over",
+                 socket.close_stream_sent, socket.close_stream_sent)
+
+    checks.section("What the recognizer is told it is being sent")
+    settings = {"asr_model": "nova-3", "endpointing": 400}
+    pcm = pipeline.build_asr_url(settings, ["Kalema"], "pcm")
+    opus = pipeline.build_asr_url(settings, ["Kalema"], "opus")
+    checks.check("a local device is declared as linear16 at 16 kHz",
+                 "encoding=linear16" in pcm and "sample_rate=16000" in pcm,
+                 pcm)
+    # A container carries its own rate, and a second declaration here is a
+    # second thing to get wrong.
+    checks.check("compressed audio is not declared as raw samples",
+                 "linear16" not in opus and "sample_rate" not in opus, opus)
+    checks.check("everything else about the URL is the same either way",
+                 "endpointing=400" in opus and "keyterm=Kalema" in opus
+                 and "interim_results=false" in opus, opus)
+    declared = (capture.ParecCapture.encoding,
+                capture.SoundDeviceCapture.encoding,
+                capture.RemoteCapture(1.0).encoding,
+                capture.RemoteCapture(1.0, "opus").encoding)
+    checks.check("every backend says what it yields",
+                 declared == ("pcm", "pcm", "pcm", "opus"), declared)
+
+    checks.section("Choosing the remote backend")
+    checks.check("remote is a backend, and never the one auto picks",
+                 capture.resolve_backend("remote") == "remote"
+                 and capture.resolve_backend("auto") != "remote",
+                 capture.resolve_backend("auto"))
+    raised = ""
+    try:
+        await capture.open_capture("some device", "remote")
+    except capture.CaptureError as exc:
+        raised = str(exc)
+    checks.check("a remote source cannot be opened by naming a device",
+                 "control socket" in raised, raised or "nothing was raised")
+    raised = ""
+    try:
+        capture.list_devices("remote")
+    except capture.CaptureError as exc:
+        raised = str(exc)
+    # The sound hardware a hosted server could enumerate would be the
+    # rented machine's, which is nobody's microphone.
+    checks.check("and a hosted server offers no devices of its own",
+                 "on the sender" in raised, raised or "a list was returned")
+
+
 # -- a whole session, start to stop ------------------------------------------
 
 
@@ -600,6 +679,21 @@ async def check_session(checks):
                      reached)
         checks.check("a second stop is refused",
                      (await session.stop())[0] is False)
+
+        # The same start again, on a source that says it is sending
+        # something else. What the recognizer is told has to follow the
+        # source rather than what a local device would have produced.
+        sockets.clear()
+        source.encoding = "opus"
+        session = server.Session(fake_config(languages=["French"]),
+                                 server.Hub(["French"]))
+        await session.start("fake")
+        await asyncio.sleep(0.2)
+        url = sockets[0].url if sockets else "the recognizer was never reached"
+        checks.check("a session declares the encoding its source yields",
+                     "linear16" not in url and "sample_rate" not in url, url)
+        await session.stop()
+        source.encoding = "pcm"
     finally:
         (capture.open_capture, server.websockets.connect,
          server.Translator) = original
@@ -654,6 +748,78 @@ async def check_session(checks):
     checks.check("a healthy run puts the backoff back to the short delay",
                  session.stats["reconnects"] >= 5,
                  session.stats["reconnects"])
+
+
+    checks.section("One room, one sender")
+
+    def hello(**fields):
+        return {"type": "hello", "room": "chapel", "encoding": "pcm",
+                "device": "a laptop in the room", "intent": "attach",
+                **fields}
+
+    def make_room(**overrides):
+        hub = server.Hub(["French"])
+        return server.ControlRoom(
+            fake_config(languages=["French"], capture="remote",
+                        room="chapel", control_grace=0.4, **overrides), hub)
+
+    room = make_room()
+    first, second = object(), object()
+    taken, message = room.attach(first, hello())
+    checks.check("the first sender gets the room", taken, message)
+    taken, message = room.attach(second, hello())
+    checks.check("a second sender is refused while the first holds it",
+                 taken is False and "Another sender" in message, message)
+
+    # A config copied from the room next door and not edited, which is the
+    # mistake that would otherwise put one room's audio in another's
+    # transcript.
+    taken, message = make_room().attach(first, hello(room="classroom"))
+    checks.check("a sender pointed at the wrong room is refused",
+                 taken is False and "chapel" in message, message)
+    taken, message = make_room().attach(first, hello(encoding="flac"))
+    checks.check("and so is an encoding the recognizer is never told about",
+                 taken is False and "flac" in message, message)
+
+    source = await room.open_source()
+    room.feed(b"\x01\x02")
+    chunk = await asyncio.wait_for(source.read(), 1.0)
+    checks.check("audio off the socket reaches the session's source",
+                 chunk == b"\x01\x02", chunk)
+    checks.check("which carries the encoding the sender declared",
+                 source.encoding == "pcm", source.encoding)
+
+    room.session.state = "running"
+    await room.release(first)
+    await asyncio.sleep(0.1)
+    checks.check("a dropped socket does not stop the meeting at once",
+                 room.session.state == "running", room.session.state)
+    # A laptop that would take a running meeting over rather than rejoin
+    # it, which is worth refusing out loud even with the token in hand.
+    taken, message = room.attach(object(), hello(intent="start"))
+    checks.check("a sender that means to start a running room is refused",
+                 taken is False and "already running" in message, message)
+    taken, message = room.attach(second, hello())
+    checks.check("the sender that comes back rejoins the session it left",
+                 taken and room.session.state == "running", message)
+
+    # Two blips in a row, which one bad hotspot produces all morning. The
+    # second drop has to be given a whole grace of its own: the countdown
+    # the first one armed is still running otherwise, and it would stop the
+    # session a fraction of the way into the second window.
+    await asyncio.sleep(0.1)
+    await room.release(second)
+    await asyncio.sleep(0.3)
+    checks.check("a second blip gets a grace of its own, not what is left "
+                 "of the first one's",
+                 room.session.state == "running", room.session.state)
+
+    await asyncio.sleep(0.3)
+    checks.check("a sender that does not come back stops the session",
+                 room.session.state == "stopped", room.session.state)
+    checks.check("and the operator is told why",
+                 "disconnected" in (room.session.error or ""),
+                 room.session.error)
 
 
 # -- the running server ------------------------------------------------------
@@ -1253,6 +1419,174 @@ def check_server(checks):
                  not pid_file.exists(), pid_file)
 
 
+def check_control(checks):
+    """Boot the hosted half for real and knock on its control socket.
+
+    The listener a sender reaches has to bind publicly, because the sender
+    is in another building, so what it serves and what it turns away is the
+    whole of its guard. Loopback to loopback here: no network, no keys, and
+    no session, since starting one would reach for a recognizer.
+    """
+    checks.section("The hosted server and its control socket")
+    port, control = free_port(), free_port()
+    environment = dict(
+        os.environ,
+        DEEPGRAM_API_KEY="selftest",
+        LLM_API_KEY="selftest",
+        LLM_BASE_URL="http://invalid.invalid/v1",
+        READER_TOKEN="",
+        OPERATOR_TOKEN="",
+        CONTROL_TOKEN="",
+    )
+    home = Path(tempfile.mkdtemp())
+    process = subprocess.Popen(
+        [sys.executable, "-u", str(HERE / "server.py"),
+         "--config", "selftest-no-such-config.toml",
+         "--model", "selftest-model", "--languages", "French",
+         "--capture", "remote", "--room", "chapel",
+         "--host", "127.0.0.1", "--port", str(port),
+         "--control-port", str(control)],
+        cwd=home, env=environment, stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, text=True)
+    lines, reader = drain(process)
+    try:
+        if not wait_for_port(port, process) or not wait_for_port(
+                control, process):
+            checks.check(f"server.py came up on ports {port} and {control}",
+                         False, "".join(lines))
+            return
+
+        address = banner_address(lines, "Control")
+        TOKEN = address.split("token=", 1)[-1] if "token=" in address else ""
+        checks.check("the banner prints a control address with a token",
+                     len(TOKEN) >= 32, address or "".join(lines))
+        READER = banner_address(lines, "Reader").split("token=", 1)[-1]
+        checks.check("the two addresses carry different tokens",
+                     READER and READER != TOKEN, f"{READER} {TOKEN}")
+        # There is no operator page on a hosted server: the page that
+        # starts a meeting belongs beside the microphone, on the sender.
+        checks.check("and no operator address at all",
+                     banner_address(lines, "Operator", timeout=1.0) == "",
+                     "".join(lines))
+
+        base = f"ws://127.0.0.1:{control}/control"
+
+        def handshake(token, headers=None):
+            """The status a handshake is refused with, or the open socket."""
+            try:
+                return ws_connect(f"{base}?token={token}", open_timeout=5,
+                                  additional_headers=headers)
+            except websockets.InvalidStatus as exc:
+                return exc.response.status_code
+
+        refused = handshake("nonsense")
+        checks.check("the control socket is refused without the token",
+                     refused == 403, refused)
+        refused = handshake(READER)
+        checks.check("and refused with the reader's token, which the whole "
+                     "room holds", refused == 403, refused)
+        # A browser stamps every handshake with an Origin and cannot be
+        # made not to, so refusing the header refuses the browser. A page
+        # that somehow learned this token still cannot open the socket.
+        refused = handshake(TOKEN, {"Origin": "https://not.this.example"})
+        checks.check("a handshake carrying a browser's Origin is refused",
+                     refused == 403, refused)
+
+        def say(socket, **fields):
+            socket.send(json.dumps({
+                "type": "hello", "room": "chapel", "encoding": "pcm",
+                "device": "a laptop in the room", "intent": "attach",
+                **fields}))
+            return json.loads(socket.recv(timeout=5))
+
+        def next_status(socket):
+            while True:
+                message = json.loads(socket.recv(timeout=5))
+                if message.get("type") == "status":
+                    return message["status"]
+
+        sender = handshake(TOKEN)
+        if not hasattr(sender, "send"):
+            checks.check("the sender's socket opened", False, sender)
+            return
+        try:
+            ready = say(sender)
+            checks.check("a sender that says hello is told it is ready",
+                         ready.get("type") == "ready", ready)
+            checks.check("and told the room, the languages, and the state",
+                         (ready.get("room"), ready.get("languages"),
+                          ready.get("state"))
+                         == ("chapel", ["French"], "stopped"), ready)
+            status = next_status(sender)
+            checks.check("the status the operator page renders is pushed "
+                         "down the same socket",
+                         status.get("state") == "stopped"
+                         and "languages" in status, status)
+
+            second = handshake(TOKEN)
+            try:
+                answer = say(second)
+                checks.check("a second sender is turned away, not merged in",
+                             answer.get("message", "").startswith(
+                                 "Another sender"), answer)
+            finally:
+                second.close()
+
+            sender.send(json.dumps({"type": "language", "name": "French",
+                                    "mode": "on"}))
+            french = {}
+            for _ in range(4):
+                french = [row for row in next_status(sender)["languages"]
+                          if row["name"] == "French"][0]
+                if french["override"] == "on":
+                    break
+            checks.check("a language message reaches the session",
+                         french.get("override") == "on", french)
+
+            sender.send(json.dumps({"type": "stop"}))
+            answer = json.loads(sender.recv(timeout=5))
+            while answer.get("type") == "status":
+                answer = json.loads(sender.recv(timeout=5))
+            checks.check("stopping what is not running says so rather than "
+                         "going quiet",
+                         answer.get("type") == "error", answer)
+        finally:
+            sender.close()
+
+        wrong = handshake(TOKEN)
+        try:
+            # One process per room, so a sender pointed at the wrong one
+            # has to be told rather than fed into this room's transcript.
+            answer = say(wrong, room="classroom")
+            checks.check("a sender pointed at another room is refused",
+                         answer.get("type") == "error"
+                         and "chapel" in answer.get("message", ""), answer)
+        finally:
+            wrong.close()
+
+        # The control listener serves one route. Everything the operator
+        # port carries is absent here, token or not.
+        for path in ("/operator", "/api/status", "/api/devices", "/qr.svg",
+                     "/reader", "/api/channels"):
+            status, _ = request(control, path, token=TOKEN)
+            checks.check(f"{path} is not served on the control port",
+                         status == 404, status)
+        status, _ = request(port, "/control", token=READER)
+        checks.check("/control is not served on the reader port",
+                     status == 404, status)
+        status, _ = request(port, "/reader", token=READER)
+        checks.check("and the reader port is the same one phones already "
+                     "use", status == 200, status)
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+        reader.join(timeout=2)
+
+
 # -- recording a session -----------------------------------------------------
 
 
@@ -1614,6 +1948,7 @@ def main():
         asyncio.run(check_store(checks))
     if "server" in wanted:
         check_server(checks)
+        check_control(checks)
     if "script" in wanted:
         check_script(checks)
     return checks.report()

@@ -64,6 +64,7 @@ SECRETS = [
     ("llm_key", "llm_api_key", "LLM_API_KEY"),
     ("reader_token", "reader_token", "READER_TOKEN"),
     ("operator_token", "operator_token", "OPERATOR_TOKEN"),
+    ("control_token", "control_token", "CONTROL_TOKEN"),
 ]
 
 # Every other setting, in one place: attribute, config.toml section and key,
@@ -105,6 +106,14 @@ SETTINGS = [
     ("host", "server", "host", str, "127.0.0.1"),
     ("port", "server", "port", int, 8080),
     ("operator_port", "server", "operator_port", int, 8081),
+    # The same number as operator_port, which costs nothing because the
+    # two are never built together: a server captures from a local device
+    # or from a sender, and which listener it raises follows from that.
+    ("control_port", "server", "control_port", int, 8081),
+    # Seconds a session outlives its sender's socket. Long enough for a
+    # laptop's wifi to come back, short enough that a sender that went
+    # home does not leave a meeting running.
+    ("control_grace", "server", "control_grace", float, 30.0),
     ("max_readers", "server", "max_readers", int, 100),
     ("public_url", "server", "public_url", str, ""),
     # Beside public_url because the two compose into a room's address once
@@ -442,13 +451,27 @@ def load_glossary(path):
             "Follow it exactly:\n\n" + "\n".join(terms))
 
 
-def build_asr_url(settings, keyterms):
+def build_asr_url(settings, keyterms, encoding="pcm"):
+    """The recognizer socket for one run, declaring what will go up it.
+
+    The format named here has to be the one actually being sent, which is
+    whatever the capture object says it yields: linear16 from a local
+    device, and whatever a sender declared over the control socket. Opus
+    arrives inside a container that names its own rate and channel count,
+    which Deepgram reads for itself, so that case declares nothing rather
+    than repeating it in a second place that could disagree.
+    """
     params = [
         ("model", settings["asr_model"]),
         ("language", "en"),
-        ("encoding", "linear16"),
-        ("sample_rate", str(SAMPLE_RATE)),
-        ("channels", str(CHANNELS)),
+    ]
+    if encoding != "opus":
+        params += [
+            ("encoding", "linear16"),
+            ("sample_rate", str(SAMPLE_RATE)),
+            ("channels", str(CHANNELS)),
+        ]
+    params += [
         ("interim_results", "false"),
         ("smart_format", "true"),
         ("punctuate", "true"),
@@ -459,7 +482,7 @@ def build_asr_url(settings, keyterms):
 
 
 ARGUMENT_HELP = {
-    "capture": "auto, sounddevice, or parec",
+    "capture": "auto, sounddevice, parec, or remote",
     "asr_model": "Deepgram model name",
     "endpointing": "milliseconds of silence that ends an utterance",
     "ceiling": "seconds to hold fragments before forcing a sentence",
@@ -483,6 +506,8 @@ ARGUMENT_HELP = {
     "host": "address to bind",
     "port": "port to bind, the one a tunnel points at",
     "operator_port": "port for the operator controls, always loopback",
+    "control_port": "port a remote sender connects to",
+    "control_grace": "seconds a session outlives its sender's socket",
     "max_readers": "most readers to serve at once, 0 for no cap",
     "public_url": "the address readers use, for the QR code",
     "room": "name of this room, kept with each recorded session",
@@ -553,10 +578,18 @@ async def pump_audio(source, socket, stop=None):
     that dies mid-meeting leaves the websocket open, the reader task waits
     forever on a socket that will never produce another result, and the
     session sits in "running" with no audio and no reconnect.
+
+    A source may also report a gap, which None means and which a local
+    device never produces: a sender's connection blinked, and the sentence
+    in progress is not over. A KeepAlive holds the recognizer socket open
+    through it. Silence would do the same and be billed as audio.
     """
     try:
         while stop is None or not stop.is_set():
             chunk = await source.read()
+            if chunk is None:
+                await socket.send(json.dumps({"type": "KeepAlive"}))
+                continue
             if not chunk:
                 return
             await socket.send(chunk)
