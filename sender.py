@@ -29,6 +29,7 @@ live on the server, which is the point of hosting them.
 
 import argparse
 import asyncio
+import base64
 import json
 import sys
 import time
@@ -61,6 +62,12 @@ READY_TIMEOUT = 10
 # taken at its word. The hello is what begins a session, so the first
 # statuses after one describe the session that had not begun yet.
 START_GRACE = 5.0
+# How long the hello waits for the encoder's first pages, and how often it
+# looks. The pump reads them a page or two into the stream, so this is
+# ordinarily a wait of milliseconds; it is bounded because a hello that
+# never goes out is a sender that never says anything at all.
+HEADER_WAIT = 3.0
+HEADER_POLL = 0.05
 
 
 def blank_status():
@@ -260,12 +267,39 @@ class Remote:
 
     # -- the socket --------------------------------------------------------
 
-    def hello(self):
-        """The first message on every connection, which says what this is."""
+    async def hello(self):
+        """The first message on every connection, which says what this is.
+
+        An Opus stream is not self-describing from the middle, and the
+        middle is where the server always joins: the encoder starts with
+        the microphone here, and a recognizer run starts over there. So
+        the hello carries the stream's first pages along with its name,
+        which is the same reason the encoding is here rather than settled
+        later, and they are dropped from the audio itself in the ordinary
+        way, unread, while this connection is still being made.
+        """
         return {"type": "hello", "room": self.room,
                 "encoding": (self.source.encoding if self.source
                              else self.encoding),
+                "headers": await self.stream_headers(),
                 "device": self.device, "intent": self.intent}
+
+    async def stream_headers(self):
+        """The encoder's first pages as text, once it has written them.
+
+        Empty for PCM, which has no pages to wait for, and empty when
+        there is no microphone open here, which is a sender rejoining a
+        room it is not feeding: the server keeps the ones it was given
+        rather than taking that silence for a new stream.
+        """
+        source = self.source
+        if source is None or source.encoding != "opus":
+            return ""
+        for _ in range(int(HEADER_WAIT / HEADER_POLL)):
+            if source.headers:
+                return base64.b64encode(source.headers).decode()
+            await asyncio.sleep(HEADER_POLL)
+        return ""
 
     def welcome(self, ready):
         """What the server tells a sender when the socket opens."""
@@ -328,6 +362,11 @@ class Remote:
             self.device = device
             self.started = time.monotonic()
             self.capturing.set()
+            # A new encoder is a new stream, and the pages that say what it
+            # is have already gone past. The hello is what carries them, so
+            # rejoining means dialing again rather than feeding this socket
+            # a stream the server has no way to read.
+            self.redial.set()
         elif not running and self.source is not None:
             if time.monotonic() - self.started < START_GRACE:
                 return
@@ -381,7 +420,7 @@ async def link(remote, url):
         # Cleared before the hello rather than after: a start pressed while
         # this sender was offline set it, and this connection is the answer.
         remote.redial.clear()
-        await socket.send(json.dumps(remote.hello()))
+        await socket.send(json.dumps(await remote.hello()))
         while True:
             frame = parse(await asyncio.wait_for(socket.recv(),
                                                  READY_TIMEOUT))

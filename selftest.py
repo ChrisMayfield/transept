@@ -25,6 +25,7 @@ Exits non-zero if any check fails.
 """
 
 import asyncio
+import base64
 import contextlib
 import io
 import json
@@ -174,6 +175,39 @@ class FakeSource:
         # starve every other task in the session.
         await asyncio.sleep(0.01)
         return b"\x00\x00" * capture.CHUNK_FRAMES
+
+    async def close(self):
+        self.closed = True
+
+
+class FakeOpusSource:
+    """An encoder whose stream, like a real one, opens with its own pages.
+
+    The pages appear on the first read rather than at construction,
+    because that is the ordering the hello has to cope with: ffmpeg writes
+    them a moment after the microphone opens, while the socket that will
+    carry them is still being made.
+    """
+
+    encoding = "opus"
+    # Shape enough to be recognized: a page whose one segment is an
+    # OpusHead. Nothing here decodes it, only carries it.
+    headers = b"OggS" + bytes(22) + b"\x01\x13OpusHead" + bytes(11)
+
+    def __init__(self):
+        self.reads = 0
+        self.closed = False
+        # Shadows the class attribute, so nothing is known about this
+        # stream until something has actually read from it.
+        self.headers = b""
+
+    async def read(self):
+        await asyncio.sleep(0.01)
+        self.reads += 1
+        if self.reads == 1:
+            self.headers = type(self).headers
+            return type(self).headers
+        return b"\x11\x22" * capture.CHUNK_FRAMES
 
     async def close(self):
         self.closed = True
@@ -615,6 +649,14 @@ async def check_pipeline(checks):
         # out of, which is why build_asr_url declares neither for Opus.
         checks.check("and what comes out of it is an Ogg stream",
                      first[:4] == b"OggS", first[:16])
+        # Kept because a sender's socket does not exist when ffmpeg writes
+        # them, and a recognizer handed the rest without them returns
+        # nothing at all while every light stays green.
+        checks.check("and the encoder keeps the pages that say what it is",
+                     b"OpusHead" in source.headers, source.headers[:32])
+        checks.check("which is the front of the stream, not a copy of it",
+                     source.headers and first.startswith(source.headers),
+                     f"{len(source.headers)} of {len(first)} bytes")
         declared = pipeline.build_asr_url(settings, [], "opus")
         checks.check("so the recognizer is told what is really being sent",
                      "linear16" not in declared, declared)
@@ -622,6 +664,44 @@ async def check_pipeline(checks):
         # Not a pass dressed up as one: nothing was exercised, and the
         # machine that runs a meeting is the one that has to be checked.
         print("  [SKIP] the Opus path needs ffmpeg, which is not installed")
+
+    checks.section("Reading the front of an Ogg stream")
+    # Two pages and the beginning of a third, built here rather than taken
+    # from ffmpeg, so this runs on a machine that has none.
+    def page(payload, segments=1):
+        return (b"OggS" + bytes(6) + bytes(8) + bytes(4) + bytes(4)
+                + bytes([segments]) + bytes([len(payload)]) + payload)
+
+    head = page(b"OpusHead" + bytes(11))
+    tags = page(b"OpusTags" + bytes(20))
+    audio = page(b"\x01\x02\x03\x04")
+    pages = pipeline.OggHeaders()
+    pages.feed(head + tags + audio)
+    checks.check("the two pages that describe a stream are kept",
+                 pages.headers == head + tags, pages.headers[:24])
+    checks.check("and the audio behind them is not",
+                 not pages.headers.endswith(audio), len(pages.headers))
+    # A page is whatever length its segment table says, and a socket splits
+    # a stream wherever it likes, so the two boundaries do not line up.
+    split = pipeline.OggHeaders()
+    whole = head + tags + audio
+    for at in range(0, len(whole), 7):
+        split.feed(whole[at:at + 7])
+    checks.check("pages split across chunks are read all the same",
+                 split.headers == head + tags, split.headers[:24])
+    partial = pipeline.OggHeaders()
+    partial.feed(head)
+    checks.check("one page alone is not yet an answer",
+                 partial.headers == b"", partial.headers)
+    noise = pipeline.OggHeaders()
+    for _ in range(50):
+        noise.feed(b"\x00\x11\x22\x33" * 256)
+    checks.check("a stream that is not Ogg at all is not accumulated",
+                 noise.headers == b"" and len(noise.buffer) <= 3,
+                 len(noise.buffer))
+    pages.reset()
+    checks.check("and a new encoder is a new stream, not these pages",
+                 pages.headers == b"", pages.headers)
 
     checks.section("Choosing the remote backend")
     checks.check("remote is a backend, and never the one auto picks",
@@ -971,7 +1051,7 @@ async def check_sender_proxy(checks):
         ok, message = await remote.start("a microphone")
         checks.check("starting opens the microphone on this laptop first",
                      ok and opened == ["a microphone"], message)
-        hello = remote.hello()
+        hello = await remote.hello()
         # Start is not a message. A sender says what it means in its
         # hello, because a reconnecting one has to say whether it is
         # beginning a meeting or rejoining one.
@@ -991,7 +1071,8 @@ async def check_sender_proxy(checks):
                      remote.source is not None, "the microphone was closed")
         await remote.update({"state": "running", "device": "a microphone"})
         checks.check("once it is running the next hello is an attach",
-                     remote.hello()["intent"] == "attach", remote.hello())
+                     (await remote.hello())["intent"] == "attach",
+                     await remote.hello())
 
         remote.started = time.monotonic() - sender.START_GRACE - 1
         await remote.update({"state": "stopped", "device": "a microphone"})
@@ -1937,6 +2018,103 @@ async def drive_audio(checks):
         checks.check("and the server holds the encoding the sender declared",
                      room.encoding == remote.source.encoding,
                      f"{room.encoding} against {remote.source.encoding}")
+        pump.cancel()
+        await asyncio.gather(pump, return_exceptions=True)
+    finally:
+        capture.open_capture = original
+        if link is not None:
+            link.cancel()
+            await asyncio.gather(link, return_exceptions=True)
+        await remote.release()
+        await runner.cleanup()
+
+    # An Opus stream is not readable from the middle, and the middle is
+    # where every run here joins: the first a second after the encoder
+    # started, a later one an hour in. Without the pages in front, Deepgram
+    # holds the socket open and returns nothing, which in a room is
+    # indistinguishable from nobody speaking.
+    checks.section("An Opus stream a recognizer run joins partway through")
+
+    async def opening(source):
+        """What a run would read first, or nothing if it would wait.
+
+        Nothing is the failure this section is about, so it is reported as
+        a failed check rather than left to end the suite in a traceback.
+        """
+        try:
+            return await asyncio.wait_for(source.read(), timeout=2)
+        except TimeoutError:
+            return b""
+
+    room = server.ControlRoom(fake_config(languages=["French"],
+                                          room="chapel"), hub)
+    headers = b"OggS" + bytes(22) + b"\x01\x13OpusHead" + bytes(11)
+    hello = {"type": "hello", "room": "chapel", "encoding": "opus",
+             "intent": "start", "device": "a microphone",
+             "headers": base64.b64encode(headers).decode()}
+    taken, message = room.attach(object(), dict(hello, headers=""))
+    checks.check("an Opus sender that declared no stream is refused",
+                 not taken and "did not say what it is" in message, message)
+    checks.check("and the room is left with no session and no sender",
+                 room.socket is None and room.headers == b"", room.headers)
+    taken, message = room.attach(object(), hello)
+    checks.check("one that declared its stream is taken",
+                 taken and room.headers == headers, message)
+    source = await room.open_source()
+    first = await opening(source)
+    checks.check("and a run that opens later starts with those pages",
+                 first == headers, first[:24])
+    room.socket = None
+    later = await room.open_source()
+    first = await opening(later)
+    checks.check("as does the run after a reconnect an hour in",
+                 first == headers, first[:24])
+    # Pages belonging to a format this room is no longer carrying are worse
+    # than none: they would be prepended to raw samples.
+    room.attach(object(), {"type": "hello", "room": "chapel",
+                           "encoding": "pcm", "intent": "attach"})
+    checks.check("a sender that fell back to raw audio drops them",
+                 room.headers == b"", room.headers)
+    room.socket = None
+    room.encoding, room.headers = "opus", headers
+    room.attach(object(), {"type": "hello", "room": "chapel",
+                           "encoding": "opus", "intent": "attach"})
+    # A sender rejoining a room it is not feeding has no encoder open and
+    # so nothing to declare, which is not the same as a stream that changed.
+    checks.check("but a sender rejoining with nothing open keeps them",
+                 room.headers == headers, room.headers)
+
+    room = server.ControlRoom(fake_config(languages=["French"],
+                                          room="chapel"), hub)
+    remote = sender.Remote({"capture": "auto", "reader_url": ""},
+                           "chapel", "opus")
+    port = free_port()
+    runner = web.AppRunner(server.build_control_app(room, "shared"))
+    await runner.setup()
+    link = None
+    room.session.start = without_a_recognizer
+    original = capture.open_capture
+    try:
+        await web.TCPSite(runner, "127.0.0.1", port).start()
+
+        async def opens_opus(device, backend):
+            return FakeOpusSource()
+
+        capture.open_capture = opens_opus
+        link = asyncio.create_task(sender.supervise(
+            remote, sender.dial(f"ws://127.0.0.1:{port}/control", "shared")))
+        # Before the start, because the pages reach the hello by way of the
+        # pump: nothing has read the encoder until this task does.
+        pump = asyncio.create_task(remote.pump())
+        ok, message = await remote.start("a microphone")
+        checks.check("a real sender carries its pages across the socket",
+                     ok and await settle(lambda: room.headers
+                                         == FakeOpusSource.headers),
+                     room.headers[:24] or "nothing arrived")
+        source = await room.open_source()
+        first = await opening(source)
+        checks.check("so the recognizer is handed a stream it can read",
+                     first == FakeOpusSource.headers, first[:24])
         pump.cancel()
         await asyncio.gather(pump, return_exceptions=True)
     finally:

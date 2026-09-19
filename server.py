@@ -44,6 +44,7 @@ QR code or a bookmarked link keeps working from week to week.
 
 import argparse
 import asyncio
+import base64
 import hashlib
 import json
 import os
@@ -695,6 +696,21 @@ class Session:
                              text=unit.text, source=source)
 
 
+def decode_headers(value):
+    """A hello's stream pages as bytes, or none at all.
+
+    Anything unreadable is treated as absent rather than raised on. What a
+    bad value costs is caught a line later, where an Opus sender that
+    declared nothing is refused with a sentence the operator can act on.
+    """
+    if not isinstance(value, str) or not value:
+        return b""
+    try:
+        return base64.b64decode(value, validate=True)
+    except ValueError:
+        return b""
+
+
 class ControlRoom:
     """The one sender for this room: its socket, its audio, and its grace.
 
@@ -714,6 +730,9 @@ class ControlRoom:
         self.socket = None
         self.source = None
         self.encoding = "pcm"
+        # What the sender's hello said its Opus stream is. Empty for PCM,
+        # which any run can read from wherever it joins.
+        self.headers = b""
         self.watch = None
 
     async def open_source(self):
@@ -721,10 +740,18 @@ class ControlRoom:
 
         Per run rather than per sender, because a run that ends closes its
         source, and audio that arrives between runs has no socket to go up.
-        Dropping it is the whole of the right behavior.
+        Dropping it is the whole of the right behavior for audio.
+
+        The stream's own first pages are the exception, because they are
+        not audio. Every run here joins an Opus stream already in progress,
+        the first one a second or two after the encoder started and a later
+        one an hour in, and a recognizer given such a stream with nothing
+        in front of it holds the socket open and returns nothing at all.
         """
         self.source = capture.RemoteCapture(self.config["control_grace"],
                                             self.encoding)
+        if self.headers:
+            self.source.feed(self.headers)
         return self.source
 
     def feed(self, chunk):
@@ -742,6 +769,16 @@ class ControlRoom:
         encoding = str(hello.get("encoding") or "pcm")
         if encoding not in ("pcm", "opus"):
             return False, f"Unknown encoding {encoding!r}."
+        headers = decode_headers(hello.get("headers"))
+        if encoding == "opus" and hello.get("intent") == "start" \
+                and not headers:
+            # Refused rather than started, because the alternative is a
+            # meeting that runs for an hour with every light green and not
+            # one subtitle, which is the one failure nobody in the room can
+            # tell from a quiet speaker.
+            return False, ("This sender's Opus stream did not say what it "
+                           "is. Restart the sender, or set [audio] encoding "
+                           "to pcm on the laptop.")
         if self.socket is not None:
             return False, "Another sender is connected to this room."
         running = self.session.state != "stopped"
@@ -757,6 +794,13 @@ class ControlRoom:
             # fallen back has to rejoin as what this session is carrying.
             return False, (f"This room is running on {self.encoding}. "
                            f"Reconnect with the same encoding.")
+        if headers or encoding != self.encoding:
+            # Kept when a hello carries none and nothing about the stream
+            # changed, which is a sender rejoining a room it is not feeding
+            # yet. Replaced outright when the encoding changed, since pages
+            # belonging to the format this room was carrying before are
+            # worse than none at all.
+            self.headers = headers
         self.socket = socket
         self.encoding = encoding
         if self.watch is not None:

@@ -289,6 +289,12 @@ It also hands back an already-encoded source untouched, which is what a hosted s
 What the encoder falls back to is what the hello has to declare, and the server builds its recognizer URL from that and cannot be told a different format later.
 Doing it in this order also means a microphone that will not open is reported on the page with no session started anywhere.
 
+The hello carries the Opus stream's first pages as well as its name.
+An Ogg stream opens with an `OpusHead` page giving the sample rate and channel count, and nothing after it can be decoded without it, but the middle is where the server always joins: the encoder starts with the microphone here, before there is a socket, and a recognizer run starts over there whenever a session does.
+Deepgram handed such a stream from the middle accepts the socket, holds it open, and returns nothing at all, which in a room is indistinguishable from nobody speaking, so `ControlRoom` keeps the pages and puts them in front of every `RemoteCapture` it opens, and an Opus sender that declares none is refused rather than started.
+This is why `Encoder` notes its own headers on the way past instead of holding them back, and why `Remote.update` sets `redial` when it reopens a device: a new encoder is a new stream, and the hello is what carries it.
+A PCM sender needs none of this, which is why the hosted deployment ran on `pcm` without anyone noticing the hole.
+
 Pressing Start closes the control socket and opens another one.
 Start is not a message in the protocol: a sender says what it means in its hello, because a reconnecting one has to say whether it is beginning a meeting or rejoining one, and a second laptop quietly taking over a running session is the thing that refusal exists to prevent.
 

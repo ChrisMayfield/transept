@@ -523,6 +523,65 @@ ENCODER_SETTLE = 0.3
 # Bytes to take off the encoder at a time. A ceiling, not a wait: the read
 # returns whatever has arrived, which at this bitrate is one small page.
 ENCODED_READ = 4096
+# Pages at the front of an Ogg stream that say what the stream is: OpusHead,
+# which carries the sample rate and channel count, and OpusTags.
+OGG_HEADER_PAGES = 2
+# Fixed part of an Ogg page header, before the segment table that follows it.
+OGG_PAGE_HEADER = 27
+
+
+class OggHeaders:
+    """The pages at the front of an Ogg stream, kept for a later listener.
+
+    Opus does not travel as bare frames. Its first two pages say what the
+    stream is, and everything after them is undecodable without them: a
+    recognizer handed the stream from the middle accepts the socket, holds
+    it open, and returns nothing at all, which in a room looks exactly like
+    nobody speaking.
+
+    Whoever needs them most is never listening when they go past. The
+    encoder starts with the microphone, before there is a socket to send
+    up, and a recognizer run starts later still, whenever a session does.
+    So they are kept here and put in front of each new reader rather than
+    left to whoever happened to be connected when ffmpeg started.
+    """
+
+    def __init__(self):
+        self.buffer = b""
+        self.headers = b""
+
+    def feed(self, chunk):
+        """One chunk of the stream, which costs nothing once it has them."""
+        if self.headers or not chunk:
+            return
+        self.buffer += chunk
+        start = self.buffer.find(b"OggS")
+        if start < 0:
+            # Only enough to catch a capture pattern split across two
+            # chunks, so a stream that is not Ogg at all cannot grow this
+            # without bound.
+            self.buffer = self.buffer[-3:]
+            return
+        at = start
+        for _ in range(OGG_HEADER_PAGES):
+            # A page is the fixed header, a segment table whose length the
+            # header gives, and a payload the table adds up to.
+            if len(self.buffer) < at + OGG_PAGE_HEADER:
+                return
+            segments = self.buffer[at + OGG_PAGE_HEADER - 1]
+            table = at + OGG_PAGE_HEADER
+            if len(self.buffer) < table + segments:
+                return
+            at = table + segments + sum(self.buffer[table:table + segments])
+            if len(self.buffer) < at:
+                return
+        self.headers = self.buffer[start:at]
+        self.buffer = b""
+
+    def reset(self):
+        """A new encoder is a new stream, and its pages are not these."""
+        self.buffer = b""
+        self.headers = b""
 
 
 async def open_encoder(source, encoding):
@@ -577,6 +636,12 @@ class Encoder:
     def __init__(self, source, process):
         self.source = source
         self.process = process
+        # Noted on the way past rather than held back, because the socket
+        # this feeds may be the recognizer's own, and that one is listening
+        # from the first byte. What needs them kept is a sender, whose
+        # socket does not exist yet when ffmpeg writes them.
+        self.headers = b""
+        self.pages = OggHeaders()
         self.feeding = asyncio.create_task(self._feed())
 
     async def _feed(self):
@@ -605,7 +670,10 @@ class Encoder:
 
     async def read(self):
         """One encoded chunk, or empty bytes when the stream ends."""
-        return await self.process.stdout.read(ENCODED_READ)
+        chunk = await self.process.stdout.read(ENCODED_READ)
+        self.pages.feed(chunk)
+        self.headers = self.pages.headers
+        return chunk
 
     async def close(self):
         self.feeding.cancel()
