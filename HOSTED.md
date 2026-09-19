@@ -1,6 +1,6 @@
 # HOSTED.md
 
-An optional deployment, half built: steps 1 to 3 of the order of work at the end of this file are in the code, and steps 4 and 5 are configuration nobody has written yet.
+An optional deployment, mostly built: steps 1 to 3 of the order of work at the end of this file are in the code, step 4's configuration is in `deploy/`, and step 5 is neither.
 
 The default Transept deployment is the one `SETUP.md` describes: one laptop in the room, running `server.py`, with a Tailscale Funnel in front of it.
 That remains the architecture.
@@ -470,9 +470,14 @@ The gap and attach rules are exactly the kind of state where a check that always
    That setting belongs with the `ffmpeg` encoder, which sits on the machine that captures, and so lands with the sender.
 3. `sender.py`: capture, the loopback operator page, the forwarded controls. Built.
    The shared operator code moved to `controls.py` rather than `operator.py`, and the Opus encoder landed with it, as the sections below now describe.
-4. Deploy one room.
-   VM, domain, Caddy, one systemd unit, `chapel.toml`.
-5. Add a second room, which is a second config file, a second unit, and a second Caddy route.
+4. Deploy one room. Written, in `deploy/`.
+   A VM, a hostname, `deploy/Caddyfile`, `deploy/transept@.service`, and `deploy/room.example.toml` copied into the room's working directory, in the order `deploy/README.md` gives.
+   One room at the root of its own hostname needs none of the path prefix work above: `reader_address` builds `/reader` as it stands, and Caddy sends `/control` to the control port and everything else to the reader port.
+   Both listeners bind loopback and Caddy is the only public surface, so the control socket keeps its token and its `Origin` check and is additionally unreachable except through Caddy, which is a smaller thing to guard than this file assumed.
+   The room's `encoding` is `pcm`, which is not the audio going up uncompressed but this server declining to re-encode what the sender already encoded, so no `ffmpeg` belongs on the rented machine.
+5. Add a second room.
+   A second hostname is a second copy of `room.example.toml`, a second `systemctl enable`, and a second block in the `Caddyfile`, and needs no code.
+   A second room under a path prefix on one hostname needs four things that are not built: `--config` taking more than one file and merging left to right, `port` renamed to `reader_port`, `reader_address` taking a room, and `reader.html` deriving its base from `location.pathname`.
 
 Steps 2 and 3 are the bulk of the code.
-Steps 4 and 5 are configuration, and step 5 is the test of whether a room really is just a process.
+Step 4 is configuration, and step 5 is the test of whether a room really is just a process.

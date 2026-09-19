@@ -1,0 +1,50 @@
+# Caddy in front of one Transept room, for the deployment HOSTED.md
+# describes. Copy to /etc/caddy/Caddyfile, put this room's real hostname in
+# place of transept.example.org, check it with `caddy validate --config
+# /etc/caddy/Caddyfile`, and reload with `systemctl reload caddy`.
+#
+# One room lives at the root of its own hostname, so nothing here strips a
+# path prefix: reader_address builds /reader as it stands, and sender.py
+# dials /control. Sharing one hostname between rooms is what the path
+# prefix work in HOSTED.md is for, and until that work is done a second
+# room wants a second hostname and a second block below.
+
+transept.example.org {
+	# Every request the reader port serves carries the reader token in its
+	# query string, so the log is kept and the token is hashed rather than
+	# written out. The hash is the first four bytes of its SHA-256, which
+	# still tells one card's token from another, so a rotation or a stale
+	# card is visible in the log without the log being a copy of the card.
+	#
+	# `replace token REDACTED` instead drops the value entirely, and
+	# removing the format block logs the address whole. Caddy's own errors
+	# are a different logger and reach the journal either way.
+	log {
+		format filter {
+			wrap console
+			request>uri query {
+				hash token
+			}
+		}
+	}
+
+	# The room laptop's websocket. Caddy upgrades it without being asked
+	# and passes the query string through, which is where sender.dial
+	# puts the control token. This matcher is more specific than the
+	# block below, so it is the one that answers /control.
+	handle /control {
+		reverse_proxy 127.0.0.1:8081
+	}
+
+	# The reader page, the channel list, and the event streams. Caddy
+	# stops buffering a response of its own accord once it sees
+	# text/event-stream, so a subtitle reaches a phone when it is written
+	# rather than when a buffer fills.
+	handle {
+		reverse_proxy 127.0.0.1:8080
+	}
+
+	# No `encode` directive on purpose. Compression buffers, and the event
+	# streams it would buffer are nearly all of this traffic, to save
+	# nothing on a reader page that is one small file.
+}

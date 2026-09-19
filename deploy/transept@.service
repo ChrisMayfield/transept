@@ -1,0 +1,72 @@
+# One room of Transept, as a systemd template. Copy to
+# /etc/systemd/system/transept@.service, then `systemctl enable --now
+# transept@chapel` runs the room whose files are in /srv/transept/chapel.
+#
+# A room is a process: its own working directory, its own config.toml, its
+# own sessions.db, its own ports. Nothing in this file names a room, which
+# is what makes a second room a second `systemctl enable` rather than a
+# second unit to keep in step with this one.
+
+[Unit]
+Description=Transept subtitles for the %i room
+Documentation=https://github.com/ChrisMayfield/transept
+After=network-online.target
+Wants=network-online.target
+# Give up rather than restart forever when the config will not load, so
+# `systemctl status` says failed instead of activating for the rest of the
+# week. Five tries a minute apart is long enough to ride out a provider's
+# network coming up late and short enough to be obvious.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=exec
+User=transept
+Group=transept
+
+# What makes the room. server.py reads config.toml from the directory it
+# starts in, and writes sessions.db and transept.pid there, so the working
+# directory is the whole of a room's separation from its neighbors.
+WorkingDirectory=/srv/transept/%i
+
+# -u for the reason transept.py already runs the server with it: Python
+# block buffers stdout when it is a pipe rather than a terminal, and the
+# journal is a pipe, so without it the startup lines and everything after
+# them wait for the process to exit, which is when they stop being worth
+# having.
+ExecStart=/srv/transept/.venv/bin/python -u /srv/transept/server.py
+
+# The checkout is read-only to this process, so Python cannot write its
+# bytecode cache beside the code. Saying so is quieter than letting it try
+# and fail on every import.
+Environment=PYTHONDONTWRITEBYTECODE=1
+
+Restart=always
+RestartSec=5
+# SIGTERM is what install_stop_handler already listens for, so a stop
+# drains the last lines and lets go of the phones rather than being a kill.
+# The timeout is for hub.close() to finish with the readers still holding
+# an event stream open, which is every meeting.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# The room's own directory is the only thing this process writes.
+NoNewPrivileges=true
+PrivateTmp=true
+# This server opens no sound card. The audio arrives over the control
+# socket from a laptop in the room, which is what backend = "remote" means.
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ReadWritePaths=/srv/transept/%i
+# AF_UNIX because asyncio's signal wakeup is a socketpair, and AF_NETLINK
+# because glibc's getaddrinfo asks the kernel for local interfaces before
+# it resolves Deepgram or the translation provider. Leaving either out
+# breaks the server in a way that looks like something else.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

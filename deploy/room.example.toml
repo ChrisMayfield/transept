@@ -1,0 +1,104 @@
+# One room on a hosted server, for the deployment HOSTED.md describes.
+# Copy to /srv/transept/<room>/config.toml and edit. Ignored by git wherever
+# it lands, because it holds this room's API keys and both of its tokens.
+#
+# Minimal on purpose. Everything left out falls through to the default in
+# the SETTINGS table in pipeline.py, so what is written here is what this
+# room actually differs on and nothing else. config.example.toml is the
+# annotated list of everything that could go here, and the notes at the foot
+# of this file cover the inherited defaults worth knowing about.
+#
+# When --config becomes repeatable, the tuning a congregation shares moves
+# up into /srv/transept/config.toml and this file does not change shape:
+# it is already only the values that are this room's.
+
+[keys]
+# Both keys live here rather than on the operator's laptop, which is most of
+# the point of hosting. A sender's configuration is a room name, a control
+# token, and an address, so setting up a laptop never involves a Deepgram
+# key and there is nothing to keep in step between two machines.
+deepgram_api_key = ""
+llm_base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+llm_api_key = ""
+
+# Pinned rather than minted per run: the room reads from a printed card and
+# the card has to keep working, and the laptop is configured once with the
+# control token. Generate each of them with
+#
+#   python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+reader_token = ""
+control_token = ""
+
+[audio]
+# The whole of what makes this the hosted half, rather than a second setting
+# saying so. No sound card here: the audio arrives over the control socket
+# from sender.py on a laptop in the room, and the server raises the control
+# listener in place of the operator one because of this line.
+backend = "remote"
+
+# Not what it sounds like. "pcm" does not mean the audio reaches the
+# recognizer uncompressed; it means this server never re-encodes. Whatever
+# the sender declared in its hello is what open_encoder hands straight
+# through and what build_asr_url then declares, so an Opus sender stays Opus
+# and a sender with no ffmpeg stays PCM. Leaving this at the default "opus"
+# would put an ffmpeg process on this server that costs latency to save
+# nothing, since Deepgram bills by audio duration rather than by bytes and
+# the leg worth compressing is the laptop's.
+encoding = "pcm"
+
+[translation]
+# Required: there is no default model, and the server exits without one.
+model = "gemini-3.8-flash"
+# Translation does not benefit from deliberation. On models that think by
+# default this roughly halves latency.
+reasoning_effort = "low"
+# Use the glossary to fix recognition errors on the English channel too.
+correct_english = true
+
+[languages]
+# The room's own list. The default is French and Swahili, which is unlikely
+# to be the list this room wants.
+available = [
+    "French",
+    "Spanish",
+    "Swahili",
+]
+
+[server]
+# The hostname Caddy answers on, which is what reader_address builds the
+# card's address from. Not the address this process binds.
+public_url = "https://transept.example.org"
+
+# Written into every recorded session. The same name is the working
+# directory and the systemd instance, so one value names all three and
+# cannot disagree with itself.
+room = "chapel"
+
+# Inherited, and worth knowing before you go looking for them:
+#
+# host is already 127.0.0.1, which is right here. Caddy runs on this machine
+# and should be the only thing reachable from outside it, so both listeners
+# stay on loopback and the firewall wants 80 and 443 and nothing else. What
+# guards the control socket is still its token and the refusal of any
+# handshake carrying an Origin header, not the address it binds to.
+#
+# port is 8080 and control_port is 8081, which is what the Caddyfile
+# forwards to. They only have to be written down once a second room shares
+# this server, because that is when they have to differ between rooms.
+#
+# control_url is read by sender.py rather than by this server, so it belongs
+# in the laptop's config.toml and not here:
+#
+#   control_url = "wss://transept.example.org/control"
+#
+# record is false. Recording happens where Session runs, which is this
+# server, so the transcript would live on rented hardware rather than in the
+# room. That is a decision to make with whoever leads the meeting.
+#
+# control_grace is 30 seconds, which is how long a session outlives its
+# sender's socket, so a blip on the room's wifi costs a gap in the
+# transcript rather than the meeting.
+#
+# idle_stop_minutes is 10, max_readers is 100, and max_active is 0, which
+# means no cap on languages: showing English to a real reader is worse than
+# the tokens a cap would save.
