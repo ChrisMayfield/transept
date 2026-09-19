@@ -107,6 +107,10 @@ SETTINGS = [
     ("operator_port", "server", "operator_port", int, 8081),
     ("max_readers", "server", "max_readers", int, 100),
     ("public_url", "server", "public_url", str, ""),
+    # Beside public_url because the two compose into a room's address once
+    # several rooms share one server. Empty for a single room, which is
+    # every deployment today.
+    ("room", "server", "room", str, ""),
 ]
 
 
@@ -481,6 +485,7 @@ ARGUMENT_HELP = {
     "operator_port": "port for the operator controls, always loopback",
     "max_readers": "most readers to serve at once, 0 for no cap",
     "public_url": "the address readers use, for the QR code",
+    "room": "name of this room, kept with each recorded session",
 }
 
 

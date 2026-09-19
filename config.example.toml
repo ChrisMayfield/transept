@@ -130,3 +130,8 @@ max_readers = 100
 # address above. The operator page shows this as a QR code people can point a
 # camera at. Leave empty before a tunnel is set up.
 public_url = "https://chapel.your-tailnet.ts.net/"
+
+# A name for this room, written into each recorded session so a transcript
+# still says where it was said once several rooms' recordings are read
+# together. Leave empty when this machine serves the only room.
+room = ""

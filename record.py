@@ -38,7 +38,10 @@ CREATE TABLE IF NOT EXISTS sessions (
   started_at REAL, ended_at REAL,
   device TEXT, asr_model TEXT, model TEXT, languages TEXT,
   correct_english INTEGER, settings TEXT,
-  glossary TEXT, keyterms TEXT, prompt_hash TEXT);
+  glossary TEXT, keyterms TEXT, prompt_hash TEXT,
+  -- Last, which is where ALTER TABLE puts it on a database made before
+  -- this column existed, so both ways of arriving here agree.
+  room TEXT);
 
 CREATE TABLE IF NOT EXISTS lines (
   id INTEGER PRIMARY KEY,
@@ -79,7 +82,21 @@ def connect(path):
     # cut and not worth losing to a crash, which is exactly this setting.
     handle.execute("PRAGMA synchronous=NORMAL")
     handle.executescript(SCHEMA)
+    migrate(handle)
     return handle
+
+
+def migrate(handle):
+    """Add columns a database from an earlier version does not have.
+
+    SCHEMA is all CREATE TABLE IF NOT EXISTS, so a file that already exists
+    keeps the columns it was made with and gains nothing on its own. Adding
+    one to the end is something sqlite does without rewriting the table.
+    """
+    present = {row[1] for row in
+               handle.execute("PRAGMA table_info(sessions)")}
+    if "room" not in present:
+        handle.execute("ALTER TABLE sessions ADD COLUMN room TEXT")
 
 
 class Recorder:
@@ -114,7 +131,7 @@ class Recorder:
             cursor = self.handle.execute(
                 "INSERT INTO sessions (started_at, device, asr_model, model,"
                 " languages, correct_english, settings, glossary, keyterms,"
-                " prompt_hash) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                " prompt_hash, room) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 header)
             self.session_id = cursor.lastrowid
         except Exception as exc:
@@ -243,6 +260,18 @@ def sessions(handle):
         "SELECT * FROM sessions ORDER BY started_at").fetchall()
 
 
+def room_of(session):
+    """Which room a session was recorded in, or "" if it does not say.
+
+    A recording made before the room column existed has no column at all
+    rather than a NULL, because reading a session back must not write to
+    the file it is reading and so does not migrate it.
+    """
+    if "room" not in session.keys():
+        return ""
+    return session["room"] or ""
+
+
 def resolve_session(handle, which):
     rows = sessions(handle)
     if not rows:
@@ -315,8 +344,9 @@ def write_report(handle, session, out):
     languages = json.loads(session["languages"] or "[]")
 
     with open(out, "w", encoding="utf-8") as page:
-        page.write(f"# Session {session['id']}, {stamp(session['started_at'])}"
-                   "\n\n")
+        room = room_of(session)
+        page.write(f"# Session {session['id']}, {room + ', ' if room else ''}"
+                   f"{stamp(session['started_at'])}\n\n")
         minutes = ((session["ended_at"] or session["started_at"])
                    - session["started_at"]) / 60
         page.write(f"{len(lines)} sentences over {minutes:.0f} minutes. "

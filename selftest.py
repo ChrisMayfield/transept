@@ -30,6 +30,7 @@ import io
 import json
 import os
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -206,7 +207,7 @@ def fake_config(**overrides):
         "endpointing": 400, "keyterms": ["Kalema"], "glossary": "",
         "model": "fake-model", "max_tokens": 2000, "timeout": 15.0,
         "reasoning_effort": "low", "idle_stop": 0, "public_url": "",
-        "reader_url": "", "max_languages": 0,
+        "reader_url": "", "max_languages": 0, "room": "",
         "deepgram_key": "fake", "llm_key": "fake",
         "llm_base": "http://invalid/v1",
     }
@@ -1269,6 +1270,7 @@ async def check_store(checks):
                                 ["English", "French"])
     session.config["record"] = True
     session.config["database"] = str(path)
+    session.config["room"] = "chapel"
     session.started_at = time.time()
     session.run = 1
     session.run_started = time.monotonic()
@@ -1305,6 +1307,48 @@ async def check_store(checks):
     checks.check("Swahili had no reader, so nothing was recorded for it",
                  all(row["language"] != "Swahili"
                      for rows in grouped.values() for row in rows), grouped)
+    recorded = record.resolve_session(handle, "last")
+    checks.check("the room was written down with the session",
+                 record.room_of(recorded) == "chapel", dict(recorded))
+    report = Path(tempfile.mkdtemp()) / "chapel.md"
+    record.write_report(handle, recorded, str(report))
+    heading = report.read_text(encoding="utf-8").splitlines()[0]
+    checks.check("and the document read back afterwards names it",
+                 heading.startswith("# Session 1, chapel, "), heading)
+    handle.close()
+
+    checks.section("A recording made before the room column existed")
+    path = Path(tempfile.mkdtemp()) / "earlier.db"
+    earlier = sqlite3.connect(str(path))
+    earlier.execute(
+        "CREATE TABLE sessions (id INTEGER PRIMARY KEY, started_at REAL,"
+        " ended_at REAL, device TEXT, asr_model TEXT, model TEXT,"
+        " languages TEXT, correct_english INTEGER, settings TEXT,"
+        " glossary TEXT, keyterms TEXT, prompt_hash TEXT)")
+    # The rest of the file as it is today: only sessions differs, which is
+    # what a database recorded by an earlier version actually looks like.
+    earlier.executescript(record.SCHEMA)
+    earlier.execute("INSERT INTO sessions (started_at, device) VALUES (?,?)",
+                    (time.time(), "a microphone from last year"))
+    earlier.commit()
+    earlier.close()
+
+    handle = record.open_read_only(str(path))
+    old_session = record.resolve_session(handle, "last")
+    checks.check("reading it back says no room rather than raising",
+                 record.room_of(old_session) == "", dict(old_session))
+    record.write_report(handle, old_session,
+                        str(Path(tempfile.mkdtemp()) / "earlier.md"))
+    handle.close()
+
+    handle = record.connect(str(path))
+    columns = [row[1] for row in handle.execute("PRAGMA table_info(sessions)")]
+    checks.check("opening it to record gains the column",
+                 "room" in columns, columns)
+    kept = [row[0] for row in
+            handle.execute("SELECT device FROM sessions")]
+    checks.check("and the session already in the file is still there",
+                 kept == ["a microphone from last year"], kept)
     handle.close()
 
     checks.section("English is corrected for the record even with no reader")

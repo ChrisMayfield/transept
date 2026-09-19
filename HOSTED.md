@@ -430,8 +430,8 @@ The gap and attach rules are exactly the kind of state where a check that always
 
 ## Order of work
 
-1. The `room` setting, the `room` column, and its migration.
-   This depends on nothing else here and is worth landing on its own, so that recording carries the name from the first hosted meeting rather than from the second.
+1. The `room` setting, the `room` column, and its migration. Built.
+   This depended on nothing else here and was worth landing on its own, so that recording carries the name from the first hosted meeting rather than from the second.
 2. `RemoteCapture` and the control socket, with a throwaway Python client.
    Testable on a single laptop, loopback to loopback, before anything is rented.
 3. `sender.py`: capture, the loopback operator page, the forwarded controls.

@@ -318,6 +318,11 @@ class Session:
             # that produced these lines.
             config["glossary"], json.dumps(config["keyterms"]),
             hashlib.sha256(SYSTEM_PROMPT.encode()).hexdigest()[:12],
+            # The setting rather than the name of the directory this runs
+            # in, although the two usually match. A WorkingDirectory edited
+            # in a unit file, or a run started from somewhere else, would
+            # otherwise silently relabel a room's recorded meetings.
+            config.get("room", ""),
         )
         recorder = record.Recorder(config.get("database") or "sessions.db")
         error = await recorder.open(header)
@@ -1049,7 +1054,7 @@ def main():
         "languages", "grace", "max_languages",
         "glossary", "keyterms",
         "idle_stop", "record", "database",
-        "host", "port", "operator_port", "max_readers",
+        "host", "port", "operator_port", "max_readers", "room",
     ])
     args = parser.parse_args()
 
