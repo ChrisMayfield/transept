@@ -76,6 +76,8 @@ It is `controls.py` and not `operator.py` because `operator` is a standard libra
 `sender.py` is the room's laptop for a hosted server: capture, one websocket, and a proxy of `Session`'s four methods that forwards over it.
 It runs no `Segmenter`, no `Translator`, and no `publish`, so it is a pipe rather than a second pipeline.
 It does not reuse `pump_audio`, and the reason is not the message that loop sends on the way out: `pump_audio` ends when its device does, which is right for a pipeline owning its socket end to end, while `Remote.pump` outlives both the socket and the microphone, because the microphone stays open across a reconnect and the socket comes and goes under it.
+The address it dials is not a setting: `control_address` composes it from `public_url` and `room`, which is the same pair and the same path prefix `reader_address` composes the card's address from, with `wss` for `https` and `/control` on the end.
+A setting holding that address outright would be a second copy of the hostname and of the room name, and the copy is what disagrees the week a room is renamed.
 
 `review.py` is an offline tool sharing `Translator` and the prompt, differing only in retry policy: the live pipeline gets one fast retry because a meeting cannot wait, while review retries harder because nothing is waiting on the answer.
 

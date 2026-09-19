@@ -295,7 +295,7 @@ public_url = "https://transept.example.org/"
 
 `reader_address` takes the room as well as the base and the token, and includes the segment only when a room is named.
 That the room name is also the path prefix is deliberate.
-One value then names the working directory, the Caddy route, the recorded column, and the address, instead of four values that can disagree.
+One value then names the working directory, the Caddy route, the recorded column, the address on the card, and the control socket the room's laptop dials, instead of five values that can disagree.
 
 Which room it is handed is `card_room`, and the answer is the room only where `capture` is `remote`.
 The prefix exists because something in front strips it, that something is Caddy, and Caddy is in front of a hosted room, which is the same thing the backend already says: the audio arrives from a laptop because the server is somewhere else.
@@ -323,7 +323,7 @@ Each room records into its own working directory, so `record.py --session last` 
 The reason is export: several databases will eventually be read as one data set, and a room name added at that point is a name reconstructed from a file path rather than one the recorder wrote down.
 `lines` and `translations` need nothing, because they reach the room through `session_id`.
 
-The setting sits in `[server]` beside `public_url`, because the two compose into the room's address, and recording is not its only reader.
+The setting sits in `[server]` beside `public_url`, because the two compose into the room's addresses, and recording is not its only reader.
 
 The name is a setting rather than the working directory's name.
 Deriving it is tempting, since the pid file and the database already come from the directory, but those are places files go and this is a value written into a row that outlives the directory.
@@ -424,12 +424,12 @@ Each row joins `SETTINGS`, `ARGUMENT_HELP`, and `config.example.toml` at the sam
 ("reader_port",   "server",  "reader_port",   int,   8080)    renamed from port
 ("control_port",  "server",  "control_port",  int,   8081)
 ("control_grace", "server",  "control_grace", float, 30.0)
-("control_url",   "server",  "control_url",   str,   "")
 ```
 
-`control_url` was not in the original list and is the sender's third setting, beside `room` and `control_token`: the whole address of a room's control socket, path and all, because a hosted room lives under a path prefix of its own.
-It is a setting rather than a flag-only argument for the reason the tokens are pinned, which is that a sender is configured once and has to keep working.
-Only `sender.py` reads it, and a room's server ignores it.
+The address a sender dials is not among them.
+It is built by `sender.control_address` from `public_url` and `room`, the same two values and the same path prefix that `server.reader_address` composes into the address on the card, with `wss` for `https` and `/control` on the end.
+A setting holding the whole address would be a third copy of the hostname and a second copy of the room, and the copy is what disagrees the week a room is renamed.
+So the room's half of a hosted deployment names `public_url` and `room` where it used to name the socket outright.
 
 `control_grace` is spelled out rather than called `grace`, because `[languages] grace` already means how long a language survives its last reader, and the two are unrelated.
 

@@ -1095,7 +1095,8 @@ async def control(request):
         "type": "ready",
         "room": room.config.get("room", ""),
         # The address on the card, which this server knows and the sender
-        # does not: it holds no reader token and no public_url.
+        # does not: the token half of it is minted here, and a sender that
+        # held one would be holding a key to a room it never reads.
         "reader_url": room.config.get("reader_url", ""),
         "languages": room.config["languages"],
         "state": room.session.state,

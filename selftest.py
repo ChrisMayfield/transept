@@ -1111,6 +1111,34 @@ async def check_sender_proxy(checks):
         capture.open_capture = original
         await remote.release()
 
+    checks.section("The address this sender dials")
+    # Built from public_url and the room rather than configured outright,
+    # so the hostname and the room name are each written down once.
+    checks.check("the control address is the room's prefix and /control",
+                 sender.control_address("https://transept.example/", "chapel")
+                 == "wss://transept.example/chapel/control",
+                 sender.control_address("https://transept.example/",
+                                        "chapel"))
+    checks.check("however the room and the base are punctuated",
+                 sender.control_address("https://transept.example",
+                                        "/chapel/")
+                 == "wss://transept.example/chapel/control")
+    # One room at the root of a hostname, which is what a deployment looks
+    # like before a second room joins it.
+    checks.check("an unnamed room dials the root",
+                 sender.control_address("https://chapel.example/", "")
+                 == "wss://chapel.example/control")
+    # The scheme a phone opens the page with is the one the proxy
+    # terminates, so the socket follows it rather than being spelled out.
+    checks.check("a plain http server is dialed as ws",
+                 sender.control_address("http://127.0.0.1:8080/", "chapel")
+                 == "ws://127.0.0.1:8080/chapel/control")
+    # Rather than dialing "/control" on nowhere, which the sender would
+    # report as a server refusing it rather than as a setting nobody filled
+    # in, and would go on reporting once a backoff for the rest of the hour.
+    checks.check("no public_url means no address at all",
+                 sender.control_address("", "chapel") == "")
+
 
 # -- the running server ------------------------------------------------------
 

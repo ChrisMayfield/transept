@@ -150,11 +150,6 @@ control_port = 8081
 # meeting.
 control_grace = 30
 
-# The other end of that port, read by sender.py rather than by the server:
-# the whole address of the room's control socket on the hosted server, path
-# and all. Only sender.py reads it, and a room's server ignores it.
-control_url = ""
-
 # Most readers to serve at once, 0 for no cap. Every reader costs a queue,
 # a socket, and a write on every published line, and the reader link can
 # travel further than the room the link was handed out in. A cap of 100 is
@@ -165,12 +160,16 @@ max_readers = 100
 # The address readers actually use, which is your tunnel's hostname, not the
 # address above. The operator page shows this as a QR code people can point a
 # camera at. Leave empty before a tunnel is set up.
+#
+# On the laptop of a hosted room, this is the hosted server's hostname, and
+# it is what sender.py dials: the control socket is the same address with
+# the room's prefix and /control on the end, wss for https.
 public_url = "https://chapel.your-tailnet.ts.net/"
 
 # A name for this room, written into each recorded session so a transcript
 # still says where it was said once several rooms' recordings are read
 # together. Safe to name on any machine: it becomes a path segment in the
-# address above only where backend is "remote", which is the hosted
+# addresses above only where backend is "remote", which is the hosted
 # deployment in HOSTED.md, where a proxy in front strips that prefix to
 # tell rooms sharing one hostname apart. A laptop behind a tunnel serves
 # the root and keeps the address it always built.

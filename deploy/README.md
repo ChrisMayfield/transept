@@ -150,7 +150,7 @@ ROOM=https://transept.example.org/chapel
 READER=...      # reader_token from the room's config
 CONTROL=...     # control_token from the room's config
 
-curl -sI https://transept.example.org/            # 404, the bot that finds it
+curl -sI $ROOM                                    # 404, the bot that finds it
 curl -s  $ROOM/api/channels                       # 403, no token
 curl -s  "$ROOM/api/channels?token=$READER"       # the language list
 curl -s  -H "Origin: https://example.com" \
@@ -200,14 +200,15 @@ backend = "auto"
 encoding = "opus"         # the leg worth compressing is this one
 
 [server]
-control_url = "wss://transept.example.org/chapel/control"
+public_url = "https://transept.example.org/"
 room = "chapel"
 ```
 
-The room's name is in `control_url` because a hosted room lives under a path prefix, and a laptop dialing the wrong prefix reaches the wrong room, which refuses it: a sender says which room it is in its hello, and a room takes one sender.
+The address the laptop dials is built from those two, the same way the address on the card is: `wss://transept.example.org/chapel/control`.
+The room's name is in it because a hosted room lives under a path prefix, and a laptop dialing the wrong prefix reaches the wrong room, which refuses it: a sender says which room it is in its hello, and a room takes one sender.
 
 Then `python3 sender.py`, which prints the operator address on loopback and connects.
-The address to hand the room appears on that page once the sender has reached the server, because the server is what holds the reader token and `public_url`.
+The address to hand the room appears on that page once the sender has reached the server, because the server is what holds the reader token.
 
 ## When it goes wrong
 
@@ -238,6 +239,6 @@ A room deployed when this file described one room at the root of a hostname need
 
 - Split its `config.toml`, leaving the keys, the model, the backend, the languages, and `public_url` in `/srv/transept/config.toml` and keeping the tokens, the ports, and `room` in the room's own, then copy `transept@.service` over the old unit for its two `--config` arguments and `systemctl daemon-reload`.
 - Wrap the `Caddyfile`'s two `handle` blocks in `handle_path /chapel/*`, and reload Caddy.
-- Put `/chapel` into the laptop's `control_url`.
+- Give the laptop `public_url` and `room`, which is what it now builds its control address from.
 
 The address on the card changes with them, so reprint it, and `port` in any config file is now `reader_port`.

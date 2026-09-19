@@ -20,7 +20,7 @@ same page against in the default deployment.
 Three settings and one key, in the same config.toml as everything else:
 
     [audio]   backend, encoding
-    [server]  control_url, room, operator_port
+    [server]  public_url, room, operator_port
     [keys]    control_token
 
 There is no Deepgram key and no translation key on this machine. Those
@@ -101,8 +101,8 @@ class Remote:
     def __init__(self, config, room, encoding):
         # The page reads two things off a config: which backend to list
         # devices from, and the reader address for the QR code. The second
-        # arrives from the server when the socket opens, because a sender
-        # holds neither the reader token nor public_url.
+        # arrives from the server when the socket opens, because the token
+        # on the end of it is minted there and never travels this way.
         self.config = config
         self.room = room
         # What to ask the encoder for. What it actually produces is what
@@ -484,6 +484,31 @@ async def supervise(remote, url):
 # -- entry point -------------------------------------------------------------
 
 
+def control_address(base, room):
+    """The whole address this sender dials, built the way the card is.
+
+    public_url and room are the two values a hosted room already has, and
+    they compose the same way here as in server.reader_address: the room
+    is a path segment because the proxy in front strips that prefix to
+    tell rooms sharing one hostname apart. A setting holding the address
+    outright would be a third copy of the hostname and a second copy of
+    the room, and a copy is what disagrees the week a room is renamed or a
+    hostname moves.
+
+    https becomes wss and http becomes ws, because the scheme a phone
+    opens the page with is the scheme the proxy terminates.
+    """
+    if not base:
+        return ""
+    base = base.rstrip("/")
+    for web, socket in (("https://", "wss://"), ("http://", "ws://")):
+        if base.startswith(web):
+            base = socket + base[len(web):]
+            break
+    prefix = "/" + room.strip("/") if room.strip("/") else ""
+    return f"{base}{prefix}/control"
+
+
 def dial(url, token):
     """The control address with this sender's token on it.
 
@@ -533,7 +558,7 @@ def main():
                              "then a room's own")
     add_settings_arguments(parser, [
         "capture", "encoding",
-        "control_url", "room",
+        "public_url", "room",
         "operator_port",
     ])
     args = parser.parse_args()
@@ -545,10 +570,11 @@ def main():
     parsed = load_config(*(args.config or []))
     settings = resolve(args, parsed)
     keys = load_keys(parsed)
-    if not settings["control_url"]:
-        sys.exit("No server to send to. Set control_url under [server] in "
-                 "config.toml, for example\n"
-                 "control_url = \"wss://transept.example.org/chapel/control\"")
+    control_url = control_address(settings["public_url"], settings["room"])
+    if not control_url:
+        sys.exit("No server to send to. Set public_url under [server] in "
+                 "config.toml to the hosted\nserver's address, for example\n"
+                 "public_url = \"https://transept.example.org/\"")
     if not keys["control_token"]:
         sys.exit("Set control_token under [keys] in config.toml. It is what "
                  "the server knows\nthis room by, and it is the same token "
@@ -563,15 +589,13 @@ def main():
     token = mint_token(keys["operator_token"])
     remote = Remote({"capture": settings["capture"], "reader_url": ""},
                     settings["room"], settings["encoding"])
-    room = f" as {settings['room']}" if settings["room"] else ""
     print(f"Operator: http://{OPERATOR_HOST}:{settings['operator_port']}"
           f"/operator?token={token}")
-    print(f"Sending:  {settings['control_url']}{room}")
+    print(f"Sending:  {control_url}")
     print("The address to hand the room is the server's, and it appears on "
           "the page\nabove once this sender has reached it.")
     try:
-        asyncio.run(run(remote, dial(settings["control_url"],
-                                     keys["control_token"]),
+        asyncio.run(run(remote, dial(control_url, keys["control_token"]),
                         token, settings))
     except KeyboardInterrupt:
         pass

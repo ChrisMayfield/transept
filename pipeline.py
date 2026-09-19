@@ -118,15 +118,12 @@ SETTINGS = [
     # laptop's wifi to come back, short enough that a sender that went
     # home does not leave a meeting running.
     ("control_grace", "server", "control_grace", float, 30.0),
-    # The other end of that port, read by sender.py rather than by the
-    # server: the whole address of a room's control socket, path and all,
-    # because a hosted room lives under a path prefix of its own.
-    ("control_url", "server", "control_url", str, ""),
     ("max_readers", "server", "max_readers", int, 100),
     ("public_url", "server", "public_url", str, ""),
-    # Beside public_url because the two compose into a room's address once
-    # several rooms share one server. Empty for a single room, which is
-    # every deployment today.
+    # Beside public_url because the two compose into a room's addresses
+    # once several rooms share one server: the one a phone opens and the
+    # one a sender dials. Empty for a single room, which is every
+    # deployment today.
     ("room", "server", "room", str, ""),
 ]
 
@@ -734,9 +731,9 @@ ARGUMENT_HELP = {
     "operator_port": "port for the operator controls, always loopback",
     "control_port": "port a remote sender connects to",
     "control_grace": "seconds a session outlives its sender's socket",
-    "control_url": "the room's control socket, for sender.py to dial",
     "max_readers": "most readers to serve at once, 0 for no cap",
-    "public_url": "the address readers use, for the QR code",
+    "public_url": "the address this room is reachable at, for the QR "
+                  "code and for the sender to dial",
     "room": "name of this room, kept with each recorded session",
 }
 
