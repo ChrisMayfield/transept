@@ -1,12 +1,14 @@
 # HOSTED.md
 
-An optional deployment, built: steps 1 to 3 and 5 of the order of work at the end of this file are in the code, and step 4's configuration, along with what a second room adds to it, is in `deploy/`.
+This is the design record for an optional deployment that is built, deployed, and running: why it exists, what shape it has, and which alternatives were turned down.
+Nothing here is a plan waiting to be carried out.
+To set a server up, follow [`deploy/README.md`](deploy/README.md), which has the steps for the machine, for each room on it, and for the laptop in the room.
 
-The default Transept deployment is the one `SETUP.md` describes: one laptop in the room, running `server.py`, with a Tailscale Funnel in front of it.
+The default is the self-hosted mode `SETUP.md` describes: one laptop in the room, running `server.py`, with a Tailscale Funnel in front of it.
 That remains the architecture.
 It needs no server to rent, no domain, and no third party holding a transcript, and for a room whose network behaves it is the better answer.
 
-This file describes what to do when the room's network does not behave.
+This file is the third-party hosted mode, which is the answer when the room's network does not behave.
 It moves recognition and translation onto a small rented server, leaves audio capture on a laptop in the room, and serves several rooms at once from that server.
 Nothing here replaces the default: it adds a capture backend and a second way to run the same `server.py`.
 
@@ -103,9 +105,7 @@ control_token = "..."
 ```
 
 The ports must differ because the rooms run on the same rented server.
-`port` is renamed to `reader_port` along the way, since three ports called `port`, `operator_port`, and `control_port` invite exactly the mistake the rename removes, and because it then matches `reader_token`.
-The rename reaches `SETTINGS`, `ARGUMENT_HELP`, `config.example.toml`, the `--port` flag, the two reads in `transept.py`, and the key `write_pid_file` records.
-A `transept.pid` written before the rename names a reader port under a key the script no longer reads, and is still a server it can stop, because the operator port beside it answers and `server_record` asks whether either does.
+The reader's is `reader_port` rather than `port`, since three ports called `port`, `operator_port`, and `control_port` invite exactly the mistake that name removes, and because it then matches `reader_token`.
 The two tokens must differ because per-room tokens are the whole access boundary.
 The room name must differ because it is what tells the rooms apart.
 
@@ -113,7 +113,7 @@ Everything else can be inherited and usually should be.
 `deepgram_api_key` and `llm_api_key` may be overridden per room when spend is worth separating, which is an option rather than a requirement.
 `languages`, `glossary`, and `keyterms` are the same for one congregation meeting in two rooms, so they belong in the shared file until a room genuinely differs.
 
-The shared file holds the rest: `capture`, `host`, `public_url`, `model`, `llm_base_url`, `ceiling`, `gap`, `hold`, `timeout`, and the tuning generally.
+The shared file holds the rest: `backend`, `host`, `public_url`, `model`, `llm_base_url`, `ceiling`, `gap`, `hold`, `timeout`, and the tuning generally.
 `CLAUDE.md` calls changing the translation provider the change most likely to be made in a hurry, and that change should not be one edit per room.
 
 `SECRETS`, its environment variable column, and the `selftest.py` assertion that the table and `config.example.toml` agree are all unchanged, because each file in the merge is an ordinary config file.
@@ -154,14 +154,15 @@ Keeping capture in Python also keeps the operator page on loopback, which is wha
 `RemoteCapture.read()` awaits the next chunk that arrived over the room's control socket, and returns the same 16 kHz mono signed 16-bit chunks the other two backends return.
 Everything downstream is untouched: `Segmenter`, `Translator`, `Hub`, the sinks, `publish`, the reader page.
 
-`capture = "remote"` is also what tells `server.py` it is the hosted half, rather than a second setting saying so.
+`backend = "remote"` is also what tells `server.py` it is the hosted half, rather than a second setting saying so.
 A separate `mode` row could be changed without the backend being changed to match, leaving a server that opens a local sound card while waiting for a sender to connect, or one that waits for audio a local device is already producing.
 
 ### A socket gap is not end of stream
 
 `pump_audio` treats an empty chunk as end of stream, which is right for a capture device that died and wrong for a wifi blip.
 `RemoteCapture.read()` holds through a gap up to a grace period instead of returning empty bytes, and the pump sends Deepgram a `KeepAlive` during the gap rather than silence, so the socket stays open without billing for an empty room.
-Past the grace period the session stops and the supervisor behaves as it does now.
+Past the grace period the session stops and the supervisor behaves as it does for a local device.
+The setting is `control_grace` spelled out rather than `grace`, because `[languages] grace` already means how long a language survives its last reader, and the two are unrelated.
 
 Only one control socket per room at a time.
 A second is refused while the first is inside its grace window, because the alternative is a stray laptop silently taking over a running session.
@@ -244,9 +245,9 @@ error     text, for a start that failed
 
 ## Listeners and tokens
 
-The server keeps two listeners, as it does now, and which pair it builds follows from the capture backend.
+The server keeps two listeners, and which pair it builds follows from the capture backend.
 
-Local, which is the default deployment and unchanged:
+Local, which is the self-hosted mode:
 
 ```
 reader     host:reader_port          reader_token     the pages and streams
@@ -260,14 +261,14 @@ reader     host:reader_port          reader_token     the pages and streams
 control    host:control_port         control_token    WS /control, one route
 ```
 
-`control_port` is a new `SETTINGS` row, defaulting to 8081, rather than a number written into the code.
-It joins `SETTINGS`, `ARGUMENT_HELP`, and `config.example.toml` in the same position in each, since `selftest.py` fails on drift between the first and the last.
+`control_port` is a `SETTINGS` row defaulting to 8081, rather than a number written into the code.
 
 `OPERATOR_HOST` stays `127.0.0.1` and stays applied to `build_operator_app`, which the hosted server never builds, so the rule that a tunnel cannot be pointed at the operator page is unchanged.
 
 The control application is governed separately, because it has a different problem to solve.
-It has to bind publicly, since the sender that reaches it is in another building, and what guards it is `control_token` and the `Origin` check rather than the address it binds to.
+What guards it is `control_token` and the `Origin` check rather than the address it binds to, since the sender that reaches it is in another building.
 It serves no page and exactly one websocket route, which is what keeps that a small thing to guard.
+As deployed it is a smaller thing still: both listeners bind loopback and Caddy is the only public surface, so the token and the `Origin` check are what stands between a leaked token and the socket, and unreachability is a second layer this file did not assume.
 
 Three tokens, with three jobs:
 
@@ -275,8 +276,6 @@ Three tokens, with three jobs:
 - `control_token`, per room, in the server's config and in that room's sender config, authenticating the sender to the server.
 - `operator_token`, minted per run by the sender, gating the loopback operator page.
   Its reason survives hosting: it stops a page in another tab of the operator's browser from posting a cross-origin form at the loopback port.
-
-The control socket's handshake is gated on `control_token` and additionally checks `Origin`.
 
 ## URLs
 
@@ -297,7 +296,7 @@ public_url = "https://transept.example.org/"
 That the room name is also the path prefix is deliberate.
 One value then names the working directory, the Caddy route, the recorded column, the address on the card, and the control socket the room's laptop dials, instead of five values that can disagree.
 
-Which room it is handed is `card_room`, and the answer is the room only where `capture` is `remote`.
+Which room it is handed is `card_room`, and the answer is the room only where the capture backend is `remote`.
 The prefix exists because something in front strips it, that something is Caddy, and Caddy is in front of a hosted room, which is the same thing the backend already says: the audio arrives from a laptop because the server is somewhere else.
 The alternative, a room name that is always a prefix, breaks a laptop that names its room for the recorded transcript, since a funnel serves the root and the card would point at a path nothing answers.
 A card that 404s is exactly the kind of failure this project would rather not ship, and the rule that avoids it is the one already used to decide which listener a server raises.
@@ -343,7 +342,7 @@ The difference between sensible US regions is tens of milliseconds, against the 
 `sessions.db` needs a volume that survives redeploys if recording is on.
 
 `transept.py` and `transept.log` are unchanged and are not deleted.
-They are the default deployment's weekly command, and a room whose network behaves should keep using them.
+They are the self-hosted mode's weekly command, and a room whose network behaves should keep using them.
 On the rented server a systemd unit takes their place, which is the form `CLAUDE.md` already says `server.py` must stay runnable in.
 
 ## Bandwidth and compression
@@ -413,78 +412,3 @@ Demand-driven translation is unchanged and matters more hosted, since the reader
 
 Per-room keys are for attribution, not containment.
 `Session.stats` and the recorded elapsed times already give per-room counts; separate keys are what makes Deepgram's own minute totals line up with a room without arithmetic.
-
-## New settings and secrets
-
-Each row joins `SETTINGS`, `ARGUMENT_HELP`, and `config.example.toml` at the same position in all three, since `selftest.py` fails on drift between the first and the last.
-
-```
-("encoding",      "audio",   "encoding",      str,   "opus")
-("room",          "server",  "room",          str,   "")
-("reader_port",   "server",  "reader_port",   int,   8080)    renamed from port
-("control_port",  "server",  "control_port",  int,   8081)
-("control_grace", "server",  "control_grace", float, 30.0)
-```
-
-The address a sender dials is not among them.
-It is built by `sender.control_address` from `public_url` and `room`, the same two values and the same path prefix that `server.reader_address` composes into the address on the card, with `wss` for `https` and `/control` on the end.
-A setting holding the whole address would be a third copy of the hostname and a second copy of the room, and the copy is what disagrees the week a room is renamed.
-So the room's half of a hosted deployment names `public_url` and `room` where it used to name the socket outright.
-
-`control_grace` is spelled out rather than called `grace`, because `[languages] grace` already means how long a language survives its last reader, and the two are unrelated.
-
-One new `SECRETS` row, whose third column is the second in capitals as the table requires:
-
-```
-("control_token", "control_token", "CONTROL_TOKEN")
-```
-
-`room`, `reader_port`, `control_port`, and `encoding` are worth naming in `server.py`'s `add_settings_arguments` call so they can be overridden for a one-off.
-`control_token` is not a `SETTINGS` row and so gets no flag, for the reason the other tokens do not: a secret on a command line lands in the process list and in shell history.
-
-## Checks to add
-
-`selftest.py` stays the whole suite, needing no keys, no audio device, and no network.
-The first four belong in `pipeline`, the next three in `session`, the room column in `store`, and the last two in `server`.
-A `sender` section is still not worth adding: the sender's checks sit in `session` for what the proxy decides on its own, and in `server` for what it and a real server have to agree on.
-
-- `RemoteCapture` through the pipeline: a fake socket feeding chunks produces units, in the shape `FakeSocket` and `FakeSource` already use. Added.
-- A socket gap: the session survives a drop inside the grace window, `KeepAlive` goes out during it, and the session stops once the window passes. Added.
-- A second control socket is refused while the first is live, and an attaching socket rejoins the running session instead of starting a second one. Added.
-- The control application serves no route but `/control`, so a control token opens nothing a reader token should not, and the reader application still serves nothing that writes. Added.
-- `reader.html` resolves its stream and channel URLs under a path prefix as well as at the root, and builds no address that goes around that base. Added.
-- A database created before the room column gains it on open, and the recorded room survives a round trip through `record.py`. Added.
-- Config files merge left to right, and a room file's value beats the shared file's while the rest of that section survives beside it. Added.
-- A missing encoder falls back to PCM, and the Deepgram URL declares the encoding actually being sent. Added.
-
-Three more came with the sender, because they are the state where the two halves can disagree.
-
-- The sender answers the operator page in full before any server has spoken to it, checked against a real `Session.status()` rather than against the sender's own table.
-- A stopped status just after Start is the session that had not begun yet, and a stopped status later is a session that ended without being asked, which closes the microphone here.
-- A chunk captured on the laptop arrives at the source the recognizer reads, with the server holding the encoding the sender declared.
-
-Each needs the revert test: add the check, undo the fix, confirm the check fails.
-The gap and attach rules are exactly the kind of state where a check that always passes is easy to write by accident, and so is the shape of a status: a table checked against itself cannot fail, which is how the first version of that check was written.
-
-## Order of work
-
-1. The `room` setting, the `room` column, and its migration. Built.
-   This depended on nothing else here and was worth landing on its own, so that recording carries the name from the first hosted meeting rather than from the second.
-2. `RemoteCapture` and the control socket, with a throwaway Python client. Built.
-   Tested on a single laptop, loopback to loopback, before anything was rented.
-   The encoder is not part of it: nothing yet produces Opus, so there is no `encoding` setting, and a sender that declares `opus` in its hello gets a recognizer URL built for it and nothing else.
-   That setting belongs with the `ffmpeg` encoder, which sits on the machine that captures, and so lands with the sender.
-3. `sender.py`: capture, the loopback operator page, the forwarded controls. Built.
-   The shared operator code moved to `controls.py` rather than `operator.py`, and the Opus encoder landed with it, as the sections below now describe.
-4. Deploy one room. Written, in `deploy/`.
-   A VM, a hostname, `deploy/Caddyfile`, `deploy/transept@.service`, `config.example.toml` copied to the root of the checkout as the shared file, and `deploy/room.example.toml` copied into the room's working directory, in the order `deploy/README.md` gives.
-   Both listeners bind loopback and Caddy is the only public surface, so the control socket keeps its token and its `Origin` check and is additionally unreachable except through Caddy, which is a smaller thing to guard than this file assumed.
-   The room's `encoding` is `pcm`, which is not the audio going up uncompressed but this server declining to re-encode what the sender already encoded, so no `ffmpeg` belongs on the rented machine.
-   The first room was deployed at the root of its own hostname, before the path prefix work below, and moving it under one is the three edits at the end of `deploy/README.md`.
-5. Add a second room. Built.
-   The four things it needed are in the code: `--config` takes more than one file and merges left to right, `port` is `reader_port`, `reader_address` takes a room, and `reader.html` derives its base from `location.pathname`.
-   A second room is then a copy of `room.example.toml` with its own name, tokens, and ports, a second `systemctl enable`, and a second block in the `Caddyfile`, and no code at all.
-   A second hostname would work as well and needs even less, but one certificate and one DNS record is less to forget than one of each per room.
-
-Steps 2 and 3 are the bulk of the code.
-Step 4 is configuration, and step 5 was the test of whether a room really is just a process: four small changes, none of them about rooms knowing about each other, because none of them do.

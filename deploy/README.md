@@ -1,6 +1,7 @@
 # deploy
 
-Steps 4 and 5 of the order of work in `HOSTED.md`: one room on a rented server, and then the rooms after it.
+How to set up the third-party hosted mode: one room on a rented server, and then the rooms after it.
+`HOSTED.md` is the design record behind it, for why any of this is shaped the way it is.
 
 Four files go on the server, three from this directory and the fourth the project's own settings example, and none of them names a room except the copy you make of the last.
 

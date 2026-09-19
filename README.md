@@ -13,23 +13,23 @@ Each person opens a link and chooses their own language and their own text size.
 
 ## Getting started
 
-**To install and configure Transept, see [SETUP.md](SETUP.md).**
+Transept runs in one of two modes, and the difference is which machine does the work.
+
+**Self-hosted** is the default, and the one to start with.
+A laptop in the room captures the audio, talks to the speech and translation services itself, serves the subtitles to phones, and needs nothing rented and nobody else involved.
+**To install and configure it, see [SETUP.md](SETUP.md).**
 That file walks through the whole process, from installing Python to handing out the first QR code, and assumes no programming experience.
+
+**Third-party hosted** moves recognition and translation onto a small server somewhere else, leaving the laptop in the room to capture audio and nothing more.
+It is the answer when the building's network cannot carry a meeting, and it lets several rooms share one address and one set of keys.
+A room set up this way holds no API keys at all, only its own name and one token.
+[HOSTED.md](HOSTED.md) explains why and what changes, and [`deploy/`](deploy/README.md) is the server itself, room by room.
 
 ## How it works
 
-```mermaid
-flowchart LR
-  mic(["Microphone"]) -->|audio| capture["<b>Capture</b><br/>on the laptop"]
-  capture --> dg["<b>Deepgram</b><br/>speech to text"]
-  dg -->|fragments| seg["<b>Segmenter</b><br/>whole sentences"]
-  seg -->|English| hub["<b>Channels</b><br/>one per language"]
-  seg --> llm["<b>Translation model</b><br/>languages being read"]
-  llm -->|translations| hub
-  hub --> phones(["Phones"])
-```
+Both modes run the same pipeline, over the same code, and differ only in where each stage runs.
 
-Audio goes from the sound card to [Deepgram](https://deepgram.com/) (Speech-to-text API) over a websocket.
+Audio goes from the sound card to [Deepgram](https://deepgram.com/) (Speech-to-text API) over a websocket, as Opus where `ffmpeg` is installed and as raw audio where it is not, which is about an eighth of the bandwidth for no difference the recognizer can hear.
 Deepgram returns finalized fragments, which often cut sentences in half, so a segmenter buffers them into whole sentences.
 The segmenter closes a sentence when the recognizer reports an endpoint, when the text ends in terminal punctuation, when a silent gap opens, or when the ceiling expires.
 Whole sentences matter more than they sound like they should: translating "on the heater" by itself may produce nonsense in other languages.
@@ -40,14 +40,66 @@ Phones subscribe over server-sent events, one channel per language, with the las
 
 Recognition runs continuously while a session is on, but a language is translated only while somebody is reading that language, so a language nobody opens costs nothing.
 
-Two addresses are served on two different ports, and each carries a token of its own.
-The operator opens one address on the laptop to pick a microphone and press Start, and that port is bound to the laptop alone, so the controls cannot be reached from the network or through a tunnel.
+Either way there are two addresses, each carrying a token of its own.
+The operator opens one on the laptop to pick a microphone and press Start, and that page is always bound to the laptop alone, so the controls cannot be reached from the network or through a tunnel.
 Everyone else opens the other on their phone, which is the address behind the QR code.
 
-**Source files:** `server.py` is the web server and session manager, and the only thing you run on a normal Sunday, whether directly or through the `transept.py` script that also opens the tunnel.
+### Self-hosted
+
+```mermaid
+flowchart LR
+  mic(["Microphone"]) -->|audio| capture
+  subgraph laptop["The laptop in the room"]
+    capture["<b>Capture</b>"]
+    seg["<b>Segmenter</b><br/>whole sentences"]
+    hub["<b>Channels</b><br/>one per language"]
+  end
+  capture -->|audio| dg["<b>Deepgram</b><br/>speech to text"]
+  dg -->|fragments| seg
+  seg -->|English| hub
+  seg --> llm["<b>Translation model</b><br/>languages being read"]
+  llm -->|translations| hub
+  hub -->|tunnel| phones(["Phones"])
+```
+
+One laptop runs all of it, as `server.py`, holding both API keys and serving both addresses on two ports of its own.
+A tunnel in front publishes the reader port, because phones need HTTPS and the address the laptop binds is not an address a phone can reach, and the `./transept` script opens and closes that tunnel alongside the server.
+
+### Third-party hosted
+
+```mermaid
+flowchart LR
+  mic(["Microphone"]) -->|audio| capture
+  subgraph room["The laptop in the room"]
+    capture["<b>Capture</b>"]
+  end
+  capture -->|one websocket| socket
+  subgraph server["The rented server"]
+    socket["<b>Control socket</b>"]
+    seg["<b>Segmenter</b><br/>whole sentences"]
+    hub["<b>Channels</b><br/>one per language"]
+  end
+  socket -->|audio| dg["<b>Deepgram</b><br/>speech to text"]
+  dg -->|fragments| seg
+  seg -->|English| hub
+  seg --> llm["<b>Translation model</b><br/>languages being read"]
+  llm -->|translations| hub
+  hub --> phones(["Phones"])
+```
+
+The laptop runs `sender.py`, which captures audio and pushes it up one websocket, and the rented server runs the same `server.py` with that socket in place of a sound card.
+The room's uplink then carries audio and nothing else, instead of carrying every subtitle out of the building and back down to a phone a few meters away, and a phone on cellular stops depending on the building's network at all.
+The operator page is unchanged and still on loopback, forwarding Start, Stop, and the language switches over the same socket.
+
+The keys live on the server, so setting up a room's laptop involves no Deepgram account.
+One server holds several rooms, one process each, under one hostname: `https://transept.example.org/chapel/reader`.
+
+## The code
+
+**Source files:** `server.py` is the web server and session manager, and the whole of a self-hosted Sunday, whether run directly or through the `transept.py` script that also opens the tunnel.
 `pipeline.py` is the same pipeline without the web layer, which is the fastest way to check a microphone or tune segmentation.
 `review.py` translates a text file offline, `record.py` keeps a session and turns it into a review document, `capture.py` is the audio layer, `selftest.py` checks the software without a microphone or an API key, and `static/` holds the two web pages.
-`controls.py` holds the operator page and its routes, and `sender.py` is the optional other half of `HOSTED.md`: a laptop in a room whose network cannot carry a meeting, capturing audio for a server somewhere else.
+`controls.py` holds the operator page and its routes, which both entry points serve, and `sender.py` is the room's half of a hosted deployment, alongside the server configuration in `deploy/`.
 
 **Config file:** Every setting is in `config.toml`, keys included, so switching translation providers is one edit rather than two.
 The file is gitignored, because the file holds your keys once you fill them in.
@@ -69,11 +121,12 @@ Running Transept takes a sound system, a laptop, and somebody willing to press a
   [Tailscale Funnel](https://tailscale.com/) needs no domain and costs nothing, and is what [SETUP.md](SETUP.md) uses.
 
 Capture goes through PortAudio by way of the `sounddevice` package, so the laptop already plugged into the chapel sound system for Zoom should generally work as is.
-A second backend, `parec`, is available on Linux and is used by default.
-On Linux you may also need `sudo apt install libportaudio2`.
+A second backend, `parec`, is available on Linux and is used by default there.
+
+A third-party hosted room needs the first two bullets and none of the rest: the keys and the public address belong to the server, and the laptop needs only the room's name and its control token.
 
 **What it costs (Sep 2026):** Speech recognition runs about $0.50 per hour through Deepgram, and new accounts include $200 of free credit that covers a great deal of use.
-Translation through a small fast model runs a few cents per hour per language, and only for languages somebody is actually reading, so a language nobody opens costs nothing at all.
+Translation through a small fast model runs a few cents per hour per language, and only for languages somebody is actually reading.
 A weekly sixty-minute meeting should cost under a dollar.
 
 ## Privacy and accuracy
@@ -81,6 +134,7 @@ A weekly sixty-minute meeting should cost under a dollar.
 Audio from your meeting is sent to Deepgram, and the resulting text is sent to your translation provider.
 Both are commercial services with their own retention policies.
 Sending the room's words to two companies is worth raising with whoever leads the meeting beforehand, particularly where people say personal things out loud.
+A hosted room adds one more party, whoever runs the server, since the audio and every sentence pass through that machine.
 
 By default nothing is stored on disk, so subtitles live in memory and disappear when the session stops.
 Turning on `record` in `config.toml` changes that, and is a decision to make with whoever leads the meeting.

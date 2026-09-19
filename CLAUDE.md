@@ -1,8 +1,9 @@
 # CLAUDE.md
 
 Guidance for Claude Code (claude.ai/code) when working in this repository.
-`README.md` is the introduction, for somebody deciding whether Transept suits their meeting, and `SETUP.md` is the volunteer's manual: installing, keys, tunnels, running a meeting, tuning, and troubleshooting.
-`HOSTED.md` describes an optional deployment for a room whose network cannot carry a meeting, and its order of work is built: the code in steps 1 to 3 and 5, and the configuration for the rented server in `deploy/`.
+`README.md` is the introduction, for somebody deciding whether Transept suits their meeting, and it names the two modes the other files document.
+`SETUP.md` is the volunteer's manual for the self-hosted mode: installing, keys, tunnels, running a meeting, tuning, and troubleshooting.
+`HOSTED.md` is the design record for the third-party hosted mode, for a room whose network cannot carry a meeting, and `deploy/README.md` is how a rented server is actually set up.
 The notes here are about the code.
 
 ## What this is
@@ -30,7 +31,7 @@ When a translation fails, times out, or comes back missing a language, the Engli
 ## Commands
 
 ```
-python3 server.py                     the whole thing, and the entire weekly command
+python3 server.py                     the whole thing: pipeline, listeners, pages
 python3 server.py --list-devices      find an audio source
 python3 sender.py                     the room's half of a hosted deployment
 python3 pipeline.py --no-translate    check the audio path, no translation key needed
@@ -43,8 +44,8 @@ python3 record.py --session last --out review/sunday.md    read a session back
 ./transept status                     whether either is up, and the addresses
 ```
 
-Any setting may be overridden for a one-off, for example `python3 server.py --ceiling 6`.
-The entry points expose overlapping flag sets, built from `SETTINGS` by `add_settings_arguments`.
+A setting becomes a flag only where an entry point names it in its `add_settings_arguments` call, so the sets built from `SETTINGS` overlap rather than match.
+Any of those may be overridden for a one-off, for example `python3 server.py --ceiling 6`.
 There is no build step and no CI, so `selftest.py` is the whole mechanical check, and it runs `ruff check` as its first section for that reason.
 
 ## Architecture
@@ -63,9 +64,9 @@ An empty chunk means end of stream, which is how a device that disappears become
 `pipeline.py` also runs standalone as a terminal tool, which is the fastest way to debug the pipeline without the web layer.
 
 `open_encoder` and `Encoder` are there too, putting Opus between a capture object and whatever socket the audio goes up.
-The encoder sits here rather than in `capture.py` so every backend keeps the promise it makes, which is 16 kHz mono signed 16-bit chunks; what a wrapped source changes is the one thing downstream reads, which is what it says it yields.
+The encoder sits here rather than in `capture.py` so every backend keeps that promise; what a wrapped source changes is the one thing downstream reads, which is what it says it yields.
 Compression is worth having in the default deployment as much as the hosted one, because a congested uplink out of a building is what a whole on-site beta failed on, so `[audio] encoding` defaults to `opus` and every entry point wraps its local capture.
-A machine with no working `ffmpeg` falls back to PCM and says so, the way `sounddevice` and `segno` are already handled, and the fallback is decided before the recognizer socket opens because the format is named when that socket opens and cannot be changed afterwards.
+A machine with no working `ffmpeg` falls back to PCM and says so, and the fallback is decided before the recognizer socket opens because the format is named when that socket opens and cannot be changed afterwards.
 Two of the flags in `ENCODER_COMMAND` are not tuning: without `-analyzeduration 0 -probesize 32` ffmpeg reads two seconds of a raw stream before deciding what it is, and without `-page_duration 20000` the ogg muxer holds a second of audio per page, and either one would be added to every sentence.
 
 `server.py` adds `Hub` (ring buffers and subscribers), `Session` (start, stop, supervise, reconnect), and the aiohttp routes.
@@ -96,7 +97,8 @@ These loops were duplicated once and the copies drifted until one was building a
 
 Task lifecycle is deliberately not shared, because the two really do differ.
 `pipeline.py` waits for Ctrl-C and then gives the reader and the writer a bounded chance to drain, so the last sentence still prints.
-`server.py` waits on `FIRST_COMPLETED` and cancels the rest, because a supervisor is standing by to reconnect.
+`server.py` waits on `FIRST_COMPLETED` in `_run_once` and cancels the other two, because a supervisor is standing by to reconnect.
+Gathering instead would leave legs running against a socket nobody reads, which is how a session appears alive with no audio.
 
 ### Translation is demand-driven
 
@@ -123,24 +125,22 @@ A check inside the handlers could not replace this, because the tunnel daemon co
 `serve` runs both under `AppRunner`, since `web.run_app` takes one application.
 
 Which listener joins the reader one follows from where the audio comes from and from nothing else.
-A local device means the operator page on loopback; `capture = "remote"` means `build_control_app`, whose one route is the `/control` websocket a sender connects to, bound where that sender can reach it.
+A local device means the operator page on loopback; `backend = "remote"` means `build_control_app`, whose one route is the `/control` websocket a sender connects to, bound where that sender can reach it.
 A separate `mode` setting could be changed without the backend being changed to match, which would leave a server opening a sound card while a sender waited, or waiting for a sender while a sound card ran.
 That listener has to bind publicly, so what guards it is `control_token` and a refusal of any handshake carrying an `Origin` header at all, rather than the address it binds to: websockets are not subject to the same-origin policy and need no CORS preflight, the only legitimate client is a Python program that sends no `Origin`, and a browser stamps every handshake with one and cannot be made not to.
 `ControlRoom` holds the one sender, its audio, and its grace, and hands `Session` a source per recognizer run rather than per sender, because a run that ends closes its source and audio arriving between runs has no socket to go up.
-`HOSTED.md` describes that deployment; steps 1 to 3 of its order of work are built.
 
 The operator page is the same page either way, because `controls.py` serves it against an object with four methods: `start`, `stop`, `set_override`, and `status`, plus a `config` the device list and the QR code read.
 `Session` is that object in the default deployment and `sender.Remote` is the other implementation, which is the same "one interface, two implementations" as the capture backends and the sinks.
 So new behavior on that page belongs in `controls.py` or in both objects, never in a second copy of a handler.
 `Remote.status` passes the server's own snapshot through rather than rebuilding it, and lays over it the two things the snapshot cannot know: which microphone is open on this laptop, and whether the socket carrying the rest of it is up, since a snapshot from thirty seconds ago describing a running meeting is exactly what a dropped connection looks like.
-The sender's own checks live in `session` for what the proxy decides alone and in `server` for what it and a real server have to agree on, and the shape check compares against a real `Session.status()`, because a table compared with itself is a check that cannot fail.
 
 Every route on both listeners is behind `authorized`, which reads the token its own application was given, so the link the whole room is handed opens nothing on the operator port.
 The one exception is `/` on the reader port, which is `nothing_here`: a tunnel puts that address on the public internet, and a bot that finds it gets a 404 rather than a language picker.
 
 On the reader port the token is what stands between a public hostname and a meeting, and `stream` checks it before it looks the channel up, because opening a stream is what makes a language be translated and paid for.
 On the operator port it also stops a page in another tab of the operator's browser from posting a cross-origin form at the loopback port, which needs no CORS preflight and would otherwise reach `Session.start`, and it covers the two routes that only read: `/api/status` carries the device, the model, the raw exception text and the last lines spoken, and `/api/devices` names the sound hardware and forks a process per request.
-`/qr.svg` is behind it too, now that the image encodes the reader token.
+`/qr.svg` is behind it too, because the image encodes the reader token.
 A refusal has to keep the shape the page destructures, `ok` and `message` for status, `devices` and `error` for the device list, and `channels` and `error` for the channel list, or the page renders a blank panel instead of saying the token is wrong.
 
 The reader page shows two dots rather than one: whether this phone still has its stream, and whether a session is running.
@@ -153,7 +153,7 @@ The reader page takes its token from `location.search` rather than storing it, s
 The address itself is built by `reader_address`, not typed into `config.toml`: `public_url` is the hostname a phone can reach, the room is the path segment under it, and the rest of the path and the token are this run's.
 `main` puts the result in `config["reader_url"]`, which is what `/qr.svg` renders and what the operator page shows as the link to hand somebody, and it is empty until `public_url` is set so the page shows no share block rather than a link to nowhere.
 
-Which room goes into that address is `card_room`, and the answer is the room only where `capture` is `remote`.
+Which room goes into that address is `card_room`, and the answer is the room only where the capture backend is `remote`.
 A path prefix exists because something in front strips it, and that something is the proxy in front of a hosted server, which is what a remote capture already says: the audio arrives from a laptop because the server is somewhere else.
 A room name that was always a prefix would break a laptop that names its room for the recorded transcript, since a funnel serves the root and the card would point at a path nothing answers.
 It is the same rule, from the same fact, as the one that decides which second listener a server raises.
@@ -256,9 +256,6 @@ Treating it as a translation failure publishes an English line into every channe
 `Session.start` refuses unless the state is exactly `stopped`, because `reconnecting` also means a supervisor task is alive.
 
 `Session.stop` skips cancelling the idle watchdog when the watchdog is the caller, because a task awaiting its own completion deadlocks.
-
-`_run_once` waits on `FIRST_COMPLETED` rather than gathering.
-Whichever leg finishes first ends the session and the other two are cancelled, because leaving them running against a socket nobody reads is how a session appears alive with no audio.
 
 `HEALTHY_RUN` resets the reconnect backoff after a run that lasted a minute, so a few blips early in a meeting do not make a later one cost twenty seconds of silence.
 
@@ -372,8 +369,8 @@ One sentence per line in Markdown files, so diffs isolate the sentence that chan
 `selftest.py` is the whole suite, and it needs no keys, no audio device, and no network.
 The suite uses no test framework, only the standard library, and exits non-zero if anything fails.
 Run it after any change to the pipeline, the sinks, or the routes.
-`python3 selftest.py <section>` runs one of `lint`, `pipeline`, `session`, `store`, `server`, or `script`.
-There is no `sender` section: what the sender decides on its own is checked in `session`, and what it and a real server have to agree on is checked in `server`, where a server is already being booted.
+`python3 selftest.py <section>` runs one of the six sections named under Commands.
+There is no `sender` section: what the sender decides on its own is checked in `session`, and what it and a real server have to agree on is checked in `server`, where a server is already being booted and the sender's status can be compared against a real `Session.status()` rather than against a copy of its own table.
 The `script` section needs no funnel and starts no server: what it checks is the reasoning `transept.py` does on its own, above all that a stale record is never mistaken for a running server.
 The `server` section runs `server.py` in a directory of its own, because a selftest that overwrote the pid file of a real server would leave a running meeting with nothing able to stop it.
 It boots it three times: once as the default deployment, once with `--capture remote` because the control listener binds publicly and so what it serves and what it turns away is the whole of its guard, and once more for a real `sender.Remote` to connect to over a real socket.
@@ -400,19 +397,19 @@ Latency claims should come from an actual run: `python3 pipeline.py --no-transla
 
 The reader view is a plain web page by choice, not an installable app.
 A manifest and service worker would add install friction and offline machinery that a live subtitle feed cannot use anyway.
-HTTPS is still required, because the screen wake lock needs a secure context, and a tunnel in front is the current answer.
+HTTPS is still required, because the screen wake lock needs a secure context, which a tunnel supplies in the self-hosted mode and Caddy in the hosted one.
 `public_url` exists because the address this process binds is not the address a phone can reach.
 
 `operator_port` is a setting; the operator host is not, because the point of the second listener is that a tunnel cannot be pointed at it by mistake.
 A headless machine wants an SSH forward rather than a wider bind.
 
-Both tokens are minted every run and printed with their addresses, and there is no tokenless mode on either listener.
-`reader_token` and `operator_token` under `[keys]` pin them, and `control_token` is the third, for the sender a hosted server takes its audio from.
-A minted control token is printed like the other two, which is enough to try the thing on one laptop, but a real room pins it, because the sender is configured once and has to keep working.
-Pinning the reader one is ordinary, because a printed card has to keep working; pinning the operator one exists for development, where a fresh address every restart is a fresh link to click every restart, and a meeting leaves it empty.
+There are three tokens, `reader_token` for the phones, `operator_token` for the page on loopback, and `control_token` for the sender a hosted server takes its audio from.
+All three are minted every run and printed with the address that carries them, `[keys]` pins any of them, and there is no tokenless mode on any listener.
+Pinning the reader one is ordinary, because a printed card has to keep working, and a hosted room pins the control one for the same reason, since a sender is configured once and then left alone.
+Pinning the operator one exists for development, where a fresh address every restart is a fresh link to click every restart, and a meeting leaves it empty.
 They sit with the keys rather than among the settings, and `mint_token()` takes the pinned value as an argument rather than reading the environment itself, so the one place that decides where a secret comes from stays `load_keys`.
-Neither is a `SETTINGS` row and so neither has a flag, because a setting invites a weak or forgotten token on the machine that runs the meetings.
+None is a `SETTINGS` row and so none has a flag, because a setting invites a weak or forgotten token on the machine that runs the meetings.
 
-Both tokens travel in the address that hands them over, which is what reaches browser history, and they stay in a query string on the requests that cannot carry a header: the reader page's `EventSource` streams, and the `<img>` holding the QR code on the operator page.
+The reader and operator tokens travel in the address that hands them over, which is what reaches browser history, and they stay in a query string on the requests that cannot carry a header: the reader page's `EventSource` streams, and the `<img>` holding the QR code on the operator page.
 Stripping it from the address bar is not a client-side fix while the page itself is gated on it, and on a phone it would break the reload that a locked screen eventually causes.
 The reader token is a shared secret for a room, not a credential for a person: it keeps a public hostname from being a public meeting, and it is not meant to survive the card being photographed.

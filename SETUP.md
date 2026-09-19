@@ -1,11 +1,13 @@
 # Setting up Transept
 
 This page is the one-time setup: installing the software, getting API keys, and creating a web address phones can reach.
+It covers the self-hosted mode, where one laptop in the room runs everything.
 Plan on about 30–60 minutes.
 Do the setup at a desk rather than in the meeting room, because only the audio check near the end needs the real microphones.
 
 [`README.md`](README.md) covers what Transept is, what it costs, and what it sends where.
 Read that file first if you have not already.
+If somebody is already hosting a server for your congregation, the laptop in your room needs a room name and one token instead of most of this page, and the last section of [`deploy/README.md`](deploy/README.md) is what to follow.
 
 Transept is written in Python, but you don't need to know Python.
 Everything below is typed at a command line, one line at a time.
@@ -463,6 +465,7 @@ Copy the address from the warning into `public_url` as in step 9.
 **Phones cannot reach the address.**
 Check `./transept status`, or `tailscale funnel status`, to see whether the tunnel is actually open.
 Remember that the address only works with the token on the end, so hand out the whole line or the QR code rather than just the hostname.
+A building that blocks the tunnel outright, or an uplink too congested to carry the meeting, is what [`HOSTED.md`](HOSTED.md) is for, and no amount of tuning on this page will fix it.
 
 **Something is broken and you want to know whether Transept is the cause.**
 
