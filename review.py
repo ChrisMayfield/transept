@@ -151,7 +151,11 @@ def main():
                              "because nothing is waiting on the answer")
     parser.add_argument("--keep-prefix", action="store_true",
                         help="take every input line verbatim")
-    parser.add_argument("--config", default="config.toml")
+    # Repeatable, and merged left to right, so a hosted room passes the
+    # tuning its server shares and then the file naming only itself.
+    parser.add_argument("--config", action="append", metavar="FILE",
+                        help="config file; repeat for a shared file and "
+                             "then a room's own")
     add_settings_arguments(parser, [
         "model", "reasoning_effort", "correct_english", "max_tokens",
         "timeout",
@@ -159,7 +163,7 @@ def main():
         "glossary",
     ])
     args = parser.parse_args()
-    config = load_config(args.config)
+    config = load_config(*(args.config or []))
     asyncio.run(run(args, resolve(args, config), load_keys(config)))
 
 

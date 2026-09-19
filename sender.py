@@ -526,7 +526,11 @@ def main():
                "point: a weekly run should be just `python3 sender.py`.")
     parser.add_argument("--list-devices", action="store_true",
                         help="list audio input devices and exit")
-    parser.add_argument("--config", default="config.toml")
+    # Repeatable, and merged left to right, so a hosted room passes the
+    # tuning its server shares and then the file naming only itself.
+    parser.add_argument("--config", action="append", metavar="FILE",
+                        help="config file; repeat for a shared file and "
+                             "then a room's own")
     add_settings_arguments(parser, [
         "capture", "encoding",
         "control_url", "room",
@@ -538,7 +542,7 @@ def main():
         capture.print_devices(args.capture or "auto")
         return
 
-    parsed = load_config(args.config)
+    parsed = load_config(*(args.config or []))
     settings = resolve(args, parsed)
     keys = load_keys(parsed)
     if not settings["control_url"]:

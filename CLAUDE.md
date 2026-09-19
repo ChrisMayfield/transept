@@ -2,7 +2,7 @@
 
 Guidance for Claude Code (claude.ai/code) when working in this repository.
 `README.md` is the introduction, for somebody deciding whether Transept suits their meeting, and `SETUP.md` is the volunteer's manual: installing, keys, tunnels, running a meeting, tuning, and troubleshooting.
-`HOSTED.md` proposes an optional deployment for a room whose network cannot carry a meeting, of which the first three steps of its order of work are built and the rest is not.
+`HOSTED.md` describes an optional deployment for a room whose network cannot carry a meeting, and its order of work is built: the code in steps 1 to 3 and 5, and the configuration for the rented server in `deploy/`.
 The notes here are about the code.
 
 ## What this is
@@ -148,8 +148,17 @@ It arrives as a named `state` event on the stream the phone already has, sent wh
 
 The reader page takes its token from `location.search` rather than storing it, since the address is what the QR code and the shared link both carry, and it passes the token on to the stream and the channel list.
 
-The address itself is built by `reader_address`, not typed into `config.toml`: `public_url` is the hostname a phone can reach, and the path and the token are this run's.
+The address itself is built by `reader_address`, not typed into `config.toml`: `public_url` is the hostname a phone can reach, the room is the path segment under it, and the rest of the path and the token are this run's.
 `main` puts the result in `config["reader_url"]`, which is what `/qr.svg` renders and what the operator page shows as the link to hand somebody, and it is empty until `public_url` is set so the page shows no share block rather than a link to nowhere.
+
+Which room goes into that address is `card_room`, and the answer is the room only where `capture` is `remote`.
+A path prefix exists because something in front strips it, and that something is the proxy in front of a hosted server, which is what a remote capture already says: the audio arrives from a laptop because the server is somewhere else.
+A room name that was always a prefix would break a laptop that names its room for the recorded transcript, since a funnel serves the root and the card would point at a path nothing answers.
+It is the same rule, from the same fact, as the one that decides which second listener a server raises.
+
+The reader page asks beside itself rather than at the root, deriving a base from `location.pathname` with the last segment dropped.
+The page is `/chapel/reader` to the phone and `/reader` to the server, because the proxy strips the prefix, so a root-absolute `/stream/...` would leave the room and reach whichever room answers the root, carrying this room's token.
+The base is empty at the root, which is every other deployment.
 
 Handlers share their event loop with the capture pipeline, so anything that blocks in one stalls the subtitle fan-out to every phone in the room.
 `api_devices` runs `pactl` under `asyncio.to_thread` for that reason, and a handler that shells out, touches the disk, or calls a third party belongs in a thread too.
@@ -324,6 +333,8 @@ A device name changes with a reboot or a replugged cable, so a name in `config.t
 
 Settings live in `config.toml`, resolved by the `SETTINGS` table in `pipeline.py`.
 Adding a setting means adding one row there, then naming it in the `add_settings_arguments` call of whichever entry points should expose it as a flag.
+`--config` is repeatable on every entry point and `load_config` merges the files left to right, key by key inside a section rather than section by section, which is how a hosted room reads the tuning its server shares and then the file naming only its own ports, tokens, and name; a room that named a port would otherwise lose the shared `[server] host` beside it.
+A missing file is skipped rather than refused, because the usual run names one file that may not exist yet.
 `SETTINGS`, `ARGUMENT_HELP`, and `config.example.toml` are in one order, section for section and key for key, because adding a setting means reading them side by side; `selftest.py` compares the first and the last and fails on drift.
 The sections follow the path a sentence takes: `[audio]` in, `[recognition]`, `[segmentation]`, `[translation]`, then `[languages]`, the `[files]` that tune both models, `[session]`, and `[server]` out.
 `endpointing` is a Deepgram parameter rather than a property of the sound card, so it sits in `[recognition]` beside the model it is sent with.

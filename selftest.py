@@ -30,6 +30,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import shutil
 import socket
 import sqlite3
@@ -1318,6 +1319,116 @@ def check_example_config(checks):
                  settings == expected, detail)
 
 
+def check_config_merge(checks):
+    """Several config files, merged left to right.
+
+    What a hosted server runs on: one file of tuning every room shares, and
+    a file per room holding only what that room has to say for itself. The
+    merge is key by key inside a section, because a room naming its own
+    ports must not lose the shared [server] settings beside them.
+    """
+    checks.section("Config files merging left to right")
+    home = Path(tempfile.mkdtemp())
+    shared = home / "shared.toml"
+    shared.write_text('[server]\nhost = "0.0.0.0"\nreader_port = 8080\n'
+                      'public_url = "https://transept.example/"\n'
+                      '[keys]\nllm_api_key = "shared-key"\n'
+                      '[languages]\navailable = ["French", "Swahili"]\n')
+    room = home / "room.toml"
+    room.write_text('[server]\nreader_port = 8090\nroom = "chapel"\n'
+                    '[keys]\nreader_token = "room-token"\n')
+
+    merged = pipeline.load_config(shared, room)
+    settings = pipeline.resolve(SimpleNamespace(), merged)
+    checks.check("the room's port beats the shared one",
+                 settings["reader_port"] == 8090, settings["reader_port"])
+    checks.check("and the shared host survives beside it, so a section is "
+                 "merged key by key rather than replaced",
+                 settings["host"] == "0.0.0.0", settings["host"])
+    checks.check("a value only the shared file names is inherited",
+                 settings["public_url"] == "https://transept.example/",
+                 settings["public_url"])
+    checks.check("a value only the room names is read",
+                 settings["room"] == "chapel", settings["room"])
+    checks.check("a list is taken whole rather than merged item by item",
+                 settings["languages"] == ["French", "Swahili"],
+                 settings["languages"])
+
+    kept = {name: os.environ.pop(name, None)
+            for _, _, name in pipeline.SECRETS}
+    try:
+        keys = pipeline.load_keys(merged)
+        checks.check("the keys merge the same way, each file's own rows",
+                     (keys["llm_key"], keys["reader_token"])
+                     == ("shared-key", "room-token"), keys)
+    finally:
+        for name, value in kept.items():
+            os.environ.pop(name, None)
+            if value is not None:
+                os.environ[name] = value
+
+    # Precedence is the command line, then the last file, then earlier ones,
+    # and a flag given is still a flag that wins over every file.
+    flagged = pipeline.resolve(SimpleNamespace(reader_port=9999), merged)
+    checks.check("a flag still beats every file",
+                 flagged["reader_port"] == 9999, flagged["reader_port"])
+    checks.check("the order is the order given, not the order on disk",
+                 pipeline.resolve(SimpleNamespace(),
+                                  pipeline.load_config(room, shared)
+                                  )["reader_port"] == 8080)
+    # The usual run names one file that may not exist yet, which has to
+    # fall through to the defaults rather than stop the meeting.
+    checks.check("a missing file among them is skipped, not an error",
+                 pipeline.resolve(SimpleNamespace(), pipeline.load_config(
+                     home / "no-such-file.toml", room))["reader_port"] == 8090)
+    # A local run passes one file, or none, and the merge has to leave that
+    # file exactly as it found it.
+    checks.check("one file is that file and nothing besides",
+                 pipeline.load_config(shared) == {
+                     "server": {"host": "0.0.0.0", "reader_port": 8080,
+                                "public_url": "https://transept.example/"},
+                     "keys": {"llm_api_key": "shared-key"},
+                     "languages": {"available": ["French", "Swahili"]}},
+                 pipeline.load_config(shared))
+    shutil.rmtree(home, ignore_errors=True)
+
+
+def check_reader_page(checks):
+    """The reader page asks beside itself rather than at the root.
+
+    A hosted room lives under a path prefix that the proxy in front strips,
+    so the page is /chapel/reader to the phone and /reader to the server.
+    Root-absolute URLs would leave the room and reach whichever room
+    answers the root, with that room's token in the query string.
+
+    There is no JavaScript engine here, so the expression is lifted out of
+    the page and run as a Python pattern rather than restated: a check that
+    spelled the regex out again would pass against a page that had lost it.
+    """
+    checks.section("The reader page under a path prefix")
+    page = (HERE / "static" / "reader.html").read_text(encoding="utf-8")
+    found = re.search(r'location\.pathname\.replace\(/(.+?)/, "(.*?)"\)',
+                      page)
+    checks.check("the page derives a base from its own address",
+                 found is not None, "no location.pathname in reader.html")
+    if not found:
+        return
+    pattern, replacement = found.group(1), found.group(2)
+    base = {where: re.sub(pattern, replacement, where)
+            for where in ("/reader", "/chapel/reader")}
+    checks.check("at the root the base is empty, which is today's address",
+                 base["/reader"] == "", base)
+    checks.check("under a prefix the stream stays inside the room",
+                 base["/chapel/reader"] + "/stream/English"
+                 == "/chapel/stream/English", base)
+    # The derivation is only worth having if nothing goes around it, so
+    # every address the page builds has to start from it.
+    astray = [route for route in ('"/stream/', '"/api/')
+              if page.count(route) != page.count("base + " + route)]
+    checks.check("and every address the page builds starts from that base",
+                 not astray, f"built at the root instead: {astray}")
+
+
 def check_keys(checks):
     """Keys come out of config.toml, and the environment still wins.
 
@@ -1460,7 +1571,9 @@ def check_server(checks):
     """
     check_authorization(checks)
     check_example_config(checks)
+    check_config_merge(checks)
     check_keys(checks)
+    check_reader_page(checks)
     check_device_listing(checks)
     checks.section("Minting the two tokens")
     minted = {controls.mint_token() for _ in range(3)}
@@ -1474,16 +1587,36 @@ def check_server(checks):
 
     checks.section("The address on the card")
     checks.check("the reader address carries a path and a token",
-                 server.reader_address("https://chapel.example/", "abc")
+                 server.reader_address("https://chapel.example/", "", "abc")
                  == "https://chapel.example/reader?token=abc",
-                 server.reader_address("https://chapel.example/", "abc"))
+                 server.reader_address("https://chapel.example/", "", "abc"))
     checks.check("a base without a trailing slash builds the same address",
-                 server.reader_address("https://chapel.example", "abc")
+                 server.reader_address("https://chapel.example", "", "abc")
                  == "https://chapel.example/reader?token=abc")
+    # One hostname, several rooms, told apart by the prefix the proxy in
+    # front strips before it forwards.
+    checks.check("a named room is a path segment of its own",
+                 server.reader_address("https://transept.example/", "chapel",
+                                       "abc")
+                 == "https://transept.example/chapel/reader?token=abc",
+                 server.reader_address("https://transept.example/", "chapel",
+                                       "abc"))
+    checks.check("however the room and the base are punctuated",
+                 server.reader_address("https://transept.example", "/chapel/",
+                                       "abc")
+                 == "https://transept.example/chapel/reader?token=abc")
     # Rather than a link to /reader?token= on nowhere, which the operator
     # page would render as something to hand somebody.
     checks.check("no public_url means no address at all",
-                 server.reader_address("", "abc") == "")
+                 server.reader_address("", "chapel", "abc") == "")
+    # Which rooms get that segment, since a laptop behind a tunnel serves
+    # the root and may still name its room for the recorded transcript.
+    checks.check("a hosted room is the one that carries its name",
+                 server.card_room({"room": "chapel", "capture": "remote"})
+                 == "chapel")
+    checks.check("a laptop naming its room keeps the address it always had",
+                 server.card_room({"room": "chapel", "capture": "auto"})
+                 == "")
 
     checks.section("The running server")
     port, operator = free_port(), free_port()
@@ -1506,7 +1639,7 @@ def check_server(checks):
         [sys.executable, "-u", str(HERE / "server.py"),
          "--config", "selftest-no-such-config.toml",
          "--model", "selftest-model", "--languages", "French,Swahili",
-         "--host", "127.0.0.1", "--port", str(port),
+         "--host", "127.0.0.1", "--reader-port", str(port),
          "--operator-port", str(operator), "--max-readers", "3"],
         cwd=home, env=environment, stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT, text=True)
@@ -1543,8 +1676,9 @@ def check_server(checks):
                      written.get("pid") == process.pid, written)
         checks.check("the record carries both ports, so stopping one needs "
                      "no config file",
-                     (written.get("port"), written.get("operator_port"))
-                     == (port, operator), written)
+                     (written.get("reader_port"),
+                      written.get("operator_port")) == (port, operator),
+                     written)
 
         status, body = request(port, "/api/channels", token=READER)
         checks.check("channels are fixed at startup",
@@ -1751,7 +1885,7 @@ def check_control(checks):
          "--config", "selftest-no-such-config.toml",
          "--model", "selftest-model", "--languages", "French",
          "--capture", "remote", "--room", "chapel",
-         "--host", "127.0.0.1", "--port", str(port),
+         "--host", "127.0.0.1", "--reader-port", str(port),
          "--control-port", str(control)],
         cwd=home, env=environment, stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT, text=True)
@@ -1916,15 +2050,21 @@ async def drive_sender(checks, control, operator):
         await web.TCPSite(runner, "127.0.0.1", operator).start()
         link = asyncio.create_task(sender.supervise(remote, url))
         reached = await settle(lambda: bool(remote.snapshot))
+        # French rather than Swahili because the room's file is read after
+        # the shared one, which is the whole of how a room differs from the
+        # server it runs on. No --languages flag here for that reason.
         checks.check("the sender reaches the server and is told it is ready",
                      reached and remote.languages == ["French"],
                      remote.error or remote.languages)
         # The sender holds no reader token and no public_url, so the
-        # address to hand the room can only come down this socket.
+        # address to hand the room can only come down this socket. The room
+        # is the path segment in it, which is how several rooms share one
+        # hostname, and the base it is added to came from the shared file
+        # while the room name came from the command line.
         checks.check("and told the address to hand the room, which only "
                      "the server knows",
                      remote.config["reader_url"]
-                     == "https://chapel.example/reader?token=card",
+                     == "https://transept.example/chapel/reader?token=card",
                      remote.config["reader_url"])
 
         status, body = await asyncio.to_thread(
@@ -2156,11 +2296,16 @@ def check_sender(checks):
     checks.section("The sender in the room and the server somewhere else")
     port, control, operator = free_port(), free_port(), free_port()
     home = Path(tempfile.mkdtemp())
-    # A real config file, unlike the other sections: reader_url is built
-    # from public_url and the reader token, and the sender showing the
-    # right one is half of what this section is for.
+    # Real config files, unlike the other sections, and two of them: the
+    # shared one a hosted server reads first and the room's own after it,
+    # which is the arrangement systemd starts every room with. reader_url
+    # is built from public_url, the room, and the reader token, and the
+    # sender showing the right one is half of what this section is for.
+    (home / "shared.toml").write_text(
+        '[server]\npublic_url = "https://transept.example/"\n'
+        '[languages]\navailable = ["Swahili"]\n', encoding="utf-8")
     (home / "room.toml").write_text(
-        '[server]\npublic_url = "https://chapel.example/"\n', encoding="utf-8")
+        '[languages]\navailable = ["French"]\n', encoding="utf-8")
     environment = dict(
         os.environ,
         DEEPGRAM_API_KEY="selftest",
@@ -2174,10 +2319,10 @@ def check_sender(checks):
     )
     process = subprocess.Popen(
         [sys.executable, "-u", str(HERE / "server.py"),
-         "--config", "room.toml",
-         "--model", "selftest-model", "--languages", "French",
+         "--config", "shared.toml", "--config", "room.toml",
+         "--model", "selftest-model",
          "--capture", "remote", "--room", "chapel",
-         "--host", "127.0.0.1", "--port", str(port),
+         "--host", "127.0.0.1", "--reader-port", str(port),
          "--control-port", str(control)],
         cwd=home, env=environment, stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT, text=True)
@@ -2434,7 +2579,8 @@ def check_script(checks):
                  transept.read_config(missing) == (8080, 8081, ""),
                  transept.read_config(missing))
     written = home / "config.toml"
-    written.write_text('[server]\nport = 9000\noperator_port = 9001\n'
+    written.write_text('[server]\nreader_port = 9000\n'
+                       'operator_port = 9001\n'
                        'public_url = "https://chapel.example/"\n')
     checks.check("the ports and the address come out of the file",
                  transept.read_config(written)
@@ -2444,7 +2590,7 @@ def check_script(checks):
     # to stop here, rather than be passed on to something that probes ports
     # and sends signals.
     for label, text in (("a port that is not a number",
-                         '[server]\nport = "eight thousand"\n'),
+                         '[server]\nreader_port = "eight"\n'),
                         ("a file that is not TOML", "[server\n")):
         broken = home / "broken.toml"
         broken.write_text(text)
@@ -2468,20 +2614,23 @@ def check_script(checks):
     finished.wait()
     try:
         transept.PID_FILE.write_text(json.dumps(
-            {"pid": os.getpid(), "port": held, "operator_port": quiet}))
+            {"pid": os.getpid(), "reader_port": held,
+             "operator_port": quiet}))
         found = transept.server_record()
         checks.check("a live process still holding a port is the server",
                      found is not None and found["pid"] == os.getpid(), found)
 
         transept.PID_FILE.write_text(json.dumps(
-            {"pid": os.getpid(), "port": quiet, "operator_port": quiet}))
+            {"pid": os.getpid(), "reader_port": quiet,
+             "operator_port": quiet}))
         checks.check("a record whose ports have gone quiet is a leftover",
                      transept.server_record() is None)
 
         # The whole reason the ports are consulted at all: process ids come
         # around again, and the next thing the caller does is send a signal.
         transept.PID_FILE.write_text(json.dumps(
-            {"pid": finished.pid, "port": held, "operator_port": quiet}))
+            {"pid": finished.pid, "reader_port": held,
+             "operator_port": quiet}))
         checks.check("and so is one naming a process that has finished",
                      transept.server_record() is None)
 

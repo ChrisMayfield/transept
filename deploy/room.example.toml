@@ -1,45 +1,36 @@
 # One room on a hosted server, for the deployment HOSTED.md describes.
 # Copy to /srv/transept/<room>/config.toml and edit. Ignored by git wherever
-# it lands, because it holds this room's API keys and both of its tokens.
+# it lands, because it holds this room's two tokens.
 #
-# Only what a room has to say for itself. Everything else falls through to
-# the default in the SETTINGS table in pipeline.py, and ../config.example.toml
-# is the annotated list of what could go here, the language list included.
+# Only what a room has to say for itself. The unit reads ../config.toml
+# first, an edited copy of the project's own config.example.toml, so the
+# keys, the model, the backend, the languages, and the hostname come from
+# there and are not repeated here. Anything a room does differ on, its own
+# deepgram_api_key when its spend is worth attributing separately, goes here
+# and beats the shared file. That file is also the annotated list of
+# everything that could go in either.
 
 [keys]
-# Both keys live here rather than on the operator's laptop, which is most of
-# the point of hosting.
-deepgram_api_key = ""
-llm_base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
-llm_api_key = ""
-
 # Pinned rather than minted per run: the room reads from a printed card and
 # the card has to keep working, and the laptop is configured once with the
-# control token. Generate each of them with
+# control token. Both differ from every other room's, because a room's
+# tokens are the whole of what separates it from its neighbors. Generate
+# each of them with
 #
 #   python3 -c "import secrets; print(secrets.token_urlsafe(32))"
 reader_token = ""
 control_token = ""
 
-[audio]
-# The whole of what makes this the hosted half, rather than a second setting
-# saying so. No sound card here: the audio arrives over the control socket
-# from sender.py on a laptop in the room, and the server raises the control
-# listener in place of the operator one because of this line.
-backend = "remote"
-
-[translation]
-# Required: there is no default model, and the server exits without one.
-model = "gemini-3.8-flash"
-
 [server]
-# The hostname Caddy answers on, which is what reader_address builds the
-# card's address from, and not the address this process binds. Without it
-# the room has no address to hand anybody: the banner falls back to this
-# machine's own loopback and the operator page shows no QR code.
-public_url = "https://transept.example.org"
-
-# Written into every recorded session. The same name is the working
-# directory and the systemd instance, so one value names all three and
-# cannot disagree with itself.
+# Written into every recorded session, and the path segment Caddy strips
+# before it forwards. The same name is the working directory and the systemd
+# instance, so one value names all four and cannot disagree with itself.
 room = "chapel"
+
+# Different from every other room's, because the rooms share a machine. The
+# first room can leave these out and take the shared file's 8080 and 8081; a
+# second room cannot, and naming them in every room is one less thing to
+# work out when a third is added. A room that forgets fails to start on
+# "address already in use", which systemd reports as failed.
+reader_port = 8080
+control_port = 8081

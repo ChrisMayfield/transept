@@ -1150,7 +1150,7 @@ def write_pid_file(settings):
     A directory that will not take the file costs the operator a convenient
     stop, not the meeting, so the failure is reported and swallowed.
     """
-    record = {"pid": os.getpid(), "port": settings["port"],
+    record = {"pid": os.getpid(), "reader_port": settings["reader_port"],
               "operator_port": settings["operator_port"],
               "started_at": time.time()}
     try:
@@ -1176,15 +1176,38 @@ def remove_pid_file():
         pass
 
 
-def reader_address(base, token):
+def reader_address(base, room, token):
     """The whole address a phone opens: a reachable base, path, and token.
 
     Built here rather than typed into config.toml, because the token half
     of it changes every run unless reader_token pins one. An empty base
     means no public address is configured yet, and stays empty rather than
     becoming a link to nowhere.
+
+    A named room is a path segment, because rooms sharing one hostname are
+    told apart by the prefix the proxy in front strips before it forwards.
+    One value then names the working directory, the proxy's route, the
+    recorded column, and the address, rather than four that can disagree.
+    Which rooms are named here is card_room, just below.
     """
-    return f"{base.rstrip('/')}/reader?token={token}" if base else ""
+    if not base:
+        return ""
+    prefix = "/" + room.strip("/") if room.strip("/") else ""
+    return f"{base.rstrip('/')}{prefix}/reader?token={token}"
+
+
+def card_room(settings):
+    """The room segment the address on the card carries, if any.
+
+    A room is a path segment only on a hosted server, which is the one
+    deployment with a proxy in front stripping the prefix before it
+    forwards, and which is the same thing "remote" already says: the audio
+    comes from a laptop in the room because the server is somewhere else.
+    A laptop behind a tunnel serves the root, so a room named there for the
+    recorded transcript does not turn the card into an address that nothing
+    answers.
+    """
+    return settings["room"] if settings["capture"] == "remote" else ""
 
 
 async def serve(config, tokens, settings):
@@ -1210,7 +1233,7 @@ async def serve(config, tokens, settings):
                   OPERATOR_HOST, settings["operator_port"])
     listeners = (
         (build_reader_app(hub, session, tokens["reader"]),
-         settings["host"], settings["port"]),
+         settings["host"], settings["reader_port"]),
         second,
     )
     runners = []
@@ -1245,7 +1268,11 @@ def main():
                "point: a weekly run should be just `python3 server.py`.")
     parser.add_argument("--list-devices", action="store_true",
                         help="list audio input devices and exit")
-    parser.add_argument("--config", default="config.toml")
+    # Repeatable, and merged left to right, so a hosted room passes the
+    # tuning its server shares and then the file naming only itself.
+    parser.add_argument("--config", action="append", metavar="FILE",
+                        help="config file; repeat for a shared file and "
+                             "then a room's own")
     add_settings_arguments(parser, [
         "capture", "encoding",
         "asr_model", "endpointing",
@@ -1255,7 +1282,8 @@ def main():
         "languages", "grace", "max_languages",
         "glossary", "keyterms",
         "idle_stop", "record", "database",
-        "host", "port", "operator_port", "control_port", "max_readers",
+        "host", "reader_port", "operator_port", "control_port",
+        "max_readers",
         "room",
     ])
     args = parser.parse_args()
@@ -1264,7 +1292,7 @@ def main():
         capture.print_devices(args.capture or "auto")
         return
 
-    parsed = load_config(args.config)
+    parsed = load_config(*(args.config or []))
     settings = resolve(args, parsed)
     keys = load_keys(parsed)
     if not keys["deepgram_key"] or not keys["llm_key"] or not keys["llm_base"]:
@@ -1289,9 +1317,13 @@ def main():
     # is configured, and the banner falls back to the local address so that
     # a first run on one machine still has something to open.
     config["reader_url"] = reader_address(settings["public_url"],
+                                          card_room(settings),
                                           tokens["reader"])
+    # No room in the fallback: the prefix exists in front of the proxy, and
+    # this address is this process's own port with nothing in front of it.
     print("Reader:   " + (config["reader_url"] or reader_address(
-        f"http://{settings['host']}:{settings['port']}", tokens["reader"])))
+        f"http://{settings['host']}:{settings['reader_port']}", "",
+        tokens["reader"])))
     if keys["reader_token"]:
         print("That address carries reader_token from config.toml, so a "
               "printed card\nkeeps working. Clear it to have one minted per "

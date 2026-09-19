@@ -108,7 +108,7 @@ SETTINGS = [
     # Loopback by default: opening a service to a shared network should be
     # a deliberate edit, not what happens when nobody sets anything.
     ("host", "server", "host", str, "127.0.0.1"),
-    ("port", "server", "port", int, 8080),
+    ("reader_port", "server", "reader_port", int, 8080),
     ("operator_port", "server", "operator_port", int, 8081),
     # The same number as operator_port, which costs nothing because the
     # two are never built together: a server captures from a local device
@@ -131,15 +131,34 @@ SETTINGS = [
 ]
 
 
-def load_config(path="config.toml"):
-    """Read settings from config.toml. Missing file is not an error."""
-    try:
-        with open(path, "rb") as handle:
-            return tomllib.load(handle)
-    except FileNotFoundError:
-        return {}
-    except tomllib.TOMLDecodeError as exc:
-        sys.exit(f"{path} is not valid TOML: {exc}")
+def load_config(*paths):
+    """Read one or more config files, merging them left to right.
+
+    Several files are what lets a hosted server keep the tuning every room
+    shares in one place and give each room a file holding only what that
+    room has to say for itself: its ports, its tokens, and its name. The
+    later file wins key by key rather than section by section, so a room
+    naming reader_port does not lose the shared [server] host beside it.
+
+    A missing file is not an error, because the usual run passes one name
+    that may or may not exist yet and should fall through to the defaults.
+    """
+    merged = {}
+    for path in paths or ("config.toml",):
+        try:
+            with open(path, "rb") as handle:
+                loaded = tomllib.load(handle)
+        except FileNotFoundError:
+            continue
+        except tomllib.TOMLDecodeError as exc:
+            sys.exit(f"{path} is not valid TOML: {exc}")
+        for section, values in loaded.items():
+            if isinstance(values, dict) and isinstance(
+                    merged.get(section), dict):
+                merged[section].update(values)
+            else:
+                merged[section] = values
+    return merged
 
 
 def resolve(args, config):
@@ -711,7 +730,7 @@ ARGUMENT_HELP = {
     "record": "keep a transcript of the session; see record.py",
     "database": "where a recorded session is kept",
     "host": "address to bind",
-    "port": "port to bind, the one a tunnel points at",
+    "reader_port": "port to bind, the one a tunnel points at",
     "operator_port": "port for the operator controls, always loopback",
     "control_port": "port a remote sender connects to",
     "control_grace": "seconds a session outlives its sender's socket",
@@ -1049,7 +1068,11 @@ def main():
     parser.add_argument("--no-translate", action="store_true",
                         help="transcribe only, no translation model needed")
     parser.add_argument("--no-color", action="store_true")
-    parser.add_argument("--config", default="config.toml")
+    # Repeatable, and merged left to right, so a hosted room passes the
+    # tuning its server shares and then the file naming only itself.
+    parser.add_argument("--config", action="append", metavar="FILE",
+                        help="config file; repeat for a shared file and "
+                             "then a room's own")
     # Not a setting: the source changes with every reboot, so a name kept
     # in config.toml would be stale more often than it was right.
     parser.add_argument("--device",
@@ -1069,7 +1092,7 @@ def main():
         capture.print_devices(args.capture or "auto")
         return
 
-    config = load_config(args.config)
+    config = load_config(*(args.config or []))
     asyncio.run(run(args, resolve(args, config), load_keys(config)))
 
 

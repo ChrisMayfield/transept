@@ -29,12 +29,18 @@ Group=transept
 # directory is the whole of a room's separation from its neighbors.
 WorkingDirectory=/srv/transept/%i
 
+# Two config files, merged left to right: the tuning every room on this
+# server shares, and then the file naming only what this room is. A room
+# that names a port, a token, or a key of its own beats the shared file key
+# by key, and inherits the rest.
+#
 # -u for the reason transept.py already runs the server with it: Python
 # block buffers stdout when it is a pipe rather than a terminal, and the
 # journal is a pipe, so without it the startup lines and everything after
 # them wait for the process to exit, which is when they stop being worth
 # having.
-ExecStart=/srv/transept/.venv/bin/python -u /srv/transept/server.py
+ExecStart=/srv/transept/.venv/bin/python -u /srv/transept/server.py \
+          --config ../config.toml --config config.toml
 
 # The checkout is read-only to this process, so Python cannot write its
 # bytecode cache beside the code. Saying so is quieter than letting it try

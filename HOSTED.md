@@ -1,6 +1,6 @@
 # HOSTED.md
 
-An optional deployment, mostly built: steps 1 to 3 of the order of work at the end of this file are in the code, step 4's configuration is in `deploy/`, and step 5 is neither.
+An optional deployment, built: steps 1 to 3 and 5 of the order of work at the end of this file are in the code, and step 4's configuration, along with what a second room adds to it, is in `deploy/`.
 
 The default Transept deployment is the one `SETUP.md` describes: one laptop in the room, running `server.py`, with a Tailscale Funnel in front of it.
 That remains the architecture.
@@ -46,7 +46,7 @@ A phone on the building's wifi is still subject to that wifi, but a phone on cel
 
 One or more rooms, running at the same time, at separate URLs.
 Each room has its own operator on its own laptop.
-Separate API keys per room, so spend is attributed from the provider's own dashboard rather than reconstructed.
+Separate API keys per room where a room's spend is worth attributing, so it comes from the provider's own dashboard rather than being reconstructed, and the shared file's keys otherwise.
 
 There is no account provisioning, no signup, no password database, and no per-user session.
 A room's control token is the whole credential, set once when that laptop is configured.
@@ -79,14 +79,15 @@ It also keeps the blast radius of a blocking handler to one room, which matters 
 
 ### What lives in which file
 
-`--config` becomes repeatable, and files merge left to right, so a room's unit passes the shared file and then its own:
+`--config` is repeatable, and files merge left to right, so a room's unit passes the shared file and then its own:
 
 ```
 ExecStart=... server.py --config ../config.toml --config config.toml
 ```
 
 Precedence is the command line, then the last config file, then earlier ones, then the built-in default in `SETTINGS`.
-A local run passes one file and behaves exactly as it does today.
+A local run passes one file, or none, and behaves exactly as it did before.
+The merge is key by key inside a section rather than section by section, because a room naming its own ports must not lose the shared `[server] host` beside them, and a missing file is skipped rather than refused, since the usual run names one file that may not exist yet.
 
 Five values must be in a room file, and nothing else has to be:
 
@@ -104,7 +105,7 @@ control_token = "..."
 The ports must differ because the rooms run on the same rented server.
 `port` is renamed to `reader_port` along the way, since three ports called `port`, `operator_port`, and `control_port` invite exactly the mistake the rename removes, and because it then matches `reader_token`.
 The rename reaches `SETTINGS`, `ARGUMENT_HELP`, `config.example.toml`, the `--port` flag, the two reads in `transept.py`, and the key `write_pid_file` records.
-A `transept.pid` written before the rename no longer names a port the script recognizes, which `server_record` already treats as a leftover rather than a running server.
+A `transept.pid` written before the rename names a reader port under a key the script no longer reads, and is still a server it can stop, because the operator port beside it answers and `server_record` asks whether either does.
 The two tokens must differ because per-room tokens are the whole access boundary.
 The room name must differ because it is what tells the rooms apart.
 
@@ -292,13 +293,18 @@ https://transept.example.org/classroom/reader?token=...
 public_url = "https://transept.example.org/"
 ```
 
-`reader_address` takes the room as well as the base and the token, and includes the segment only when a room is named, so the default deployment keeps the address it builds today.
+`reader_address` takes the room as well as the base and the token, and includes the segment only when a room is named.
 That the room name is also the path prefix is deliberate.
 One value then names the working directory, the Caddy route, the recorded column, and the address, instead of four values that can disagree.
 
-One change is needed in `reader.html`, which builds `/stream/...` and `/api/channels` as root-absolute paths at lines 293 and 320.
-Under a stripped prefix the browser would resolve those against the host rather than the room, so the page derives its base from `location.pathname` instead.
-That is about two lines, and only the reader page needs it, since the operator page stays on loopback where no prefix exists.
+Which room it is handed is `card_room`, and the answer is the room only where `capture` is `remote`.
+The prefix exists because something in front strips it, that something is Caddy, and Caddy is in front of a hosted room, which is the same thing the backend already says: the audio arrives from a laptop because the server is somewhere else.
+The alternative, a room name that is always a prefix, breaks a laptop that names its room for the recorded transcript, since a funnel serves the root and the card would point at a path nothing answers.
+A card that 404s is exactly the kind of failure this project would rather not ship, and the rule that avoids it is the one already used to decide which listener a server raises.
+
+`reader.html` built `/stream/...` and `/api/channels` as root-absolute paths, which under a stripped prefix the browser would resolve against the host rather than the room, reaching whichever room answers the root with this room's token in the query string.
+The page derives a base from `location.pathname` instead, dropping the last segment, which is empty at the root and `/chapel` under a prefix.
+That is two lines, and only the reader page needs them, since the operator page stays on loopback where no prefix exists.
 
 A subdomain per room would need no page change at all.
 The path form is kept because two lines is a small price for the URL shape, and because one certificate and one DNS record is less to forget than one of each per room.
@@ -446,9 +452,9 @@ A `sender` section is still not worth adding: the sender's checks sit in `sessio
 - A socket gap: the session survives a drop inside the grace window, `KeepAlive` goes out during it, and the session stops once the window passes. Added.
 - A second control socket is refused while the first is live, and an attaching socket rejoins the running session instead of starting a second one. Added.
 - The control application serves no route but `/control`, so a control token opens nothing a reader token should not, and the reader application still serves nothing that writes. Added.
-- `reader.html` resolves its stream and channel URLs under a path prefix as well as at the root.
+- `reader.html` resolves its stream and channel URLs under a path prefix as well as at the root, and builds no address that goes around that base. Added.
 - A database created before the room column gains it on open, and the recorded room survives a round trip through `record.py`. Added.
-- Config files merge left to right, and a room file's value beats the shared file's.
+- Config files merge left to right, and a room file's value beats the shared file's while the rest of that section survives beside it. Added.
 - A missing encoder falls back to PCM, and the Deepgram URL declares the encoding actually being sent. Added.
 
 Three more came with the sender, because they are the state where the two halves can disagree.
@@ -471,13 +477,14 @@ The gap and attach rules are exactly the kind of state where a check that always
 3. `sender.py`: capture, the loopback operator page, the forwarded controls. Built.
    The shared operator code moved to `controls.py` rather than `operator.py`, and the Opus encoder landed with it, as the sections below now describe.
 4. Deploy one room. Written, in `deploy/`.
-   A VM, a hostname, `deploy/Caddyfile`, `deploy/transept@.service`, and `deploy/room.example.toml` copied into the room's working directory, in the order `deploy/README.md` gives.
-   One room at the root of its own hostname needs none of the path prefix work above: `reader_address` builds `/reader` as it stands, and Caddy sends `/control` to the control port and everything else to the reader port.
+   A VM, a hostname, `deploy/Caddyfile`, `deploy/transept@.service`, `config.example.toml` copied to the root of the checkout as the shared file, and `deploy/room.example.toml` copied into the room's working directory, in the order `deploy/README.md` gives.
    Both listeners bind loopback and Caddy is the only public surface, so the control socket keeps its token and its `Origin` check and is additionally unreachable except through Caddy, which is a smaller thing to guard than this file assumed.
    The room's `encoding` is `pcm`, which is not the audio going up uncompressed but this server declining to re-encode what the sender already encoded, so no `ffmpeg` belongs on the rented machine.
-5. Add a second room.
-   A second hostname is a second copy of `room.example.toml`, a second `systemctl enable`, and a second block in the `Caddyfile`, and needs no code.
-   A second room under a path prefix on one hostname needs four things that are not built: `--config` taking more than one file and merging left to right, `port` renamed to `reader_port`, `reader_address` taking a room, and `reader.html` deriving its base from `location.pathname`.
+   The first room was deployed at the root of its own hostname, before the path prefix work below, and moving it under one is the three edits at the end of `deploy/README.md`.
+5. Add a second room. Built.
+   The four things it needed are in the code: `--config` takes more than one file and merges left to right, `port` is `reader_port`, `reader_address` takes a room, and `reader.html` derives its base from `location.pathname`.
+   A second room is then a copy of `room.example.toml` with its own name, tokens, and ports, a second `systemctl enable`, and a second block in the `Caddyfile`, and no code at all.
+   A second hostname would work as well and needs even less, but one certificate and one DNS record is less to forget than one of each per room.
 
 Steps 2 and 3 are the bulk of the code.
-Step 4 is configuration, and step 5 is the test of whether a room really is just a process.
+Step 4 is configuration, and step 5 was the test of whether a room really is just a process: four small changes, none of them about rooms knowing about each other, because none of them do.

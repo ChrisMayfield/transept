@@ -130,7 +130,7 @@ def read_config(path=None):
     except (OSError, tomllib.TOMLDecodeError) as failure:
         sys.exit(f"Could not read config.toml: {failure}")
     try:
-        return (int(server.get("port", 8080)),
+        return (int(server.get("reader_port", 8080)),
                 int(server.get("operator_port", 8081)),
                 str(server.get("public_url", "")))
     except (TypeError, ValueError):
@@ -152,7 +152,7 @@ def server_record():
         pid = int(record["pid"])
     except (OSError, ValueError, KeyError, TypeError):
         return None
-    ports = [port for port in (record.get("port"),
+    ports = [port for port in (record.get("reader_port"),
                                record.get("operator_port"))
              if isinstance(port, int)]
     if alive(pid) and any(listening(port) for port in ports):

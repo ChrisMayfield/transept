@@ -271,7 +271,7 @@ sudo tailscale set --operator=$USER
 tailscale funnel 8080
 ```
 
-8080 is the `port` setting in `config.toml`, so use whatever number is there if you have changed the port.
+8080 is the `reader_port` setting in `config.toml`, so use whatever number is there if you have changed the port.
 
 The first time you run the command, Tailscale does not have the permissions a funnel needs, so the command prints a link to the admin console.
 Open the link, which is where you enable HTTPS certificates and grant this laptop the Funnel attribute, then run the same command again.

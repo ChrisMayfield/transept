@@ -204,6 +204,13 @@ const reader = (crypto.randomUUID ? crypto.randomUUID()
 // since the address is what the QR code and the shared link both carry.
 const token = new URLSearchParams(location.search).get("token") || "";
 
+// Everything this page asks for is asked for beside itself, rather than at
+// the root. A hosted server puts each room under a path prefix that the
+// proxy in front strips before forwarding, so this page is /chapel/reader
+// to the phone and /reader to the server, and a root-absolute /stream/...
+// would leave the room and reach whichever room answers the root.
+const base = location.pathname.replace(/\/[^/]*$/, "");
+
 // The first dot is the only thing on this page that says whether subtitles
 // are still arriving, and a pause in the room looks exactly like a dropped
 // connection. The title is what tells the two apart, so it moves with the
@@ -328,7 +335,7 @@ function connect(channel) {
   feed.innerHTML = '<p class="waiting" id="waiting"></p>';
   speak(channel);
   localStorage.setItem("subtitleChannel", channel);
-  source = new EventSource("/stream/" + encodeURIComponent(channel)
+  source = new EventSource(base + "/stream/" + encodeURIComponent(channel)
                            + "?reader=" + encodeURIComponent(reader)
                            + "&token=" + encodeURIComponent(token));
   source.onopen = () => connected(true);
@@ -361,7 +368,7 @@ document.addEventListener("visibilitychange", () => {
 });
 keepAwake();
 
-fetch("/api/channels?token=" + encodeURIComponent(token))
+fetch(base + "/api/channels?token=" + encodeURIComponent(token))
     .then((r) => r.json()).then(({ channels }) => {
   // Alphabetical, English included: the server lists English first because
   // that is the order the pipeline works in, but a reader looking for

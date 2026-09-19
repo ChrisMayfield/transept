@@ -130,7 +130,7 @@ database = "sessions.db"
 # That works, but it is plain HTTP, so phone screens will go dark mid
 # sentence because the wake lock needs a secure context.
 host = "127.0.0.1"
-port = 8080
+reader_port = 8080
 
 # The operator controls listen separately, always on 127.0.0.1, so that
 # pointing a tunnel at the port above cannot expose them. A headless
@@ -169,5 +169,9 @@ public_url = "https://chapel.your-tailnet.ts.net/"
 
 # A name for this room, written into each recorded session so a transcript
 # still says where it was said once several rooms' recordings are read
-# together. Leave empty when this machine serves the only room.
+# together. Safe to name on any machine: it becomes a path segment in the
+# address above only where backend is "remote", which is the hosted
+# deployment in HOSTED.md, where a proxy in front strips that prefix to
+# tell rooms sharing one hostname apart. A laptop behind a tunnel serves
+# the root and keeps the address it always built.
 room = ""
