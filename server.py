@@ -45,11 +45,8 @@ QR code or a bookmarked link keeps working from week to week.
 import argparse
 import asyncio
 import hashlib
-import hmac
-import io
 import json
 import os
-import secrets
 import sys
 import time
 from collections import deque
@@ -63,22 +60,20 @@ except ImportError:
 
 import capture
 import record
+from controls import (OPERATOR_HOST, authorized, build_operator_app,
+                      mint_token, page)
 from pipeline import (SYSTEM_PROMPT, Segmenter, Translator,
                       add_settings_arguments,
                       build_asr_url, install_stop_handler, listen,
                       load_config, load_file_lines, load_glossary,
-                      load_keys, publish, pump_audio,
+                      load_keys, open_encoder, publish, pump_audio,
                       resolve)
 
-STATIC = Path(__file__).parent / "static"
 # Where this process records itself so the transept script can stop it
 # later. In the working directory rather than beside the code, because that
 # is where config.toml, the glossary, and sessions.db already live, and "a
 # server running out of this directory" is the thing being identified.
 PID_FILE = Path("transept.pid")
-# Not a setting: the point of the second listener is that a tunnel cannot
-# be pointed at it by mistake.
-OPERATOR_HOST = "127.0.0.1"
 HISTORY = 60
 RECONNECT_BACKOFF = [1, 2, 5, 10, 20]
 # Seconds a run must last to count as healthy and reset the backoff. Without
@@ -528,7 +523,16 @@ class Session:
         """The audio for one run: a local device, or the room's sender."""
         if self.source is not None:
             return await self.source()
-        return await capture.open_capture(self.device, self.config["capture"])
+        source = await capture.open_capture(self.device,
+                                            self.config["capture"])
+        # Compressed on the way out, because the leg that fails in a real
+        # building is audio leaving it. A machine with no encoder says so
+        # here rather than on the operator page, which has a meeting to
+        # report on and nothing to do about ffmpeg.
+        source, note = await open_encoder(source, self.config["encoding"])
+        if note:
+            print(note)
+        return source
 
     async def _run_once(self):
         config = self.config
@@ -791,28 +795,10 @@ class ControlRoom:
 
 
 # -- web layer -------------------------------------------------------------
-
-
-def authorized(request):
-    """True if this request carries the token its listener was given.
-
-    One rule, two tokens: each application holds its own under app["token"],
-    so a reader link opens nothing on the operator port and the reverse.
-    No tokenless mode on either. The reader port is on the public internet
-    through the tunnel, and on the operator port loopback alone would still
-    let a page in another browser tab post a cross-origin form at these
-    routes.
-    """
-    token = request.app["token"]
-    supplied = (request.headers.get("X-Subtitle-Token")
-                or request.query.get("token") or "")
-    # Bytes, because compare_digest on two str raises TypeError outside
-    # ASCII and a query string can carry that.
-    return hmac.compare_digest(supplied.encode(), token.encode())
-
-
-async def page(request, filename):
-    return web.FileResponse(STATIC / filename)
+#
+# The reader half only. The operator page and its routes live in
+# controls.py, because sender.py serves the same page beside the
+# microphone when the audio comes from a laptop in another building.
 
 
 async def nothing_here(request):
@@ -834,89 +820,6 @@ async def reader_page(request):
             text="This link is not for this meeting. Scan the QR code or "
                  "use the link for today.")
     return await page(request, "reader.html")
-
-
-async def operator_page(request):
-    if not authorized(request):
-        return web.Response(status=403, text="Add ?token=... to this address.")
-    return await page(request, "operator.html")
-
-
-async def api_status(request):
-    """Everything the operator page shows, which is more than a reader sees.
-
-    Behind the token: it names the audio device and the model and carries
-    raw exception text.
-    """
-    if not authorized(request):
-        return web.json_response({"ok": False, "message": "Not authorized."},
-                                 status=403)
-    return web.json_response(request.app["session"].status())
-
-
-async def api_devices(request):
-    """Input devices, so the operator picks from a list rather than typing."""
-    if not authorized(request):
-        # The devices-and-error shape this route already returns, not the
-        # ok-and-message shape: the page destructures the list and would
-        # throw on a missing one.
-        return web.json_response({"devices": [], "error": "Not authorized."},
-                                 status=403)
-    config = request.app["session"].config
-    try:
-        # In a thread: list_devices shells out to pactl with a five second
-        # timeout, and this loop is also feeding the subtitles.
-        devices = await asyncio.to_thread(capture.list_devices,
-                                          config["capture"])
-    except capture.CaptureError as exc:
-        return web.json_response({"devices": [], "error": str(exc)})
-    # Which one to pre-select, decided here rather than on the page: the
-    # page sorts the list by name and so no longer knows the order the
-    # backend offered them in. capture.choose_default holds the rule.
-    return web.json_response({"devices": devices,
-                              "suggested": capture.choose_default(devices)})
-
-
-async def read_body(request):
-    """The posted JSON object, or an empty one.
-
-    A malformed or absent body is not a server error. The operator page
-    renders the {"ok": false} shape and renders a 500 traceback as nothing.
-    """
-    if not request.can_read_body:
-        return {}
-    try:
-        body = await request.json()
-    except (ValueError, json.JSONDecodeError):
-        return {}
-    return body if isinstance(body, dict) else {}
-
-
-async def api_start(request):
-    if not authorized(request):
-        return web.json_response({"ok": False, "message": "Not authorized."},
-                                 status=403)
-    body = await read_body(request)
-    ok, message = await request.app["session"].start(body.get("device"))
-    return web.json_response({"ok": ok, "message": message})
-
-
-async def api_stop(request):
-    if not authorized(request):
-        return web.json_response({"ok": False, "message": "Not authorized."},
-                                 status=403)
-    ok, message = await request.app["session"].stop()
-    return web.json_response({"ok": ok, "message": message})
-
-
-async def api_language(request):
-    if not authorized(request):
-        return web.json_response({"ok": False, "message": "Not authorized."},
-                                 status=403)
-    body = await read_body(request)
-    ok, message = request.app["session"].set_override(
-        body.get("language"), body.get("mode"))
-    return web.json_response({"ok": ok, "message": message})
 
 
 async def stream(request):
@@ -978,36 +881,6 @@ async def stream(request):
     return response
 
 
-async def qr_code(request):
-    """QR for the reader address, rendered on demand as SVG.
-
-    Drawn from public_url rather than the bind address, because the address
-    this server listens on is not the one a phone can reach, and carrying
-    the reader token, because without it that address answers nothing.
-
-    Behind the operator token like the rest of this listener, now that the
-    image encodes the reader token: a page in another tab of the operator's
-    browser can point an <img> at a loopback port without asking anybody.
-    """
-    if not authorized(request):
-        return web.Response(status=403, text="Not authorized.")
-    url = request.app["session"].config.get("reader_url")
-    if not url:
-        return web.Response(status=404, text="No public_url configured.")
-    try:
-        import segno
-    except ImportError:
-        return web.Response(status=501, text="pip install segno")
-
-    buffer = io.BytesIO()
-    # Medium error correction, which survives a printed card getting scuffed.
-    segno.make(url, error="m").save(
-        buffer, kind="svg", scale=8, border=2, dark="#16181d", light="#ffffff")
-    return web.Response(body=buffer.getvalue(),
-                        content_type="image/svg+xml",
-                        headers={"Cache-Control": "max-age=600"})
-
-
 async def api_channels(request):
     if not authorized(request):
         # The channels-and-error shape the reader page destructures, so a
@@ -1035,31 +908,6 @@ def build_reader_app(hub, session, token):
         web.get("/reader", reader_page),
         web.get("/api/channels", api_channels),
         web.get("/stream/{channel}", stream),
-    ])
-    return app
-
-
-def build_operator_app(hub, session, token):
-    """The controls, on a listener the tunnel never sees.
-
-    A separate listener rather than a check in the handlers: the tunnel
-    daemon connects from this machine, so a public visitor and the
-    operator both arrive from 127.0.0.1 and no check can tell them apart.
-    A token of its own, not the reader's: the link the whole room is given
-    must not be the link that can press Start.
-    """
-    app = web.Application()
-    app["hub"] = hub
-    app["session"] = session
-    app["token"] = token
-    app.add_routes([
-        web.get("/operator", operator_page),
-        web.get("/api/status", api_status),
-        web.get("/api/devices", api_devices),
-        web.post("/api/start", api_start),
-        web.post("/api/stop", api_stop),
-        web.post("/api/language", api_language),
-        web.get("/qr.svg", qr_code),
     ])
     return app
 
@@ -1218,18 +1066,6 @@ def build_control_app(room, token):
     return app
 
 
-def mint_token(pinned=""):
-    """A token for one of the two addresses.
-
-    Minted for the run unless [keys] pins one, so a link that leaks expires
-    when the server does. The overrides exist for development, where a new
-    address every restart is a new link to click every restart, and for a
-    room that prints its reader card once and wants it to keep working; a
-    pinned operator token should be left empty for a meeting.
-    """
-    return pinned or secrets.token_urlsafe(32)
-
-
 def write_pid_file(settings):
     """Record this process, once it is really listening.
 
@@ -1298,7 +1134,7 @@ async def serve(config, tokens, settings):
                   settings["host"], settings["control_port"])
     else:
         session = Session(config, hub)
-        second = (build_operator_app(hub, session, tokens["operator"]),
+        second = (build_operator_app(session, tokens["operator"]),
                   OPERATOR_HOST, settings["operator_port"])
     listeners = (
         (build_reader_app(hub, session, tokens["reader"]),
@@ -1339,7 +1175,7 @@ def main():
                         help="list audio input devices and exit")
     parser.add_argument("--config", default="config.toml")
     add_settings_arguments(parser, [
-        "capture",
+        "capture", "encoding",
         "asr_model", "endpointing",
         "ceiling", "gap",
         "model", "reasoning_effort", "correct_english", "max_tokens",

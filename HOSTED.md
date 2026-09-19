@@ -1,6 +1,6 @@
 # HOSTED.md
 
-An optional deployment, proposed and not yet built.
+An optional deployment, half built: steps 1 to 3 of the order of work at the end of this file are in the code, and steps 4 and 5 are configuration nobody has written yet.
 
 The default Transept deployment is the one `SETUP.md` describes: one laptop in the room, running `server.py`, with a Tailscale Funnel in front of it.
 That remains the architecture.
@@ -174,18 +174,35 @@ It opens `capture.open_capture`, connects a websocket to the server, pumps audio
 
 It is a pipe, not a second pipeline.
 It runs no `Segmenter`, no `Translator`, and no `publish`, so it is not the duplicated-loop mistake `CLAUDE.md` records.
-If `pump_audio` can be reused by parameterizing the message it sends on the way out, which is `CloseStream` for Deepgram and something else here, reuse it; if that turns out to be contortion, a six-line loop of its own is honest.
+`pump_audio` was not reused, and the reason is not the `CloseStream` message it sends on the way out.
+That loop ends when the device does, which is right for a pipeline that owns its socket from one end to the other; `Remote.pump` outlives both the socket and the microphone, because the microphone stays open across a reconnect and the socket comes and goes under it.
+It also has to read a chunk and drop it while there is no socket, rather than leave it in the encoder's pipe, which would fill during a blip and then deliver a minute of stale audio to a meeting that had moved on.
+That is the rule `ControlRoom` already keeps at the other end, where audio arriving between recognizer runs has no socket to go up.
 
 `/api/devices` stays on the sender and keeps working unchanged, because the audio device genuinely is local knowledge.
 `/api/start`, `/api/stop`, and `/api/language` become messages the sender forwards over the control socket.
-`/api/status` is served from the last status snapshot the server pushed down that socket, so the operator page barely changes.
+`/api/status` is served from the last status snapshot the server pushed down that socket, so the operator page did not change at all.
 `/qr.svg` is rendered locally with `segno`, from the reader address the server sends when the socket opens.
+
+Two things the snapshot cannot say, the sender lays over the top of it.
+Which microphone is open, because that is this laptop's and the server only knows the name it was handed.
+And whether the socket is up at all, because a snapshot from thirty seconds ago describing a running meeting is exactly what a dropped connection looks like, and the page would show a healthy meeting with no way to tell.
+
+The two halves can also come to disagree about whether a meeting is on, in both directions.
+A session can end without this laptop asking, because the idle watchdog stopped it, and a microphone left open here would read a room nobody is listening to.
+A sender restarted mid-meeting finds a session running with nobody feeding it, which is what attaching is for: it reopens the device the status names and carries on.
+Reconciling on the pushed status rather than on the `ready` frame is what makes both work, since `ready` is sent before the intent on the hello has started anything.
+The cost is that a status saying stopped in the first few seconds after Start is the session that had not begun yet, rather than one that ended, so it is taken at its word only after a short grace.
 
 ### Where the shared operator code lives
 
 `authorized`, `mint_token`, `read_body`, `operator_page`, `api_status`, `api_devices`, `api_start`, `api_stop`, `api_language`, `qr_code`, and `build_operator_app` all live in `server.py` today, and `sender.py` needs every one of them.
-They move to a new `operator.py`, which both entry points import and which imports neither.
-`server.py` still uses `authorized` for the reader application, so the shared helpers move too rather than being reached back for.
+They move to a new `controls.py`, which both entry points import and which imports neither.
+`server.py` still uses `authorized` and `page` for the reader application, so the shared helpers move too rather than being reached back for, along with `STATIC` and `OPERATOR_HOST`.
+
+The file is `controls.py` and not `operator.py` because `operator` is a standard library module, and a file of that name beside the code shadows it for everything started from this directory.
+Not a subtle failure: `collections` imports `operator`, so `import collections` fails, and with it aiohttp, websockets, and httpx.
+`build_operator_app` also lost its `hub` argument, because no route on that listener ever read one, and a sender has no Hub to pass.
 
 Copying them instead is the mistake this project has already made once, when the pipeline loops were duplicated and the copies drifted until a session start raised `NameError`.
 Importing `server.py` from `sender.py` would work, since `server.py` defines only constants, classes, and functions, but it reads backwards and drags `Hub` and `Session` into a program that has neither.
@@ -363,6 +380,10 @@ A sender with no working `ffmpeg` says `pcm` in its opening message, the server 
 
 ### A missing ffmpeg is not a failure
 
+Two ffmpeg defaults have to be overridden, and both are latency rather than tuning.
+ffmpeg reads about two seconds of a raw stream before it decides what the stream is, which `-analyzeduration 0 -probesize 32` turns off, and the ogg muxer holds a full second of audio in a page before writing it, which `-page_duration 20000` cuts to 20 milliseconds.
+Measured on the first attempt: without them the first byte out of the encoder arrived 1.9 seconds after the first byte in, which would have been added to every sentence in the meeting.
+
 `ffmpeg` is a system binary rather than a package in `requirements.txt`, and defaulting to Opus would otherwise make it a requirement on every operator machine including Windows.
 So an encoder that is missing or will not start falls back to PCM and says so, the way `sounddevice` and `segno` are already handled: optional, with the failure caught and reported rather than raised.
 
@@ -397,7 +418,12 @@ Each row joins `SETTINGS`, `ARGUMENT_HELP`, and `config.example.toml` at the sam
 ("reader_port",   "server",  "reader_port",   int,   8080)    renamed from port
 ("control_port",  "server",  "control_port",  int,   8081)
 ("control_grace", "server",  "control_grace", float, 30.0)
+("control_url",   "server",  "control_url",   str,   "")
 ```
+
+`control_url` was not in the original list and is the sender's third setting, beside `room` and `control_token`: the whole address of a room's control socket, path and all, because a hosted room lives under a path prefix of its own.
+It is a setting rather than a flag-only argument for the reason the tokens are pinned, which is that a sender is configured once and has to keep working.
+Only `sender.py` reads it, and a room's server ignores it.
 
 `control_grace` is spelled out rather than called `grace`, because `[languages] grace` already means how long a language survives its last reader, and the two are unrelated.
 
@@ -414,19 +440,25 @@ One new `SECRETS` row, whose third column is the second in capitals as the table
 
 `selftest.py` stays the whole suite, needing no keys, no audio device, and no network.
 The first four belong in `pipeline`, the next three in `session`, the room column in `store`, and the last two in `server`.
-A `sender` section is not worth adding until `sender.py` holds logic of its own rather than a socket and a proxy.
+A `sender` section is still not worth adding: the sender's checks sit in `session` for what the proxy decides on its own, and in `server` for what it and a real server have to agree on.
 
-- `RemoteCapture` through the pipeline: a fake socket feeding chunks produces units, in the shape `FakeSocket` and `FakeSource` already use.
-- A socket gap: the session survives a drop inside the grace window, `KeepAlive` goes out during it, and the session stops once the window passes.
-- A second control socket is refused while the first is live, and an attaching socket rejoins the running session instead of starting a second one.
-- The control application serves no route but `/control`, so a control token opens nothing a reader token should not, and the reader application still serves nothing that writes.
+- `RemoteCapture` through the pipeline: a fake socket feeding chunks produces units, in the shape `FakeSocket` and `FakeSource` already use. Added.
+- A socket gap: the session survives a drop inside the grace window, `KeepAlive` goes out during it, and the session stops once the window passes. Added.
+- A second control socket is refused while the first is live, and an attaching socket rejoins the running session instead of starting a second one. Added.
+- The control application serves no route but `/control`, so a control token opens nothing a reader token should not, and the reader application still serves nothing that writes. Added.
 - `reader.html` resolves its stream and channel URLs under a path prefix as well as at the root.
-- A database created before the room column gains it on open, and the recorded room survives a round trip through `record.py`.
+- A database created before the room column gains it on open, and the recorded room survives a round trip through `record.py`. Added.
 - Config files merge left to right, and a room file's value beats the shared file's.
-- A missing encoder falls back to PCM, and the Deepgram URL declares the encoding actually being sent.
+- A missing encoder falls back to PCM, and the Deepgram URL declares the encoding actually being sent. Added.
+
+Three more came with the sender, because they are the state where the two halves can disagree.
+
+- The sender answers the operator page in full before any server has spoken to it, checked against a real `Session.status()` rather than against the sender's own table.
+- A stopped status just after Start is the session that had not begun yet, and a stopped status later is a session that ended without being asked, which closes the microphone here.
+- A chunk captured on the laptop arrives at the source the recognizer reads, with the server holding the encoding the sender declared.
 
 Each needs the revert test: add the check, undo the fix, confirm the check fails.
-The gap and attach rules are exactly the kind of state where a check that always passes is easy to write by accident.
+The gap and attach rules are exactly the kind of state where a check that always passes is easy to write by accident, and so is the shape of a status: a table checked against itself cannot fail, which is how the first version of that check was written.
 
 ## Order of work
 
@@ -436,7 +468,8 @@ The gap and attach rules are exactly the kind of state where a check that always
    Tested on a single laptop, loopback to loopback, before anything was rented.
    The encoder is not part of it: nothing yet produces Opus, so there is no `encoding` setting, and a sender that declares `opus` in its hello gets a recognizer URL built for it and nothing else.
    That setting belongs with the `ffmpeg` encoder, which sits on the machine that captures, and so lands with the sender.
-3. `sender.py`: capture, the loopback operator page, the forwarded controls.
+3. `sender.py`: capture, the loopback operator page, the forwarded controls. Built.
+   The shared operator code moved to `controls.py` rather than `operator.py`, and the Opus encoder landed with it, as the sections below now describe.
 4. Deploy one room.
    VM, domain, Caddy, one systemd unit, `chapel.toml`.
 5. Add a second room, which is a second config file, a second unit, and a second Caddy route.

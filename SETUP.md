@@ -99,6 +99,11 @@ pip install -r requirements.txt
 sudo apt install libportaudio2
 ```
 
+**Optional, and worth having:** `ffmpeg`, which compresses the audio on its way to the speech recognizer and cuts what Transept sends out of your building to about an eighth.
+It is a system program rather than a Python package: `sudo apt install ffmpeg` on Linux, `brew install ffmpeg` on macOS, or the Windows build from ffmpeg.org put somewhere on your PATH.
+Nothing needs it.
+A machine without one sends uncompressed audio and says so in the first few lines it prints, which is the only difference you will see.
+
 Now check that the software itself works:
 
 ```sh
@@ -349,6 +354,11 @@ Both dashboards let you set a spending limit, which is worth doing.
 
 Most defaults are fine, and none of the settings below are needed to run a meeting.
 These are the settings in `config.toml` worth understanding once you have run a few meetings, listed in the order they appear in the file.
+
+`encoding` (`opus`) is how the audio is sent to the speech recognizer.
+Opus is about an eighth of the bandwidth of raw audio and the recognizer hears no difference, which matters on a slow or busy upload.
+It needs `ffmpeg` on this machine; without one Transept prints a line saying so and sends raw audio instead, and everything still works.
+Set it to `pcm` if a real run shows recognition getting worse, which would be a surprise worth reporting.
 
 `endpointing` (400 milliseconds) is how much silence ends an utterance for the speech recognizer.
 Lower is snappier but clips people who pause in the middle of a sentence.

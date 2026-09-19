@@ -35,9 +35,10 @@ operator_token = ""
 
 # What a remote sender authenticates with, for the hosted deployment
 # HOSTED.md describes, where the audio comes over a socket from a laptop in
-# the room rather than from a sound card on this machine. Pinned rather
-# than minted, because the sender is configured once and has to keep
-# working; only read when [audio] backend is "remote".
+# the room rather than from a sound card on this machine. The same value
+# goes in both files: the server's, where [audio] backend is "remote", and
+# the laptop's, where sender.py reads it. Pinned rather than minted,
+# because the sender is configured once and has to keep working.
 control_token = ""
 
 [audio]
@@ -48,6 +49,12 @@ control_token = ""
 # arrives over the control socket from a sender in the room, and this
 # server raises the control listener below in place of the operator one.
 backend = "auto"
+
+# What goes up to the speech recognizer. Raw audio is 256 kbps and Opus is
+# about an eighth of that, with no difference the recognizer can hear, which
+# matters wherever the audio leaves a building on a busy uplink. Needs ffmpeg
+# on this machine; without one it falls back to "pcm" and says so at startup.
+encoding = "opus"
 
 [recognition]
 model = "nova-3"
@@ -142,6 +149,11 @@ control_port = 8081
 # meanwhile, so a wifi blip costs a gap in the transcript rather than the
 # meeting.
 control_grace = 30
+
+# The other end of that port, read by sender.py rather than by the server:
+# the whole address of the room's control socket on the hosted server, path
+# and all. Only sender.py reads it, and a room's server ignores it.
+control_url = ""
 
 # Most readers to serve at once, 0 for no cap. Every reader costs a queue,
 # a socket, and a write on every published line, and the reader link can

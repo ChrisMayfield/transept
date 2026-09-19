@@ -29,6 +29,7 @@ import contextlib
 import io
 import json
 import os
+import shutil
 import socket
 import sqlite3
 import subprocess
@@ -42,11 +43,14 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import websockets
+from aiohttp import web
 from websockets.sync.client import connect as ws_connect
 
 import capture
+import controls
 import pipeline
 import record
+import sender
 import server
 import transept
 
@@ -213,7 +217,7 @@ def fake_config(**overrides):
     config = {
         "languages": ["French", "Swahili"], "grace": 90.0,
         "correct_english": True, "ceiling": 4.0, "gap": 0.6, "hold": 8.0,
-        "capture": "auto", "asr_model": "nova-3",
+        "capture": "auto", "encoding": "pcm", "asr_model": "nova-3",
         "endpointing": 400, "keyterms": ["Kalema"], "glossary": "",
         "model": "fake-model", "max_tokens": 2000, "timeout": 15.0,
         "reasoning_effort": "low", "idle_stop": 0, "public_url": "",
@@ -565,6 +569,60 @@ async def check_pipeline(checks):
     checks.check("every backend says what it yields",
                  declared == ("pcm", "pcm", "pcm", "opus"), declared)
 
+    checks.section("Compressing the audio on the way out")
+    plain = FakeSource()
+    same, note = await pipeline.open_encoder(plain, "pcm")
+    checks.check("asking for pcm starts no encoder at all",
+                 same is plain and not note, note)
+    remote = capture.RemoteCapture(1.0, "opus")
+    same, note = await pipeline.open_encoder(remote, "opus")
+    # Audio from a sender arrives already compressed, and a second codec
+    # pass on the server would cost latency to save nothing.
+    checks.check("audio that arrived encoded is not encoded again",
+                 same is remote and not note, note)
+
+    original = pipeline.ENCODER_COMMAND
+    try:
+        pipeline.ENCODER_COMMAND = ["transept-no-such-encoder"]
+        source, note = await pipeline.open_encoder(FakeSource(), "opus")
+        checks.check("a machine with no ffmpeg falls back to raw audio",
+                     source.encoding == "pcm", source.encoding)
+        checks.check("and says so rather than failing to start",
+                     "ffmpeg" in note, note or "nothing was said")
+        # An ffmpeg built without libopus exits during setup rather than on
+        # the first chunk, which is why the fallback is decided by watching
+        # the process rather than by finding the binary.
+        pipeline.ENCODER_COMMAND = [sys.executable, "-c",
+                                    "raise SystemExit(1)"]
+        source, note = await pipeline.open_encoder(FakeSource(), "opus")
+        checks.check("an encoder that will not run falls back too",
+                     source.encoding == "pcm" and note, note or "no note")
+    finally:
+        pipeline.ENCODER_COMMAND = original
+
+    if shutil.which("ffmpeg"):
+        source, note = await pipeline.open_encoder(FakeSource(), "opus")
+        checks.check("where ffmpeg exists, the source is wrapped in Opus",
+                     source.encoding == "opus" and not note, note)
+        first = b""
+        try:
+            first = await asyncio.wait_for(source.read(), timeout=5)
+        except TimeoutError:
+            pass
+        finally:
+            await source.close()
+        # The Ogg capture pages Deepgram reads the rate and channel count
+        # out of, which is why build_asr_url declares neither for Opus.
+        checks.check("and what comes out of it is an Ogg stream",
+                     first[:4] == b"OggS", first[:16])
+        declared = pipeline.build_asr_url(settings, [], "opus")
+        checks.check("so the recognizer is told what is really being sent",
+                     "linear16" not in declared, declared)
+    else:
+        # Not a pass dressed up as one: nothing was exercised, and the
+        # machine that runs a meeting is the one that has to be checked.
+        print("  [SKIP] the Opus path needs ffmpeg, which is not installed")
+
     checks.section("Choosing the remote backend")
     checks.check("remote is a backend, and never the one auto picks",
                  capture.resolve_backend("remote") == "remote"
@@ -822,6 +880,156 @@ async def check_session(checks):
                  room.session.error)
 
 
+async def check_local_encoder(checks):
+    """A session capturing its own audio compresses it on the way out.
+
+    Compression is not only for the hosted deployment: the leg that failed
+    in a real building is audio leaving it, and that leg is the same one a
+    laptop with a sound card uses.
+    """
+    checks.section("A local device on its way to the recognizer")
+    hub = server.Hub(["French"])
+    session = server.Session(fake_config(encoding="opus"), hub)
+    session.device = "a microphone"
+    captured = FakeSource()
+
+    async def opens(device, backend):
+        return captured
+
+    original_open = capture.open_capture
+    original_command = pipeline.ENCODER_COMMAND
+    try:
+        capture.open_capture = opens
+        # A stand-in for ffmpeg rather than ffmpeg, so this check runs the
+        # same on a machine that has one and a machine that does not.
+        pipeline.ENCODER_COMMAND = [
+            sys.executable, "-c",
+            "import shutil, sys; "
+            "shutil.copyfileobj(sys.stdin.buffer, sys.stdout.buffer)"]
+        source = await session._open_source()
+        checks.check("a session opening a local device wraps it for the way "
+                     "out", source.encoding == "opus", source.encoding)
+        await source.close()
+        checks.check("and closing it closes the device underneath",
+                     captured.closed, "the device was left open")
+
+        session.config["encoding"] = "pcm"
+        plain = await session._open_source()
+        checks.check("asking for raw audio hands the device straight over",
+                     plain is captured, plain)
+    finally:
+        capture.open_capture = original_open
+        pipeline.ENCODER_COMMAND = original_command
+
+
+async def check_sender_proxy(checks):
+    """The sender's proxy, which is the other implementation of Session.
+
+    controls.py serves one operator page against an object with four
+    methods, and this is the object when the audio is captured in one
+    building and recognized in another. Nothing here touches a socket:
+    what is checked is what the page gets before there is a server, and
+    the two ways this laptop and that server can come to disagree.
+    """
+    checks.section("The sender's half of the operator page")
+    remote = sender.Remote({"capture": "auto", "reader_url": ""},
+                           "chapel", "pcm")
+    status = remote.status()
+    # Against a real Session rather than against the sender's own table,
+    # which would be a check comparing one thing with itself. The page
+    # renders whatever Session produces, without checking, so a field that
+    # exists there and not here shows up in the room as the word undefined.
+    expected = make_session(["French"], True, [])[0].status()
+    missing = [key for key in expected if key not in status]
+    checks.check("a sender with no server still answers the page in full",
+                 not missing, missing)
+    checks.check("and says the server is not there rather than saying "
+                 "nothing", status["state"] == "stopped"
+                 and "connect" in (status["error"] or ""), status)
+    ok, message = remote.set_override("French", "on")
+    checks.check("a language button with no socket is refused, not dropped",
+                 ok is False and "connect" in message, message)
+    ok, message = await remote.start("")
+    checks.check("starting with no device chosen asks for one",
+                 ok is False, message)
+    ok, message = await remote.stop()
+    checks.check("stopping what never started says so", ok is False, message)
+
+    opened = []
+
+    async def opens(device, backend):
+        opened.append(device)
+        return FakeSource()
+
+    async def refuses(device, backend):
+        opened.append(device)
+        raise capture.CaptureError("no such device")
+
+    original = capture.open_capture
+    capture.open_capture = opens
+    try:
+        ok, message = await remote.start("a microphone")
+        checks.check("starting opens the microphone on this laptop first",
+                     ok and opened == ["a microphone"], message)
+        hello = remote.hello()
+        # Start is not a message. A sender says what it means in its
+        # hello, because a reconnecting one has to say whether it is
+        # beginning a meeting or rejoining one.
+        checks.check("and asks for the session in a hello, not a message",
+                     (hello["intent"], hello["device"], hello["room"])
+                     == ("start", "a microphone", "chapel"), hello)
+        checks.check("which is why a start needs a connection of its own",
+                     remote.redial.is_set())
+        checks.check("a sender capturing with no socket reads as "
+                     "reconnecting",
+                     remote.status()["state"] == "reconnecting",
+                     remote.status())
+
+        await remote.update({"state": "stopped", "device": "a microphone"})
+        checks.check("a stopped status just after Start is the session that "
+                     "had not begun yet",
+                     remote.source is not None, "the microphone was closed")
+        await remote.update({"state": "running", "device": "a microphone"})
+        checks.check("once it is running the next hello is an attach",
+                     remote.hello()["intent"] == "attach", remote.hello())
+
+        remote.started = time.monotonic() - sender.START_GRACE - 1
+        await remote.update({"state": "stopped", "device": "a microphone"})
+        # The idle watchdog stops sessions, and a microphone left open
+        # here would go on reading a room nobody is listening to.
+        checks.check("a session that stopped on its own closes the "
+                     "microphone here", remote.source is None, remote.source)
+
+        await remote.update({"state": "running", "device": "a microphone"})
+        checks.check("a sender that finds a meeting already running "
+                     "rejoins it",
+                     remote.source is not None
+                     and opened[-1] == "a microphone", opened)
+        await remote.release()
+
+        capture.open_capture = refuses
+        await remote.update({"state": "running", "device": "gone"})
+        attempts = len(opened)
+        await remote.update({"state": "running", "device": "gone"})
+        checks.check("a device that will not reopen is reported once, not "
+                     "once a second",
+                     len(opened) == attempts
+                     and "no such device" in (remote.error or ""),
+                     f"{len(opened) - attempts} more attempts, "
+                     f"{remote.error}")
+        remote.socket = object()
+        # The page shows an error only while a session is not running, so
+        # a meeting this laptop is not feeding has to read as one.
+        checks.check("and a meeting nobody here is feeding does not read "
+                     "as a healthy one",
+                     remote.status()["state"] == "reconnecting",
+                     remote.status())
+        remote.socket = None
+    finally:
+        capture.open_capture = original
+        await remote.release()
+
+
 # -- the running server ------------------------------------------------------
 
 
@@ -918,23 +1126,23 @@ def check_authorization(checks):
 
     checks.section("The token rule")
     checks.check("a configured token refuses a request without one",
-                 not server.authorized(StubRequest("secret")))
+                 not controls.authorized(StubRequest("secret")))
     checks.check("the token is accepted in the query string",
-                 server.authorized(StubRequest("secret", query="secret")))
+                 controls.authorized(StubRequest("secret", query="secret")))
     checks.check("the token is accepted in a header",
-                 server.authorized(StubRequest("secret", header="secret")))
+                 controls.authorized(StubRequest("secret", header="secret")))
     checks.check("a wrong token is refused",
-                 not server.authorized(StubRequest("secret", query="wrong")))
+                 not controls.authorized(StubRequest("secret", query="wrong")))
     # The two listeners hold different tokens under the same key, which is
     # the whole of what keeps a card handed to the room off the controls.
     checks.check("the token for the other listener is just a wrong token",
-                 not server.authorized(StubRequest("operator-secret",
+                 not controls.authorized(StubRequest("operator-secret",
                                                    query="reader-secret")))
 
     def refuses(query):
         # Report a raise as a failed check, not as a crashed run.
         try:
-            return not server.authorized(StubRequest("secret", query=query))
+            return not controls.authorized(StubRequest("secret", query=query))
         except TypeError:
             return False
 
@@ -945,7 +1153,7 @@ def check_authorization(checks):
 
     # The rule is worth only as much as the routes that apply it.
     session = make_session(["French"], True, [])[0]
-    refused = asyncio.run(server.api_status(
+    refused = asyncio.run(controls.api_status(
         StubRequest("secret", session=session)))
     payload = json.loads(refused.text)
     checks.check("status without the token is refused",
@@ -955,7 +1163,7 @@ def check_authorization(checks):
     # a refusal; without the message it shows a blank panel.
     checks.check("a refused status says why, for the page to show",
                  payload.get("message"), payload)
-    allowed = asyncio.run(server.api_status(
+    allowed = asyncio.run(controls.api_status(
         StubRequest("secret", header="secret", session=session)))
     checks.check("status with the token is allowed",
                  allowed.status == 200
@@ -1107,28 +1315,28 @@ def check_device_listing(checks):
 
         ticker = asyncio.create_task(tick())
         try:
-            await server.api_devices(request)
+            await controls.api_devices(request)
         finally:
             ticker.cancel()
         return counted
 
     checks.section("The device list")
     request = StubRequest(fake_config())
-    original = server.capture.list_devices
+    original = capture.list_devices
     try:
-        server.capture.list_devices = listed
-        payload = json.loads(asyncio.run(server.api_devices(request)).text)
+        capture.list_devices = listed
+        payload = json.loads(asyncio.run(controls.api_devices(request)).text)
         checks.check("the playback monitor is not what gets pre-selected",
                      payload.get("suggested") == "fake", payload)
-        server.capture.list_devices = raises
-        payload = json.loads(asyncio.run(server.api_devices(request)).text)
+        capture.list_devices = raises
+        payload = json.loads(asyncio.run(controls.api_devices(request)).text)
         checks.check("a backend that cannot list is reported, not raised",
                      payload["devices"] == [] and "pactl" in payload["error"],
                      payload)
 
-        server.capture.list_devices = listed
+        capture.list_devices = listed
         locked = StubRequest(fake_config(), supplied=None)
-        response = asyncio.run(server.api_devices(locked))
+        response = asyncio.run(controls.api_devices(locked))
         payload = json.loads(response.text)
         checks.check("listing devices without the token is refused",
                      response.status == 403 and payload["devices"] == [],
@@ -1138,16 +1346,16 @@ def check_device_listing(checks):
         checks.check("a refused listing still tells the operator page why",
                      "error" in payload, payload)
         opened = StubRequest(fake_config())
-        payload = json.loads(asyncio.run(server.api_devices(opened)).text)
+        payload = json.loads(asyncio.run(controls.api_devices(opened)).text)
         checks.check("listing devices with the token is allowed",
                      payload.get("suggested") == "fake", payload)
 
-        server.capture.list_devices = slow
+        capture.list_devices = slow
         counted = asyncio.run(ticks_while_listing(request))
         checks.check("a slow device listing leaves the event loop running",
                      counted >= 5, f"{counted} turns during a 0.2s listing")
     finally:
-        server.capture.list_devices = original
+        capture.list_devices = original
 
 
 def check_server(checks):
@@ -1162,14 +1370,14 @@ def check_server(checks):
     check_keys(checks)
     check_device_listing(checks)
     checks.section("Minting the two tokens")
-    minted = {server.mint_token() for _ in range(3)}
+    minted = {controls.mint_token() for _ in range(3)}
     checks.check("a token with nothing set is minted fresh every run",
                  len(minted) == 3 and all(len(one) >= 32
                                           for one in minted), minted)
     checks.check("an empty setting still mints one",
-                 len(server.mint_token("")) >= 32)
+                 len(controls.mint_token("")) >= 32)
     checks.check("a pinned token is kept across restarts",
-                 server.mint_token("bench") == "bench")
+                 controls.mint_token("bench") == "bench")
 
     checks.section("The address on the card")
     checks.check("the reader address carries a path and a token",
@@ -1587,6 +1795,213 @@ def check_control(checks):
         reader.join(timeout=2)
 
 
+async def settle(ready, timeout=5.0):
+    """Wait for something the other end of a socket has to do first."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if ready():
+            return True
+        await asyncio.sleep(0.05)
+    return ready()
+
+
+async def drive_sender(checks, control, operator):
+    """One sender, one server, and the page the volunteer actually uses."""
+    remote = sender.Remote({"capture": "auto", "reader_url": ""},
+                           "chapel", "pcm")
+    url = sender.dial(f"ws://127.0.0.1:{control}/control", "shared")
+    runner = web.AppRunner(controls.build_operator_app(remote, "bench"))
+    await runner.setup()
+    link = None
+    try:
+        await web.TCPSite(runner, "127.0.0.1", operator).start()
+        link = asyncio.create_task(sender.supervise(remote, url))
+        reached = await settle(lambda: bool(remote.snapshot))
+        checks.check("the sender reaches the server and is told it is ready",
+                     reached and remote.languages == ["French"],
+                     remote.error or remote.languages)
+        # The sender holds no reader token and no public_url, so the
+        # address to hand the room can only come down this socket.
+        checks.check("and told the address to hand the room, which only "
+                     "the server knows",
+                     remote.config["reader_url"]
+                     == "https://chapel.example/reader?token=card",
+                     remote.config["reader_url"])
+
+        status, body = await asyncio.to_thread(
+            request, operator, "/api/status", token="bench")
+        payload = json.loads(body)
+        checks.check("the page on this laptop renders the server's own "
+                     "status", status == 200
+                     and payload["channels"] == ["English", "French"]
+                     and payload["state"] == "stopped", payload)
+        checks.check("including the address, which is what the QR code on "
+                     "this page encodes",
+                     payload["reader_url"].endswith("/reader?token=card"),
+                     payload["reader_url"])
+
+        status, body = await asyncio.to_thread(
+            request, operator, "/api/language", "POST",
+            {"language": "French", "mode": "on"}, token="bench")
+        checks.check("a language button on this page is accepted here",
+                     status == 200 and json.loads(body)["ok"], body)
+
+        def forced():
+            rows = remote.snapshot.get("languages") or []
+            return any(row["name"] == "French" and row["override"] == "on"
+                       for row in rows)
+
+        # The whole path in one check: the page, the proxy, the socket, the
+        # session on the server, and the status pushed back down.
+        checks.check("and reaches the session on the other side of the "
+                     "socket", await settle(forced),
+                     remote.snapshot.get("languages"))
+
+        second = sender.Remote({"capture": "auto", "reader_url": ""},
+                               "chapel", "pcm")
+        await sender.link(second, url)
+        checks.check("a second laptop is turned away, and told why",
+                     "Another sender" in (second.error or ""), second.error)
+        checks.check("and the room's own sender still holds the socket",
+                     remote.socket is not None, "the first sender was cut off")
+    finally:
+        if link is not None:
+            link.cancel()
+            await asyncio.gather(link, return_exceptions=True)
+        await runner.cleanup()
+
+
+async def drive_audio(checks):
+    """The audio path itself, both halves of it in one process.
+
+    The one thing a sender exists to do: a chunk captured on the laptop
+    reaching the source the recognizer reads on the server. Both ends are
+    built here rather than in a subprocess, because what has to be looked
+    at is the object on the far side of the socket.
+    """
+    checks.section("Audio from the room to the server that recognizes it")
+    hub = server.Hub(["French"])
+    room = server.ControlRoom(fake_config(languages=["French"],
+                                          room="chapel"), hub)
+
+    async def without_a_recognizer(device):
+        # A real start opens a Deepgram socket, and this suite needs no
+        # network. What is under test is everything up to that socket.
+        room.session.device = device
+        room.session.state = "running"
+        return True, "Starting."
+
+    room.session.start = without_a_recognizer
+    port = free_port()
+    runner = web.AppRunner(server.build_control_app(room, "shared"))
+    await runner.setup()
+    remote = sender.Remote({"capture": "auto", "reader_url": ""},
+                           "chapel", "pcm")
+    link = None
+    captured = FakeSource()
+    original = capture.open_capture
+    try:
+        await web.TCPSite(runner, "127.0.0.1", port).start()
+        # Before the sender sends anything: a run that has not begun has no
+        # source, and audio arriving meanwhile is dropped on purpose.
+        source = await room.open_source()
+        link = asyncio.create_task(sender.supervise(
+            remote, sender.dial(f"ws://127.0.0.1:{port}/control", "shared")))
+        pump = asyncio.create_task(remote.pump())
+
+        async def opens(device, backend):
+            return captured
+
+        capture.open_capture = opens
+        ok, message = await remote.start("a microphone")
+        checks.check("the operator page starts a meeting from the laptop",
+                     ok, message)
+        checks.check("and the server is told which microphone it is",
+                     await settle(lambda: room.session.device
+                                  == "a microphone"), room.session.device)
+        chunk = None
+        try:
+            # None rather than a raised timeout is the likely failure: a
+            # source with nothing arriving reports a gap, which is exactly
+            # what a sender that is not sending looks like.
+            chunk = await asyncio.wait_for(source.read(), timeout=5)
+        except TimeoutError:
+            pass
+        checks.check("audio captured in the room reaches the source the "
+                     "recognizer reads", chunk == await FakeSource().read(),
+                     "a gap, so nothing arrived" if not chunk
+                     else f"{len(chunk)} bytes")
+        # The recognizer is told the format when its socket opens and can
+        # not be told another, so what the sender declared has to be what
+        # the sender is sending.
+        checks.check("and the server holds the encoding the sender declared",
+                     room.encoding == remote.source.encoding,
+                     f"{room.encoding} against {remote.source.encoding}")
+        pump.cancel()
+        await asyncio.gather(pump, return_exceptions=True)
+    finally:
+        capture.open_capture = original
+        if link is not None:
+            link.cancel()
+            await asyncio.gather(link, return_exceptions=True)
+        await remote.release()
+        await runner.cleanup()
+
+
+def check_sender(checks):
+    """The sender against a real server, over a real control socket.
+
+    No session is started, for the reason check_control starts none: that
+    would reach for a recognizer, and this suite needs no network. What is
+    checked is everything the two halves do before any audio flows, which
+    is where they have to agree about the room, the languages, and the
+    address the room is handed.
+    """
+    checks.section("The sender in the room and the server somewhere else")
+    port, control, operator = free_port(), free_port(), free_port()
+    home = Path(tempfile.mkdtemp())
+    # A real config file, unlike the other sections: reader_url is built
+    # from public_url and the reader token, and the sender showing the
+    # right one is half of what this section is for.
+    (home / "room.toml").write_text(
+        '[server]\npublic_url = "https://chapel.example/"\n', encoding="utf-8")
+    environment = dict(
+        os.environ,
+        DEEPGRAM_API_KEY="selftest",
+        LLM_API_KEY="selftest",
+        LLM_BASE_URL="http://invalid.invalid/v1",
+        # Pinned, so the address the sender is handed is one this check
+        # can write down rather than read back out of the banner.
+        READER_TOKEN="card",
+        OPERATOR_TOKEN="",
+        CONTROL_TOKEN="shared",
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-u", str(HERE / "server.py"),
+         "--config", "room.toml",
+         "--model", "selftest-model", "--languages", "French",
+         "--capture", "remote", "--room", "chapel",
+         "--host", "127.0.0.1", "--port", str(port),
+         "--control-port", str(control)],
+        cwd=home, env=environment, stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, text=True)
+    lines, reader = drain(process)
+    try:
+        if not wait_for_port(control, process):
+            checks.check(f"server.py came up on port {control}", False,
+                         "".join(lines))
+            return
+        asyncio.run(drive_sender(checks, control, operator))
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+        reader.join(timeout=2)
+
+
 # -- recording a session -----------------------------------------------------
 
 
@@ -1944,11 +2359,15 @@ def main():
         asyncio.run(check_pipeline(checks))
     if "session" in wanted:
         asyncio.run(check_session(checks))
+        asyncio.run(check_local_encoder(checks))
+        asyncio.run(check_sender_proxy(checks))
     if "store" in wanted:
         asyncio.run(check_store(checks))
     if "server" in wanted:
         check_server(checks)
         check_control(checks)
+        check_sender(checks)
+        asyncio.run(drive_audio(checks))
     if "script" in wanted:
         check_script(checks)
     return checks.report()

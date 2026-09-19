@@ -2,7 +2,7 @@
 
 Guidance for Claude Code (claude.ai/code) when working in this repository.
 `README.md` is the introduction, for somebody deciding whether Transept suits their meeting, and `SETUP.md` is the volunteer's manual: installing, keys, tunnels, running a meeting, tuning, and troubleshooting.
-`HOSTED.md` proposes an optional deployment for a room whose network cannot carry a meeting, of which the first two steps of its order of work are built and the rest is not.
+`HOSTED.md` proposes an optional deployment for a room whose network cannot carry a meeting, of which the first three steps of its order of work are built and the rest is not.
 The notes here are about the code.
 
 ## What this is
@@ -32,6 +32,7 @@ When a translation fails, times out, or comes back missing a language, the Engli
 ```
 python3 server.py                     the whole thing, and the entire weekly command
 python3 server.py --list-devices      find an audio source
+python3 sender.py                     the room's half of a hosted deployment
 python3 pipeline.py --no-translate    check the audio path, no translation key needed
 python3 selftest.py [section]         lint, pipeline, session, store, server, script
 ruff check .                          the linter alone, as selftest runs it
@@ -61,7 +62,20 @@ An empty chunk means end of stream, which is how a device that disappears become
 `pipeline.py` holds everything the entry points share: `SECRETS`, `SETTINGS`, `resolve`, `load_keys`, `Segmenter`, `Translator`, `SYSTEM_PROMPT`, and the three loops `pump_audio`, `listen`, and `publish`.
 `pipeline.py` also runs standalone as a terminal tool, which is the fastest way to debug the pipeline without the web layer.
 
+`open_encoder` and `Encoder` are there too, putting Opus between a capture object and whatever socket the audio goes up.
+The encoder sits here rather than in `capture.py` so every backend keeps the promise it makes, which is 16 kHz mono signed 16-bit chunks; what a wrapped source changes is the one thing downstream reads, which is what it says it yields.
+Compression is worth having in the default deployment as much as the hosted one, because a congested uplink out of a building is what a whole on-site beta failed on, so `[audio] encoding` defaults to `opus` and every entry point wraps its local capture.
+A machine with no working `ffmpeg` falls back to PCM and says so, the way `sounddevice` and `segno` are already handled, and the fallback is decided before the recognizer socket opens because the format is named when that socket opens and cannot be changed afterwards.
+Two of the flags in `ENCODER_COMMAND` are not tuning: without `-analyzeduration 0 -probesize 32` ffmpeg reads two seconds of a raw stream before deciding what it is, and without `-page_duration 20000` the ogg muxer holds a second of audio per page, and either one would be added to every sentence.
+
 `server.py` adds `Hub` (ring buffers and subscribers), `Session` (start, stop, supervise, reconnect), and the aiohttp routes.
+
+`controls.py` is the operator page and the routes behind it, which both entry points import and which imports neither.
+It is `controls.py` and not `operator.py` because `operator` is a standard library module: a file of that name beside the code shadows it for everything started from this directory, and `collections` imports `operator`, so `import collections` fails and takes aiohttp, websockets, and httpx with it.
+
+`sender.py` is the room's laptop for a hosted server: capture, one websocket, and a proxy of `Session`'s four methods that forwards over it.
+It runs no `Segmenter`, no `Translator`, and no `publish`, so it is a pipe rather than a second pipeline.
+It does not reuse `pump_audio`, and the reason is not the message that loop sends on the way out: `pump_audio` ends when its device does, which is right for a pipeline owning its socket end to end, while `Remote.pump` outlives both the socket and the microphone, because the microphone stays open across a reconnect and the socket comes and goes under it.
 
 `review.py` is an offline tool sharing `Translator` and the prompt, differing only in retry policy: the live pipeline gets one fast retry because a meeting cannot wait, while review retries harder because nothing is waiting on the answer.
 
@@ -101,7 +115,8 @@ A capped language gets the English line rather than a gap, and the default is 0 
 
 Two listeners share one `Hub` and one `Session`, and each holds a token of its own under `app["token"]`.
 `build_reader_app` serves `/reader`, `/stream/<channel>`, and `/api/channels` on the port a tunnel points at, and nothing on it can change anything.
-`build_operator_app` serves `/operator`, `/api/status`, `/api/devices`, `/api/start`, `/api/stop`, `/api/language`, and `/qr.svg` on `OPERATOR_HOST`, which is always `127.0.0.1`.
+`build_operator_app`, in `controls.py`, serves `/operator`, `/api/status`, `/api/devices`, `/api/start`, `/api/stop`, `/api/language`, and `/qr.svg` on `OPERATOR_HOST`, which is always `127.0.0.1`.
+It takes no `Hub`, because no route on it reads one and a sender has none to pass; what the page knows about readers arrives inside the status.
 A check inside the handlers could not replace this, because the tunnel daemon connects from this machine, so a visitor from the public internet arrives from `127.0.0.1` exactly as the operator does.
 `serve` runs both under `AppRunner`, since `web.run_app` takes one application.
 
@@ -110,7 +125,13 @@ A local device means the operator page on loopback; `capture = "remote"` means `
 A separate `mode` setting could be changed without the backend being changed to match, which would leave a server opening a sound card while a sender waited, or waiting for a sender while a sound card ran.
 That listener has to bind publicly, so what guards it is `control_token` and a refusal of any handshake carrying an `Origin` header at all, rather than the address it binds to: websockets are not subject to the same-origin policy and need no CORS preflight, the only legitimate client is a Python program that sends no `Origin`, and a browser stamps every handshake with one and cannot be made not to.
 `ControlRoom` holds the one sender, its audio, and its grace, and hands `Session` a source per recognizer run rather than per sender, because a run that ends closes its source and audio arriving between runs has no socket to go up.
-`HOSTED.md` describes that deployment; steps 1 and 2 of its order of work are built.
+`HOSTED.md` describes that deployment; steps 1 to 3 of its order of work are built.
+
+The operator page is the same page either way, because `controls.py` serves it against an object with four methods: `start`, `stop`, `set_override`, and `status`, plus a `config` the device list and the QR code read.
+`Session` is that object in the default deployment and `sender.Remote` is the other implementation, which is the same "one interface, two implementations" as the capture backends and the sinks.
+So new behavior on that page belongs in `controls.py` or in both objects, never in a second copy of a handler.
+`Remote.status` passes the server's own snapshot through rather than rebuilding it, and lays over it the two things the snapshot cannot know: which microphone is open on this laptop, and whether the socket carrying the rest of it is up, since a snapshot from thirty seconds ago describing a running meeting is exactly what a dropped connection looks like.
+The sender's own checks live in `session` for what the proxy decides alone and in `server` for what it and a real server have to agree on, and the shape check compares against a real `Session.status()`, because a table compared with itself is a check that cannot fail.
 
 Every route on both listeners is behind `authorized`, which reads the token its own application was given, so the link the whole room is handed opens nothing on the operator port.
 The one exception is `/` on the reader port, which is `nothing_here`: a tunnel puts that address on the public internet, and a bot that finds it gets a 404 rather than a language picker.
@@ -260,6 +281,30 @@ Only failures get an `error` frame, which is what the operator page has to show.
 `install_stop_handler` exists because `loop.add_signal_handler` raises `NotImplementedError` on Windows.
 Platform assumptions belong in `capture.py` and that function, nowhere else.
 
+`open_encoder` hands back a source it did not wrap, rather than raising or returning `None`.
+A machine with no `ffmpeg` is an ordinary machine, and the caller's next line is the same either way, because the source says what it yields and `build_asr_url` reads that.
+It also hands back an already-encoded source untouched, which is what a hosted server gets from a sender: a second codec pass there would add latency to save nothing, since nothing between capture and the recognizer looks at the bytes.
+
+`Remote.start` opens the microphone before it tells the server anything.
+What the encoder falls back to is what the hello has to declare, and the server builds its recognizer URL from that and cannot be told a different format later.
+Doing it in this order also means a microphone that will not open is reported on the page with no session started anywhere.
+
+Pressing Start closes the control socket and opens another one.
+Start is not a message in the protocol: a sender says what it means in its hello, because a reconnecting one has to say whether it is beginning a meeting or rejoining one, and a second laptop quietly taking over a running session is the thing that refusal exists to prevent.
+
+`Remote.pump` reads a chunk and drops it while there is no socket, rather than waiting for one.
+Left unread, the chunk stays in the encoder's pipe, and a blip would fill that pipe and then deliver a minute of stale audio to a meeting that had moved on.
+`ControlRoom.feed` keeps the same rule at the other end.
+
+`Remote.update` waits out `START_GRACE` before it believes a status that says stopped.
+The hello is what begins a session, so the first statuses after a start still describe the session that had not begun when they were taken, and without the grace every Start would close its own microphone a second later.
+
+A device that will not reopen is recorded in `Remote.declined` and not tried again.
+That path runs on a pushed status, which arrives once a second, so without it a meeting running with a microphone this laptop cannot open would spend the rest of the hour opening it.
+
+`Remote.detach` drops the outbox rather than keeping it for the next connection.
+A stop queued during a blip and delivered a reconnect later would stop whatever the operator had started in between.
+
 ## Conventions
 
 The audio source is deliberately not a setting.
@@ -283,6 +328,7 @@ The third column of `SECRETS` is always the second in capitals, spelled out rath
 Standard library first, few dependencies.
 `websockets`, `httpx`, and `aiohttp` are the whole list at runtime, and adding a fourth needs a real reason.
 `sounddevice` and `segno` are optional, and both failures are caught and reported rather than raised.
+`ffmpeg` is the same bargain one level out: a system binary rather than a package, so a machine without one sends raw audio and is told why, and nothing anywhere requires it.
 `ruff` is in `requirements.txt` as well, because a linter in a second file nobody installs is a linter nobody runs.
 
 `ruff.toml` selects E, W, F, UP, B, and C4 at a line length of 79, which is the layout this code already followed.
@@ -303,9 +349,12 @@ One sentence per line in Markdown files, so diffs isolate the sentence that chan
 The suite uses no test framework, only the standard library, and exits non-zero if anything fails.
 Run it after any change to the pipeline, the sinks, or the routes.
 `python3 selftest.py <section>` runs one of `lint`, `pipeline`, `session`, `store`, `server`, or `script`.
+There is no `sender` section: what the sender decides on its own is checked in `session`, and what it and a real server have to agree on is checked in `server`, where a server is already being booted.
 The `script` section needs no funnel and starts no server: what it checks is the reasoning `transept.py` does on its own, above all that a stale record is never mistaken for a running server.
 The `server` section runs `server.py` in a directory of its own, because a selftest that overwrote the pid file of a real server would leave a running meeting with nothing able to stop it.
-It boots it twice, once as the default deployment and once with `--capture remote`, because the control listener binds publicly and so what it serves and what it turns away is the whole of its guard.
+It boots it three times: once as the default deployment, once with `--capture remote` because the control listener binds publicly and so what it serves and what it turns away is the whole of its guard, and once more for a real `sender.Remote` to connect to over a real socket.
+No session is ever started in any of them, because starting one reaches for a recognizer and this suite needs no network.
+The audio path itself is checked with both halves in one process, where `Session.start` can be replaced with something that opens no recognizer socket and the chunk can be read off the `RemoteCapture` on the far side.
 The `lint` section shells out to `ruff check .` and reports its output as one check, which is what keeps linting in the regular workflow when there is no CI to enforce it.
 
 Adding a check means adding one `checks.check(label, condition, detail)` line.

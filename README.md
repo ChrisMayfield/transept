@@ -47,6 +47,7 @@ Everyone else opens the other on their phone, which is the address behind the QR
 **Source files:** `server.py` is the web server and session manager, and the only thing you run on a normal Sunday, whether directly or through the `transept.py` script that also opens the tunnel.
 `pipeline.py` is the same pipeline without the web layer, which is the fastest way to check a microphone or tune segmentation.
 `review.py` translates a text file offline, `record.py` keeps a session and turns it into a review document, `capture.py` is the audio layer, `selftest.py` checks the software without a microphone or an API key, and `static/` holds the two web pages.
+`controls.py` holds the operator page and its routes, and `sender.py` is the optional other half of `HOSTED.md`: a laptop in a room whose network cannot carry a meeting, capturing audio for a server somewhere else.
 
 **Config file:** Every setting is in `config.toml`, keys included, so switching translation providers is one edit rather than two.
 The file is gitignored, because the file holds your keys once you fill them in.

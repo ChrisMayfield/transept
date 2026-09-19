@@ -74,6 +74,10 @@ SECRETS = [
 # that the two can be read side by side.
 SETTINGS = [
     ("capture", "audio", "backend", str, "auto"),
+    # Opus by default, because the leg that fails in a real building is
+    # audio leaving it, and this is eight times less of it. A machine with
+    # no ffmpeg falls back to PCM and says so.
+    ("encoding", "audio", "encoding", str, "opus"),
 
     ("asr_model", "recognition", "model", str, "nova-3"),
     ("endpointing", "recognition", "endpointing", int, 400),
@@ -114,6 +118,10 @@ SETTINGS = [
     # laptop's wifi to come back, short enough that a sender that went
     # home does not leave a meeting running.
     ("control_grace", "server", "control_grace", float, 30.0),
+    # The other end of that port, read by sender.py rather than by the
+    # server: the whole address of a room's control socket, path and all,
+    # because a hosted room lives under a path prefix of its own.
+    ("control_url", "server", "control_url", str, ""),
     ("max_readers", "server", "max_readers", int, 100),
     ("public_url", "server", "public_url", str, ""),
     # Beside public_url because the two compose into a room's address once
@@ -481,8 +489,139 @@ def build_asr_url(settings, keyterms, encoding="pcm"):
     return "wss://api.deepgram.com/v1/listen?" + urlencode(params)
 
 
+# -- compression, between the microphone and the socket ----------------------
+#
+# Raw PCM upstream is 256 kbps, and Opus carries 16 kHz mono speech at
+# roughly an eighth of that with no loss the recognizer can hear. The
+# saving is worth having wherever the audio leaves the building, which is
+# the default deployment as much as the hosted one, because a congested
+# uplink is what a whole on-site beta failed on.
+#
+# The encoder sits here rather than in capture.py, so every backend keeps
+# the promise it makes: 16 kHz mono signed 16-bit chunks, whatever produced
+# them. What a wrapped source changes is the one thing downstream reads,
+# which is what it says it yields, and build_asr_url declares that.
+
+# What ffmpeg is told to produce. -analyzeduration and -probesize are not
+# tuning: without them ffmpeg reads two seconds of a raw stream before it
+# decides what the stream is, and every sentence arrives two seconds late.
+# -page_duration is the same problem at the other end, where the ogg muxer
+# holds a full second of audio per page by default.
+ENCODER_COMMAND = [
+    "ffmpeg", "-hide_banner", "-loglevel", "error",
+    "-analyzeduration", "0", "-probesize", "32",
+    "-f", "s16le", "-ar", str(SAMPLE_RATE), "-ac", str(CHANNELS),
+    "-i", "pipe:0",
+    "-c:a", "libopus", "-b:a", "24k", "-application", "voip",
+    "-f", "ogg", "-page_duration", "20000", "-flush_packets", "1",
+    "pipe:1",
+]
+# Seconds to let the encoder prove it started. An ffmpeg built without
+# libopus exits during setup rather than on the first chunk, so the
+# fallback is decided here and not several sentences into a meeting.
+ENCODER_SETTLE = 0.3
+# Bytes to take off the encoder at a time. A ceiling, not a wait: the read
+# returns whatever has arrived, which at this bitrate is one small page.
+ENCODED_READ = 4096
+
+
+async def open_encoder(source, encoding):
+    """(source, note): wrap a PCM source in Opus, or hand it back as it is.
+
+    ffmpeg is a system binary rather than a line in requirements.txt, so an
+    encoder that is missing or will not start is a fallback to PCM and a
+    sentence about it, the way sounddevice and segno are already handled.
+    Deciding here, before the recognizer socket is opened, is what makes
+    the fallback safe: a stream that changed format halfway through would
+    have no way to say so, since the format is named when the socket opens.
+    """
+    if encoding != "opus":
+        return source, ""
+    if source.encoding != "pcm":
+        # Audio that arrived already encoded, which is what a sender on a
+        # constrained uplink hands a hosted server. Encoding it again would
+        # cost a second codec pass to save nothing.
+        return source, ""
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *ENCODER_COMMAND,
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+            # Discarded for the reason parec's is: nothing drains this pipe,
+            # and enough diagnostics fill it and block the encoder mid write,
+            # which stops the audio with no error and no end of stream.
+            stderr=asyncio.subprocess.DEVNULL)
+    except OSError as exc:
+        return source, (f"No Opus encoder, so the audio goes up uncompressed: "
+                        f"{exc}. Install ffmpeg, or set [audio] encoding to "
+                        f"pcm to stop asking.")
+    await asyncio.sleep(ENCODER_SETTLE)
+    if process.returncode is not None:
+        return source, ("The Opus encoder exited immediately, so the audio "
+                        "goes up uncompressed. This ffmpeg was probably "
+                        "built without libopus.")
+    return Encoder(source, process), ""
+
+
+class Encoder:
+    """A capture source with Opus between it and the socket.
+
+    Nothing decodes it again. The recognizer reads Opus as happily as PCM,
+    and the only thing downstream of capture that touches audio bytes is
+    pump_audio, which forwards them; the segmenter and the translator see
+    text.
+    """
+
+    backend = "encoder"
+    encoding = "opus"
+
+    def __init__(self, source, process):
+        self.source = source
+        self.process = process
+        self.feeding = asyncio.create_task(self._feed())
+
+    async def _feed(self):
+        """Captured audio into the encoder, until the device stops."""
+        try:
+            while True:
+                chunk = await self.source.read()
+                if chunk is None:
+                    # A gap, which only a remote source produces, and a
+                    # remote source is never wrapped. Dropped rather than
+                    # padded: silence is billed as audio.
+                    continue
+                if not chunk:
+                    break
+                self.process.stdin.write(chunk)
+                await self.process.stdin.drain()
+        except (OSError, ValueError):
+            # The encoder died under us. Closing stdin below ends the read
+            # side too, which is how the caller sees end of stream.
+            pass
+        finally:
+            try:
+                self.process.stdin.close()
+            except (OSError, ValueError):
+                pass
+
+    async def read(self):
+        """One encoded chunk, or empty bytes when the stream ends."""
+        return await self.process.stdout.read(ENCODED_READ)
+
+    async def close(self):
+        self.feeding.cancel()
+        await asyncio.gather(self.feeding, return_exceptions=True)
+        await self.source.close()
+        try:
+            self.process.terminate()
+        except ProcessLookupError:
+            # Ctrl-C reaches ffmpeg too, since it shares this process group.
+            pass
+        await self.process.wait()
+
+
 ARGUMENT_HELP = {
     "capture": "auto, sounddevice, parec, or remote",
+    "encoding": "opus or pcm on the way to the recognizer",
     "asr_model": "Deepgram model name",
     "endpointing": "milliseconds of silence that ends an utterance",
     "ceiling": "seconds to hold fragments before forcing a sentence",
@@ -508,6 +647,7 @@ ARGUMENT_HELP = {
     "operator_port": "port for the operator controls, always loopback",
     "control_port": "port a remote sender connects to",
     "control_grace": "seconds a session outlives its sender's socket",
+    "control_url": "the room's control socket, for sender.py to dial",
     "max_readers": "most readers to serve at once, 0 for no cap",
     "public_url": "the address readers use, for the QR code",
     "room": "name of this room, kept with each recorded session",
@@ -778,6 +918,9 @@ async def run(args, settings, keys):
         source = await capture.open_capture(device, settings["capture"])
     except capture.CaptureError as exc:
         sys.exit(str(exc))
+    source, note = await open_encoder(source, settings["encoding"])
+    if note:
+        print(note, file=sys.stderr)
 
     stop = asyncio.Event()
     install_stop_handler(stop)
@@ -792,7 +935,9 @@ async def run(args, settings, keys):
 
     try:
         async with websockets.connect(
-            build_asr_url(settings, keyterms),
+            # What is actually going up the socket, which is Opus unless
+            # this machine had no encoder to fall back from.
+            build_asr_url(settings, keyterms, source.encoding),
             additional_headers={"Authorization": f"Token {deepgram_key}"},
         ) as socket:
             pump = asyncio.create_task(pump_audio(source, socket, stop))
@@ -842,7 +987,7 @@ def main():
     parser.add_argument("--device",
                         help="audio input device name; see --list-devices")
     add_settings_arguments(parser, [
-        "capture",
+        "capture", "encoding",
         "asr_model", "endpointing",
         "ceiling", "gap",
         "model", "reasoning_effort", "correct_english", "max_tokens",

@@ -6,6 +6,11 @@ aiohttp>=3.9
 # backend on Linux; you might need to `sudo apt install libportaudio2`.
 sounddevice>=0.4.6
 
+# Not a Python package: ffmpeg, if it is on the machine, compresses the
+# audio to Opus on its way to the recognizer, which is about an eighth of
+# the bandwidth. A machine without one sends raw audio and says so at
+# startup, so this is a thing to install rather than a thing to require.
+
 # QR code for the reader address, shown on the operator page.
 # Pure Python, no dependencies of its own.
 segno>=1.6
