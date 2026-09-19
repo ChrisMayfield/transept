@@ -31,8 +31,9 @@ sudo /srv/transept/.venv/bin/pip install -r /srv/transept/requirements.txt
 ```
 
 No `ffmpeg` is needed on this machine.
-The room's config sets `[audio] encoding = "pcm"`, which means this server never re-encodes: whatever the laptop declared is passed through untouched.
-The laptop is where the Opus encoder belongs, because the laptop's uplink is the leg that fails.
+Audio that arrives already encoded is passed through untouched whatever `[audio] encoding` says, and the laptop is where the Opus encoder belongs, because the laptop's uplink is the leg that fails.
+A laptop with no `ffmpeg` sends raw audio, and this server, having none either, forwards that untouched too and says so in the journal.
+Only if you install `ffmpeg` here is `[audio] encoding = "pcm"` worth adding to the room's config, to stop a second codec pass that would cost latency to save nothing.
 
 Open two ports and nothing else, since both of the server's listeners bind loopback and Caddy is the only public surface.
 
@@ -64,6 +65,7 @@ Sticky, because write permission on a directory is otherwise permission to delet
 Anything else the room reads rather than writes, a `glossary.txt` or a `keyterms.txt`, belongs to root the same way.
 
 Five values have to be filled in: `deepgram_api_key`, `llm_api_key`, `reader_token`, `control_token`, and `public_url`.
+Everything else inherits its default, so anything this room differs on, its language list above all, is copied in from `../config.example.toml`.
 Mint the two tokens rather than inventing them:
 
 ```sh
