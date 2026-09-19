@@ -1158,12 +1158,24 @@ def open_stream(port, token, channel="English", timeout=5.0):
     return sock
 
 
-def sse_preamble(port, token, channel, size=13, timeout=5.0):
-    """The first bytes of an event stream, plus its content type."""
+def sse_preamble(port, token, channel, writes=2, timeout=2.0):
+    """The stream's first writes, plus its content type.
+
+    read1 rather than read, because each write is one chunk of the response
+    and a write that never comes has to be a short read rather than a hang:
+    read(n) on a stream that stays open blocks until the socket times out and
+    then throws away what did arrive, which would turn a failed check into a
+    traceback that takes the rest of the section with it.
+    """
     url = f"http://127.0.0.1:{port}/stream/{channel}?token={token}"
     with urllib.request.urlopen(url, timeout=timeout) as response:
-        return (response.headers.get("Content-Type"),
-                response.read(size).decode("utf-8"))
+        head = ""
+        try:
+            for _ in range(writes):
+                head += response.read1(4096).decode("utf-8")
+        except TimeoutError:
+            pass
+        return response.headers.get("Content-Type"), head
 
 
 def drain(process):
@@ -1607,11 +1619,17 @@ def check_server(checks):
         status, _ = request(port, "/stream/Klingon", token=READER)
         checks.check("an unknown channel is a 404", status == 404, status)
 
+        state_event = 'event: state\ndata: {"state": "stopped"}\n\n'
         content_type, preamble = sse_preamble(port, READER, "English")
         checks.check("the event stream announces itself correctly",
                      content_type == "text/event-stream", content_type)
         checks.check("the event stream opens with a reconnect interval",
                      preamble.startswith("retry:"), repr(preamble))
+        # What the second dot on the reader page shows. A reader who opens
+        # the page before the meeting starts sees an empty feed either way,
+        # and this is what tells that apart from a feed that has stalled.
+        checks.check("and says whether anything is being captured",
+                     preamble.endswith(state_event), repr(preamble))
 
         status, body = request(operator, "/api/start", "POST", {}, token=TOKEN)
         checks.check("starting without a device is refused with a reason",

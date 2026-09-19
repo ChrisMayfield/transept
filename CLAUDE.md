@@ -141,6 +141,11 @@ On the operator port it also stops a page in another tab of the operator's brows
 `/qr.svg` is behind it too, now that the image encodes the reader token.
 A refusal has to keep the shape the page destructures, `ok` and `message` for status, `devices` and `error` for the device list, and `channels` and `error` for the channel list, or the page renders a blank panel instead of saying the token is wrong.
 
+The reader page shows two dots rather than one: whether this phone still has its stream, and whether a session is running.
+The second is needed because an empty feed before anybody presses Start and an empty feed from a phone that has lost the server look exactly alike, and a reader cannot hear the room to tell them apart.
+It arrives as a named `state` event on the stream the phone already has, sent when the stream opens and again whenever the state changes, so it costs no second route and no second token path.
+`stream` waits on its queue in `STATE_POLL` steps to notice a change, and counts `KEEPALIVE` out of those short waits rather than being one long one, because a reader waiting for a meeting to start should not wait out a keepalive to be told it has.
+
 The reader page takes its token from `location.search` rather than storing it, since the address is what the QR code and the shared link both carry, and it passes the token on to the stream and the channel list.
 
 The address itself is built by `reader_address`, not typed into `config.toml`: `public_url` is the hostname a phone can reach, and the path and the token are this run's.

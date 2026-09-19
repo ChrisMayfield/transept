@@ -339,6 +339,7 @@ Below that, the page shows the last sentences the recognizer heard, which is how
 **The Reader address is for everyone else.**
 Hand the address out, or hold up the QR code (not shown in the screenshots).
 Readers install nothing: they open the link, pick a language and a text size, and that is the whole experience.
+Two small dots at the top of their page say whether the phone is still connected and whether anything is being captured in the room, so somebody who opens the link early can see that the meeting has not started rather than wonder whether the link is broken.
 The address stops working when the run ends, which is deliberate.
 If your room reads from a printed card that has to keep working week after week, set `reader_token` under `[keys]` in `config.toml` to any long random string, and the address stays the same.
 

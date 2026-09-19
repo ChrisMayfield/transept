@@ -76,6 +76,14 @@ from pipeline import (SYSTEM_PROMPT, Segmenter, Translator,
 # server running out of this directory" is the thing being identified.
 PID_FILE = Path("transept.pid")
 HISTORY = 60
+# How long a reader's stream waits for a line before it looks at the session
+# state again, and how long it may stay silent before a keepalive is written.
+# The state is polled rather than pushed because a stream handler is the only
+# thing that knows what it last told its phone, and a reader who opened the
+# page before the meeting began has to be told when it starts without waiting
+# out a keepalive.
+STATE_POLL = 2
+KEEPALIVE = 15
 RECONNECT_BACKOFF = [1, 2, 5, 10, 20]
 # Seconds a run must last to count as healthy and reset the backoff. Without
 # it, a few blips early in a meeting make a later one cost twenty seconds.
@@ -897,7 +905,14 @@ async def stream(request):
     # then simply cannot be retired early.
     reader = request.query.get("reader", "")
     queue = hub.subscribe(channel, reader)
+    session = request.app["session"]
     dropped = True
+    # What this stream last told the phone about the session, and how long
+    # it has been since anything at all was written. A named event rather
+    # than another subtitle, because the page reads subtitles as text to
+    # show and a state word is not something anybody said.
+    state = None
+    quiet = 0.0
     try:
         # Replay recent history so someone arriving late has context. The
         # client dedupes on seq, so overlap with the live feed is harmless.
@@ -905,8 +920,15 @@ async def stream(request):
             await response.write(
                 f"data: {json.dumps(entry)}\n\n".encode())
         while True:
+            if session.state != state:
+                state = session.state
+                await response.write(
+                    f"event: state\ndata: {json.dumps({'state': state})}"
+                    f"\n\n".encode())
+                quiet = 0.0
             try:
-                entry = await asyncio.wait_for(queue.get(), timeout=15)
+                entry = await asyncio.wait_for(queue.get(),
+                                               timeout=STATE_POLL)
                 if entry is LEAVING:
                     # This reader opened another channel. Chosen, not lost,
                     # so the channel being left gets no grace period.
@@ -914,10 +936,16 @@ async def stream(request):
                     break
                 await response.write(
                     f"data: {json.dumps(entry)}\n\n".encode())
+                quiet = 0.0
             except TimeoutError:
                 # Phones and proxies drop idle connections; this keeps the
-                # socket warm through long silences.
-                await response.write(b": keepalive\n\n")
+                # socket warm through long silences. Counted rather than
+                # timed out on directly, because the wait above is now short
+                # enough to notice a session starting.
+                quiet += STATE_POLL
+                if quiet >= KEEPALIVE:
+                    await response.write(b": keepalive\n\n")
+                    quiet = 0.0
     except (ConnectionResetError, asyncio.CancelledError):
         pass
     finally:

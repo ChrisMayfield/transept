@@ -41,11 +41,18 @@
   }
   /* The same pair the operator page uses for a live channel. Grey against
      teal was too close a call on a phone in a bright room. */
+  .dots { display: flex; align-items: center; gap: .35rem; flex: none; }
   .dot {
     width: .5rem; height: .5rem; border-radius: 50%;
     background: var(--rule); flex: none;
   }
   .dot.on { background: var(--live); }
+  /* The second dot is hollow when off, so the two are told apart by shape
+     on a phone where neither has a tooltip to hover. */
+  .dot.session {
+    background: transparent; box-shadow: inset 0 0 0 1.5px var(--rule);
+  }
+  .dot.session.on { background: var(--live); box-shadow: none; }
   .sizes { display: flex; gap: .25rem; }
   .sizes button {
     font: inherit; font-size: .95rem; width: 2rem; height: 2rem;
@@ -89,7 +96,15 @@
 </head>
 <body>
 <header>
-  <span class="dot" id="dot" title="Connecting"></span>
+  <!-- Two states a reader cannot otherwise tell apart: this phone has lost
+       the feed, and nobody has started the subtitles yet. Both look like an
+       empty page. -->
+  <div class="dots">
+    <span class="dot" id="link" role="img"
+          title="Connecting" aria-label="Connecting"></span>
+    <span class="dot session" id="live" role="img"
+          title="Waiting" aria-label="Waiting"></span>
+  </div>
   <select id="channel" aria-label="Language"></select>
   <!-- Reset last rather than between the two steppers: those get tapped
        repeatedly, and a mis-tap in the middle would throw away the size
@@ -171,7 +186,8 @@ const PHRASES = {
 const RTL = ["Arabic", "Farsi", "Kurdish"];
 
 const feed = document.getElementById("feed");
-const dot = document.getElementById("dot");
+const link = document.getElementById("link");
+const live = document.getElementById("live");
 const picker = document.getElementById("channel");
 const resume = document.getElementById("resume");
 
@@ -188,13 +204,35 @@ const reader = (crypto.randomUUID ? crypto.randomUUID()
 // since the address is what the QR code and the shared link both carry.
 const token = new URLSearchParams(location.search).get("token") || "";
 
-// The dot is the only thing on this page that says whether subtitles are
-// still arriving, and a pause in the room looks exactly like a dropped
+// The first dot is the only thing on this page that says whether subtitles
+// are still arriving, and a pause in the room looks exactly like a dropped
 // connection. The title is what tells the two apart, so it moves with the
 // colour rather than standing at one word for both states.
-function connected(live) {
-  dot.classList.toggle("on", live);
-  dot.title = live ? "Connected" : "Not connected, trying again";
+function label(node, on, words) {
+  node.classList.toggle("on", on);
+  node.title = words;
+  node.setAttribute("aria-label", words);
+}
+
+function connected(on) {
+  label(link, on, on ? "Connected" : "Not connected, trying again");
+}
+
+// The second dot: whether anything is being captured in the room. Only a
+// running session lights it, because during a reconnect nothing is reaching
+// the recognizer and a lit dot would promise subtitles that are not coming.
+// It is deliberately not cleared when this phone loses its connection: what
+// it shows is the last thing the server said, and the first dot is what says
+// whether that is still current.
+const STATES = {
+  running: "Subtitles are being captured",
+  starting: "Starting",
+  reconnecting: "Reconnecting to the audio in the room",
+  stopped: "Not started yet",
+};
+
+function capturing(state) {
+  label(live, state === "running", STATES[state] || state);
 }
 
 let source = null;
@@ -299,6 +337,12 @@ function connect(channel) {
     connected(true);
     addLine(JSON.parse(event.data));
   };
+  // Named, so it does not reach onmessage and get rendered as something
+  // somebody said. Sent when the stream opens and again on every change.
+  source.addEventListener("state", (event) => {
+    connected(true);
+    capturing(JSON.parse(event.data).state);
+  });
 }
 
 picker.onchange = () => connect(picker.value);
