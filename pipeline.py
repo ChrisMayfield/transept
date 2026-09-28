@@ -803,6 +803,9 @@ class Encoder:
         # socket does not exist yet when ffmpeg writes them.
         self.headers = b""
         self.pages = OggHeaders()
+        # The capture clock of the device underneath, which is where lag is
+        # measured from: this side of ffmpeg a byte is not a duration.
+        self.clock = getattr(source, "clock", None)
         self.feeding = asyncio.create_task(self._feed())
 
     async def _feed(self):
@@ -846,6 +849,121 @@ class Encoder:
             # Ctrl-C reaches ffmpeg too, since it shares this process group.
             pass
         await self.process.wait()
+
+
+# -- when the words were spoken ----------------------------------------------
+#
+# The recognizer stamps every result with seconds into the stream it was
+# sent, and lag is how long ago those seconds were captured. Reading that
+# off the time the socket opened was wrong twice over: the microphone opens
+# first and its audio queues until the socket is ready, so the stream starts
+# before the clock does and a line that arrived promptly measured negative;
+# and a microphone that stops delivering, as one muted by a locked screen
+# does, stops the stream while the clock runs on, so every line after it
+# measured late by the length of the silence for the rest of the run.
+
+BYTES_PER_SECOND = SAMPLE_RATE * CHANNELS * capture.BYTES_PER_SAMPLE
+# Marks kept, one per chunk read, which at a tenth of a second each is ten
+# minutes. A line is looked up seconds after its words, so this is margin.
+CLOCK_MARKS = 6000
+
+
+class StreamClock:
+    """When each stretch of the stream was captured.
+
+    Advanced by the capture wrapper as audio is read off the device, so a
+    silence the device never delivered is simply absent from the stream,
+    exactly as it is absent from what the recognizer counts.
+    """
+
+    def __init__(self):
+        self.position = 0.0
+        self.marks = deque(maxlen=CLOCK_MARKS)
+
+    def advance(self, seconds, now=None):
+        """Note that the stream grew by this much, read just now."""
+        self.position += seconds
+        self.marks.append((self.position,
+                           time.monotonic() if now is None else now))
+
+    def captured_at(self, position):
+        """The monotonic time the audio at this stream position was read.
+
+        None for a position older than the marks kept, which a line an
+        hour behind would be, and which is better unmeasured than guessed.
+        """
+        found = None
+        for end, read_at in reversed(self.marks):
+            if end < position:
+                break
+            found = (end, read_at)
+        else:
+            if len(self.marks) == self.marks.maxlen:
+                # The chunk holding this position has already been let go.
+                return None
+        if found is None:
+            if self.marks and position > self.marks[-1][0]:
+                # Past the end, by rounding in the recognizer's timestamps.
+                return self.marks[-1][1]
+            return None
+        end, read_at = found
+        # A chunk is read when its last sample arrives, so audio earlier in
+        # the chunk was captured that much before the read.
+        return read_at - (end - position)
+
+    def lag(self, position, now=None):
+        """Seconds since the audio at this position was captured, or None."""
+        captured = self.captured_at(position)
+        if captured is None:
+            return None
+        now = time.monotonic() if now is None else now
+        return max(0.0, now - captured)
+
+
+class Stamped:
+    """A PCM capture source that keeps a StreamClock as it is read.
+
+    It goes directly around the device, before any encoder, because that is
+    where a sample's arrival is closest to its being spoken, and PCM is
+    where a byte count is a duration.
+    """
+
+    def __init__(self, source):
+        self.source = source
+        self.clock = StreamClock()
+
+    def __getattr__(self, name):
+        # Everything else a source is asked, its backend and encoding among
+        # them, is the device's own answer.
+        return getattr(self.source, name)
+
+    async def read(self):
+        chunk = await self.source.read()
+        if chunk:
+            self.clock.advance(len(chunk) / BYTES_PER_SECOND)
+        return chunk
+
+    async def close(self):
+        await self.source.close()
+
+
+def stream_lag(source, started, audio_end):
+    """Seconds between words being spoken and this moment, or None.
+
+    Measured from the capture clock where the source keeps one. A remote
+    source keeps none, since its audio was captured on another machine
+    whose clock this one cannot read, and falls back to the time its run
+    began, which is right until the stream has a gap in it.
+    """
+    clock = getattr(source, "clock", None)
+    if clock is not None:
+        return clock.lag(audio_end)
+    if started is None:
+        return None
+    lag = (time.monotonic() - started) - audio_end
+    # Negative means the two clocks disagree, which measures nothing a
+    # reader experienced.
+    return lag if lag >= 0 else None
 
 
 ARGUMENT_HELP = {
@@ -1068,9 +1186,10 @@ def latency_summary(values):
 class TerminalSink:
     """Prints the transcript as it forms, in the format __doc__ describes."""
 
-    def __init__(self, outputs, started, color):
+    def __init__(self, outputs, started, color, source=None):
         self.outputs = list(outputs)
         self.started = started
+        self.source = source
         self.dim, self.reset = (DIM, RESET) if color else ("", "")
         self.latencies = []
         self.tokens = {}
@@ -1081,8 +1200,9 @@ class TerminalSink:
         print(f"{self.dim}  . {text}{self.reset}")
 
     def unit(self, unit):
-        lag = (time.monotonic() - self.started) - unit.audio_end
-        print(f"\n[{unit.seq}] en ({lag:.1f}s, {unit.reason}): {unit.text}")
+        lag = stream_lag(self.source, self.started, unit.audio_end)
+        behind = "?" if lag is None else f"{lag:.1f}s"
+        print(f"\n[{unit.seq}] en ({behind}, {unit.reason}): {unit.text}")
         return self.outputs
 
     def translated(self, unit, languages, translations, elapsed):
@@ -1155,7 +1275,8 @@ async def run(args, settings, keys):
         # No --device means the default input, so the usual check of the
         # audio path is one command with nothing to look up first.
         device = args.device or capture.default_device(settings["capture"])
-        source = await capture.open_capture(device, settings["capture"])
+        source = Stamped(await capture.open_capture(device,
+                                                    settings["capture"]))
     except capture.CaptureError as exc:
         sys.exit(str(exc))
     source, note = await open_encoder(source, settings["encoding"])
@@ -1171,7 +1292,7 @@ async def run(args, settings, keys):
           file=sys.stderr)
     started = time.monotonic()
     sink = TerminalSink(translator.outputs if translator else [], started,
-                        not args.no_color)
+                        not args.no_color, source)
 
     try:
         async with websockets.connect(

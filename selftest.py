@@ -26,6 +26,7 @@ Exits non-zero if any check fails.
 
 import asyncio
 import base64
+import collections
 import contextlib
 import io
 import json
@@ -298,6 +299,58 @@ async def drive(sink, translator, hold=5.0):
 # -- the shared loops, against both sinks ------------------------------------
 
 
+async def check_stream_clock(checks):
+    """Lag measured from when the audio was captured.
+
+    The numbers are the two ways the old measurement failed on a real
+    Sunday: a line that arrived promptly measured negative and was thrown
+    away, and after a microphone muted by a locked screen every line
+    measured late by the length of the silence.
+    """
+    checks.section("How far behind the room a line is")
+    clock = pipeline.StreamClock()
+    # Ten seconds of audio in tenths, the last of it read at t=100.
+    for step in range(1, 101):
+        clock.advance(0.1, now=90 + step * 0.1)
+    checks.check("a line that arrived promptly measures a small lag",
+                 abs(clock.lag(10.0, now=100.4) - 0.4) < 1e-6,
+                 clock.lag(10.0, now=100.4))
+    checks.check("audio early in a chunk was captured before the chunk "
+                 "was read", abs(clock.lag(9.95, now=100.0) - 0.05) < 1e-6,
+                 clock.lag(9.95, now=100.0))
+    # Twenty seconds with nothing delivered, then two more of audio.
+    for step in range(1, 21):
+        clock.advance(0.1, now=120 + step * 0.1)
+    checks.check("a silence the microphone never delivered is not lag",
+                 abs(clock.lag(12.0, now=122.5) - 0.5) < 1e-6,
+                 clock.lag(12.0, now=122.5))
+    checks.check("and the audio before it is still placed where it was",
+                 abs(clock.lag(5.0, now=100.0) - 5.0) < 1e-6,
+                 clock.lag(5.0, now=100.0))
+    short = pipeline.StreamClock()
+    short.marks = collections.deque(maxlen=3)
+    for step in range(1, 11):
+        short.advance(0.1, now=step * 0.1)
+    checks.check("audio older than the marks kept is unmeasured, not "
+                 "guessed", short.lag(0.2, now=2.0) is None)
+    checks.check("the clock never reports a line ahead of the room",
+                 clock.lag(12.0, now=121.0) == 0.0,
+                 clock.lag(12.0, now=121.0))
+
+    stamped = pipeline.Stamped(FakeSource())
+    for _ in range(3):
+        await stamped.read()
+    checks.check("the capture wrapper counts the audio it reads",
+                 abs(stamped.clock.position - 0.3) < 1e-9,
+                 stamped.clock.position)
+    checks.check("and answers for the device about everything else",
+                 stamped.encoding == "pcm" and stamped.reads == 3)
+    checks.check("a source with no clock falls back to its run start",
+                 pipeline.stream_lag(None, time.monotonic() - 3.0, 1.0)
+                 is not None
+                 and pipeline.stream_lag(None, None, 1.0) is None)
+
+
 def check_sentence_splitting(checks):
     """Where a line ends when a sentence finishes inside a fragment.
 
@@ -428,6 +481,7 @@ async def check_pipeline(checks):
                  sink.summary())
 
     check_sentence_splitting(checks)
+    await check_stream_clock(checks)
 
     checks.section("The same loops, publishing to a Hub, one French reader")
     translator = FakeTranslator()
@@ -1128,14 +1182,21 @@ async def check_local_encoder(checks):
         source = await session._open_source()
         checks.check("a session opening a local device wraps it for the way "
                      "out", source.encoding == "opus", source.encoding)
+        checks.check("and still reads lag off the device, not the encoder",
+                     isinstance(source.clock, pipeline.StreamClock),
+                     source.clock)
         await source.close()
         checks.check("and closing it closes the device underneath",
                      captured.closed, "the device was left open")
 
         session.config["encoding"] = "pcm"
         plain = await session._open_source()
-        checks.check("asking for raw audio hands the device straight over",
-                     plain is captured, plain)
+        checks.check("asking for raw audio hands the device over unencoded",
+                     plain.encoding == "pcm" and plain.source is captured,
+                     plain)
+        checks.check("with its capture clock around it",
+                     isinstance(plain.clock, pipeline.StreamClock),
+                     plain.clock)
     finally:
         capture.open_capture = original_open
         pipeline.ENCODER_COMMAND = original_command
@@ -2530,6 +2591,12 @@ async def check_store(checks):
     session.started_at = time.time()
     session.run = 1
     session.run_started = time.monotonic()
+    # Eight seconds of audio captured just now, which covers every
+    # fragment, the way a device would have been read ahead of the lines.
+    clock = pipeline.StreamClock()
+    for step in range(1, 81):
+        clock.advance(0.1, now=time.monotonic() - 8.0 + step * 0.1)
+    session.run_source = SimpleNamespace(clock=clock)
     await session._open_recorder()
     session.translator = translator
     checks.check("the recorder opened", session.recording(), session.error)
@@ -2553,6 +2620,12 @@ async def check_store(checks):
     checks.check("the requested outputs were recorded",
                  json.loads(stored[0]["requested"]) == ["English", "French"],
                  stored[0]["requested"])
+    # The clock's audio ended just now, so a line's lag is how far before
+    # the end of it the line's own words were: the last line none at all.
+    checks.check("every line has a lag, the prompt ones included",
+                 all(row["lag"] is not None
+                     and abs(row["lag"] - (8.0 - row["audio_end"])) < 0.5
+                     for row in stored), [row["lag"] for row in stored])
     checks.check("each line records the tokens its own call cost",
                  [row["prompt_tokens"] for row in stored]
                  == [600 + len(sentence) for sentence in SENTENCES]

@@ -236,6 +236,12 @@ A comma with fewer than `min_words` before it is not a cut, since "you know," is
 
 Interim recognition results are disabled, because finalized results arrive 0.2 to 0.3 seconds behind the speaker and interim hypotheses add flicker for nothing.
 
+A local device is wrapped in `Stamped` before it is wrapped in the encoder, and lag is read from its `StreamClock` rather than from when the run began.
+The clock counts audio as it comes off the device, which is also what the recognizer's timestamps count, so a line's lag is how long ago its words were captured.
+Measuring from the run start instead made every prompt line negative, because the microphone opens and queues audio before the socket does, and made every line after a muted microphone late by the length of the silence, because the stream stops while the clock does not.
+It goes inside the encoder because a byte of PCM is a duration and a byte of Opus is not.
+A remote source has no clock, since its audio was captured on a machine whose clock this one cannot read, and falls back to the run start.
+
 `Hub.publish` revises an existing entry in place when the sequence number already exists.
 Revising in place is how a glossary-corrected English line replaces the raw one on phones already showing that line, and clients key on `seq`, so duplicates are replacements rather than new lines.
 

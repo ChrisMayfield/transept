@@ -63,12 +63,12 @@ import capture
 import record
 from controls import (OPERATOR_HOST, authorized, build_operator_app,
                       mint_token, page)
-from pipeline import (SYSTEM_PROMPT, Segmenter, Translator,
+from pipeline import (SYSTEM_PROMPT, Segmenter, Stamped, Translator,
                       add_settings_arguments,
                       build_asr_url, install_stop_handler, listen,
                       load_config, load_file_lines, load_glossary,
                       load_keys, open_encoder, publish, pump_audio,
-                      resolve)
+                      resolve, stream_lag)
 
 # Where this process records itself so the transept script can stop it
 # later. In the working directory rather than beside the code, because that
@@ -258,6 +258,9 @@ class Session:
         # reconnect and the timeline only reassembles with the run beside it.
         self.run = 0
         self.run_started = None
+        # The source of the current run, whose capture clock lag is read
+        # from. None between runs.
+        self.run_source = None
         self.stats = {"units": 0, "translated": 0, "failures": 0,
                       "timeouts": 0, "reconnects": 0, "corrections": 0,
                       "skipped": 0, "capped": 0, "latencies": []}
@@ -533,8 +536,10 @@ class Session:
         """The audio for one run: a local device, or the room's sender."""
         if self.source is not None:
             return await self.source()
-        source = await capture.open_capture(self.device,
-                                            self.config["capture"])
+        # Stamped before it is encoded, so the clock lag is measured
+        # from counts the audio as it comes off the device.
+        source = Stamped(await capture.open_capture(self.device,
+                                                    self.config["capture"]))
         # Compressed on the way out, because the leg that fails in a real
         # building is audio leaving it. A machine with no encoder says so
         # here rather than on the operator page, which has a meeting to
@@ -547,6 +552,7 @@ class Session:
     async def _run_once(self):
         config = self.config
         source = await self._open_source()
+        self.run_source = source
         # Only the counter carries over. Reusing one segmenter would carry
         # the buffered fragments and audio_end too, and audio_end is relative
         # to the stream, so on the next stream the gap check would compare
@@ -593,6 +599,7 @@ class Session:
                         raise task.exception()
         finally:
             await source.close()
+            self.run_source = None
 
     # -- sink: what the shared pipeline does with finished text ------------
 
@@ -633,16 +640,10 @@ class Session:
             # correction, so this sentence costs no model tokens at all.
             self.stats["skipped"] += 1
         if self.recorder:
-            # What a reader actually waited: time since this stream opened,
-            # less how far into the stream the words were spoken.
-            lag = None
-            if self.run_started is not None:
-                lag = ((time.monotonic() - self.run_started)
-                       - unit.audio_end)
-                # A negative value means the stream clock and this clock
-                # disagree, which is not a measurement of anything a reader
-                # experienced. Better absent than reported.
-                lag = lag if lag >= 0 else None
+            # What a reader actually waited: from the words coming off the
+            # microphone to the English line going out.
+            lag = stream_lag(self.run_source, self.run_started,
+                             unit.audio_end)
             self._record(
                 "line",
                 seq=unit.seq, run=self.run, at=time.time(),
