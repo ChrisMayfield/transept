@@ -243,7 +243,11 @@ and do not repeat what was already covered.
 The English output is a correction of the transcript, not a rewrite. Start \
 from the source text and change only what is clearly a recognition error: \
 names and terms that appear in the glossary, and obvious mis-hearings of \
-common words. Keep false starts, repetitions, filler words, and informal \
+common words. A correction may introduce a name only if that name is in the \
+glossary. Never turn a common word into a name, and never supply a name, a \
+title, or the rest of a quotation from your own knowledge, however confident \
+you are; leave the words as heard instead. Keep false starts, repetitions, \
+filler words, and informal \
 grammar exactly as transcribed, because for a reader who cannot hear well \
 this line is the record of what was said. If nothing needs correcting, return \
 the source text unchanged.
