@@ -70,6 +70,10 @@ ceiling = 4.0
 # Silence that separates one person's abandoned sentence from the next
 # person's new one.
 gap = 0.6
+# A sentence that finishes partway through what the recognizer sent goes out
+# on its own, but never with fewer words than this. Lower means shorter
+# lines on the phones sooner, and every line is a translation call.
+min_words = 6
 
 [translation]
 model = "gemini-3.8-flash"

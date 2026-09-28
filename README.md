@@ -34,6 +34,7 @@ Opus uses about an eighth of the bandwidth, with no difference the recognizer ca
 Deepgram returns finalized fragments, which often cut sentences in half, so a segmenter buffers them into whole sentences.
 
 The segmenter closes a sentence when the recognizer reports an endpoint, when the text ends in terminal punctuation, when a silent gap opens, or when the ceiling expires.
+A sentence that finishes partway through a fragment goes out right away, without waiting for the next one to end.
 Whole sentences matter more than they sound like they should: translating "on the heater" by itself may produce nonsense in other languages.
 
 Sentences then go to the translation model, all languages in one call, running concurrently but published in source order.

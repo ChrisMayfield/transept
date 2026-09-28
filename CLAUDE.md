@@ -84,11 +84,14 @@ A setting holding that address outright would be a second copy of the hostname a
 
 `record.py` is both halves of persistence: the `Recorder` a `Session` writes through, and the command that reads a session back as a Markdown document.
 Recording is off unless `[session] record` is set, and nothing is ever deleted without `--purge`.
+A recorded session keeps every fragment the recognizer finalized, with its timing and when it arrived, and the tokens each translation call reported.
+The fragments are there so a change to the segmenter can be replayed against a real meeting rather than judged from the lines the old one happened to produce, and the tokens so that a change making lines shorter can be weighed against what the extra calls cost.
+`Translator.translate` returns its answer as a `Translations`, which is a dict with a `usage` attribute, so every caller that reads a language by name is unchanged and the counts ride with the call that paid for them.
 
 ### One pipeline, two sinks
 
 Both entry points run the same three tasks over one websocket and differ only in where finished text goes, so that difference sits behind a sink.
-A sink provides `fragment(text)`, `unit(unit)` returning the output names worth requesting, `translated`, `timed_out`, and `failed`.
+A sink provides `fragment(text, start, audio_end, speech_final, confidence)`, `unit(unit)` returning the output names worth requesting, `translated`, `timed_out`, and `failed`.
 `TerminalSink` prints; `Session` is its own sink, publishing to the `Hub` and keeping the counters the operator page shows.
 An empty list from `unit` means do not call the model for that sentence at all.
 
@@ -225,14 +228,20 @@ Segmentation exists because Deepgram finalizes text mid-sentence.
 Translating each finalized fragment separately produces output like "on the heater" with no subject, which is unusable in languages that need a verb or a case ending.
 Do not remove the buffer to reduce latency.
 
+The buffer is not held whole, though.
+A sentence that finishes inside it goes out as soon as it arrives and only the unfinished rest waits, because the recognizer often hands over one sentence and the start of the next in a single result, and the finished one then waited out the whole next phrase.
+Nothing is split off shorter than `min_words`, so "Right?" stays with what follows instead of costing a model call of its own, and the same rule divides a buffer that closes holding several sentences.
+The ceiling cuts at the last comma rather than wherever the buffer stopped, because a line ending on "and" or "the" is the front half of a clause, and a language that puts its verb last cannot translate that half without guessing at the rest.
+A comma with fewer than `min_words` before it is not a cut, since "you know," is not a clause.
+
 Interim recognition results are disabled, because finalized results arrive 0.2 to 0.3 seconds behind the speaker and interim hypotheses add flicker for nothing.
 
 `Hub.publish` revises an existing entry in place when the sequence number already exists.
 Revising in place is how a glossary-corrected English line replaces the raw one on phones already showing that line, and clients key on `seq`, so duplicates are replacements rather than new lines.
 
-`Segmenter._take` returns the sequence number alongside the text instead of leaving the caller to read `segmenter.seq`.
-One fragment can close two sentences, the gap check closing the buffered one and the fragment itself closing the next, and both takes run before either unit is built.
-A caller reading the counter afterwards stamps both with the second number, and `Hub.publish` then revises the first line away instead of publishing it.
+`Segmenter._unit` returns the sequence number alongside the text instead of leaving the caller to read `segmenter.seq`.
+One fragment can close several sentences, the gap check closing the buffered one, a split sending out the finished ones, and the fragment itself closing the next, and all of them are built before any is emitted.
+A caller reading the counter afterwards stamps every one with the last number, and `Hub.publish` then revises the earlier lines away instead of publishing them.
 
 `Session.unit` asks for the English correction whenever a session is being recorded, not only when somebody is reading that channel.
 Without it, a Sunday where everyone reads French stores no corrected line, and the two things the record exists for, the keyterms worklist and the check for an invented name, are both empty.

@@ -367,11 +367,16 @@ Set it to `pcm` if a real run shows recognition getting worse, which would be a 
 Lower is snappier but clips people who pause in the middle of a sentence.
 
 `ceiling` (4 seconds) is how long a half-finished sentence waits before being translated anyway.
+When it runs out, the sentence is cut at its last comma if there is one, and the rest waits for its own ending.
 The operator page tags each sentence with why the sentence was sent.
 A lot of `ceiling` means people are talking over each other, and raising `ceiling` trades a little delay for sentences that make sense.
 
 `gap` (0.6 seconds) is the silence that separates one person's abandoned sentence from the next person's new one.
 Lower `gap` if two unrelated remarks are being glued into one line.
+
+`min_words` (6) is the fewest words a line may hold when a finished sentence is sent out ahead of the rest.
+The recognizer often delivers the end of one sentence and the start of the next together, and the finished one goes to the phones without waiting.
+Lower `min_words` for shorter lines, and raise it to make fewer translation calls, since every line is one.
 
 `max_tokens` (2000) caps how long a single translation response may be.
 Raise `max_tokens` if translations come out cut off mid-sentence.

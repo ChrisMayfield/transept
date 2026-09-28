@@ -335,7 +335,8 @@ class Session:
             config["model"], json.dumps(config["languages"]),
             int(bool(config["correct_english"])),
             json.dumps({name: config[name] for name in
-                        ("ceiling", "gap", "hold", "endpointing", "grace",
+                        ("ceiling", "gap", "min_words", "hold",
+                         "endpointing", "grace",
                          "timeout", "max_tokens", "reasoning_effort")}),
             # The glossary and keyterms verbatim, not a path and not a
             # digest. Both files are gitignored and both get edited between
@@ -552,7 +553,8 @@ class Session:
         # against a larger number, never fire, and glue the sentence stranded
         # by the drop onto whatever the next person says.
         segmenter = Segmenter(config["ceiling"], config["gap"],
-                              start_seq=self.last_seq)
+                              start_seq=self.last_seq,
+                              min_words=config["min_words"])
         queue = asyncio.Queue()
         try:
             async with websockets.connect(
@@ -594,8 +596,18 @@ class Session:
 
     # -- sink: what the shared pipeline does with finished text ------------
 
-    def fragment(self, text):
-        """Raw fragments are half sentences. Only whole ones reach a phone."""
+    def fragment(self, text, start, audio_end, speech_final, confidence):
+        """Raw fragments are half sentences. Only whole ones reach a phone.
+
+        They are recorded, though, with when each arrived, because a
+        segmenter change can then be replayed against a real meeting
+        instead of argued from the lines it happened to produce.
+        """
+        if self.recorder:
+            self._record("fragment", run=self.run, at=time.time(),
+                         start=start, audio_end=audio_end,
+                         speech_final=speech_final, confidence=confidence,
+                         text=text)
 
     def unit(self, unit):
         """Publish the English line and say which outputs are worth buying."""
@@ -661,6 +673,9 @@ class Session:
             self._record("correction",
                          seq=unit.seq, english=revised or unit.text,
                          latency=elapsed, outcome="translated")
+            usage = getattr(translations, "usage", None)
+            if usage:
+                self._record("usage", seq=unit.seq, **usage)
             for language in languages:
                 text = translations.get(language)
                 self._record(
@@ -1277,7 +1292,7 @@ def main():
     add_settings_arguments(parser, [
         "capture", "encoding",
         "asr_model", "endpointing",
-        "ceiling", "gap",
+        "ceiling", "gap", "min_words",
         "model", "reasoning_effort", "correct_english", "max_tokens",
         "timeout", "hold",
         "languages", "grace", "max_languages",

@@ -49,6 +49,9 @@ CREATE TABLE IF NOT EXISTS lines (
   at REAL, audio_end REAL, lag REAL, confidence REAL,
   heard TEXT, english TEXT, reason TEXT, latency REAL,
   outcome TEXT, requested TEXT,
+  -- What the translation call cost, last for the reason room is.
+  prompt_tokens INTEGER, output_tokens INTEGER,
+  reasoning_tokens INTEGER, cached_tokens INTEGER,
   UNIQUE (session_id, seq));
 
 CREATE TABLE IF NOT EXISTS translations (
@@ -58,15 +61,31 @@ CREATE TABLE IF NOT EXISTS translations (
   source TEXT,
   UNIQUE (session_id, seq, language));
 
+-- Every result the recognizer finalized, as it arrived, so a change to
+-- the segmenter can be replayed against a real meeting. start and
+-- audio_end are seconds into the run's stream, at is the wall clock.
+CREATE TABLE IF NOT EXISTS fragments (
+  id INTEGER PRIMARY KEY,
+  session_id INTEGER NOT NULL, run INTEGER,
+  at REAL, start REAL, audio_end REAL,
+  speech_final INTEGER, confidence REAL, text TEXT);
+
 CREATE INDEX IF NOT EXISTS lines_by_session ON lines (session_id, seq);
+CREATE INDEX IF NOT EXISTS fragments_by_session
+  ON fragments (session_id, id);
 CREATE INDEX IF NOT EXISTS translations_by_session
   ON translations (session_id, seq);
 """
 
-# Queue depth. A meeting produces ten to twenty lines a minute, so anything
-# this side of a hundred is a disk that has stopped answering, and dropping
-# the record of a sentence beats holding the recognizer up for it.
+# Queue depth. A meeting produces ten to twenty lines a minute and about as
+# many fragments, so anything this side of a hundred is a disk that has
+# stopped answering, and dropping the record of a sentence beats holding
+# the recognizer up for it.
 QUEUE_DEPTH = 256
+
+# What a translation call reports it cost, in the order usage_of gives them.
+TOKEN_COLUMNS = ("prompt_tokens", "output_tokens", "reasoning_tokens",
+                 "cached_tokens")
 
 
 def connect(path):
@@ -97,6 +116,10 @@ def migrate(handle):
                handle.execute("PRAGMA table_info(sessions)")}
     if "room" not in present:
         handle.execute("ALTER TABLE sessions ADD COLUMN room TEXT")
+    present = {row[1] for row in handle.execute("PRAGMA table_info(lines)")}
+    for column in TOKEN_COLUMNS:
+        if column not in present:
+            handle.execute(f"ALTER TABLE lines ADD COLUMN {column} INTEGER")
 
 
 class Recorder:
@@ -171,6 +194,12 @@ class Recorder:
     def translation(self, **row):
         self._put(("translation", row))
 
+    def fragment(self, **row):
+        self._put(("fragment", row))
+
+    def usage(self, **row):
+        self._put(("usage", row))
+
     def _put(self, item):
         if self.task is None:
             return
@@ -230,6 +259,21 @@ class Recorder:
                 " language, text, source) VALUES (?,?,?,?,?)",
                 (self.session_id, row["seq"], row["language"], row["text"],
                  row["source"]))
+        elif kind == "fragment":
+            self.handle.execute(
+                "INSERT INTO fragments (session_id, run, at, start,"
+                " audio_end, speech_final, confidence, text)"
+                " VALUES (?,?,?,?,?,?,?,?)",
+                (self.session_id, row["run"], row["at"], row["start"],
+                 row["audio_end"], int(bool(row["speech_final"])),
+                 row["confidence"], row["text"]))
+        elif kind == "usage":
+            self.handle.execute(
+                "UPDATE lines SET "
+                + ", ".join(f"{column} = ?" for column in TOKEN_COLUMNS)
+                + " WHERE session_id = ? AND seq = ?",
+                (*(row[column] for column in TOKEN_COLUMNS),
+                 self.session_id, row["seq"]))
 
 
 # -- reading it back ---------------------------------------------------------
@@ -359,6 +403,7 @@ def write_report(handle, session, out):
         _corrections(page, lines)
         _closings(page, lines)
         _latency(page, lines)
+        _tokens(page, lines)
         _fallbacks(page, grouped)
         _transcript(page, lines, grouped)
 
@@ -469,6 +514,27 @@ def _latency(page, lines):
         page.write("\n")
 
 
+def _tokens(page, lines):
+    """What the translation calls cost, for weighing a segmentation change.
+
+    Every line is a call, and the prompt goes with every call, so a change
+    that makes lines shorter is paid for in prompt tokens.
+    """
+    counted = [line for line in lines
+               if "prompt_tokens" in line.keys()
+               and line["prompt_tokens"] is not None]
+    if not counted:
+        return
+    page.write("## Tokens\n\n")
+    page.write(f"{len(counted)} calls reported what they cost.\n\n")
+    page.write("| | total | per call |\n|---|---|---|\n")
+    for column in TOKEN_COLUMNS:
+        total = sum(line[column] or 0 for line in counted)
+        page.write(f"| {column.removesuffix('_tokens')} | {total} "
+                   f"| {total / len(counted):.0f} |\n")
+    page.write("\n")
+
+
 def _fallbacks(page, grouped):
     page.write("## Where readers saw English instead\n\n")
     counts = {}
@@ -529,6 +595,8 @@ def purge(handle, older_than_days):
         handle.execute("DELETE FROM translations WHERE session_id = ?",
                        (session_id,))
         handle.execute("DELETE FROM lines WHERE session_id = ?",
+                       (session_id,))
+        handle.execute("DELETE FROM fragments WHERE session_id = ?",
                        (session_id,))
         handle.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
     handle.commit()

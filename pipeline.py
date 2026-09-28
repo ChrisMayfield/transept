@@ -67,6 +67,11 @@ SECRETS = [
     ("control_token", "control_token", "CONTROL_TOKEN"),
 ]
 
+# Fewest words a line may hold when it is split out of a longer passage.
+# Shorter lines reach a phone sooner, but every line is a model call.
+# Here rather than beside the segmenter because SETTINGS names it.
+MIN_WORDS = 6
+
 # Every other setting, in one place: attribute, config.toml section and key,
 # type, and built-in default. Precedence is command line, then config.toml,
 # then the default here. Adding a setting means adding one row. The order
@@ -84,6 +89,7 @@ SETTINGS = [
 
     ("ceiling", "segmentation", "ceiling", float, 4.0),
     ("gap", "segmentation", "gap", float, 0.6),
+    ("min_words", "segmentation", "min_words", int, MIN_WORDS),
 
     ("model", "translation", "model", str, None),
     ("reasoning_effort", "translation", "reasoning_effort", str, None),
@@ -200,6 +206,12 @@ def load_keys(config):
 
 CONTEXT_UNITS = 3
 TERMINAL_PUNCTUATION = re.compile(r"[.!?]['\"]?$")
+# A sentence boundary inside a buffer: terminal punctuation, an optional
+# closing quote, space, and then a capital or a digit.
+SENTENCE_BREAK = re.compile(
+    r"(?:(?<=[.!?])|(?<=[.!?]['\"]))\s+(?=['\"]?[A-Z0-9])")
+ABBREVIATIONS = {"Mr.", "Mrs.", "Ms.", "Dr.", "St.", "Jr.", "Sr.", "vs.",
+                 "Bro.", "Sis.", "e.g.", "i.e."}
 
 DIM = "\033[2m"
 RESET = "\033[0m"
@@ -268,16 +280,20 @@ class Segmenter:
     translating each result in isolation produces fragments like "on the
     heater" with no subject. Fragments are held until a silent gap opens,
     the recognizer reports an endpoint, the text ends in terminal
-    punctuation, or the ceiling expires.
+    punctuation, or the ceiling expires. A sentence that finishes inside
+    the buffer goes out as soon as it arrives, and the unfinished rest
+    stays.
 
     The gap check is what stops an abandoned half-sentence from capturing
     whatever the next person says. Without it, "you all can see if it" waits
     in the buffer and gets glued onto the following turn.
     """
 
-    def __init__(self, ceiling_seconds, gap_seconds, start_seq=0):
+    def __init__(self, ceiling_seconds, gap_seconds, start_seq=0,
+                 min_words=MIN_WORDS):
         self.ceiling = ceiling_seconds
         self.gap = gap_seconds
+        self.min_words = min_words
         self.parts = []
         self.first_seen = None
         self.audio_end = 0.0
@@ -298,9 +314,7 @@ class Segmenter:
         if self.parts and (start - self.audio_end) > self.gap:
             # Before the new fragment is folded in, so the sentence that
             # just closed keeps its own confidence rather than this one's.
-            taken = self._take("gap")
-            if taken:
-                emits.append(taken)
+            emits.extend(self._take("gap"))
 
         if self.first_seen is None:
             self.first_seen = time.monotonic()
@@ -312,39 +326,130 @@ class Segmenter:
 
         joined = " ".join(self.parts).strip()
         if speech_final or TERMINAL_PUNCTUATION.search(joined):
-            taken = self._take("endpoint" if speech_final else "punctuation")
-            if taken:
-                emits.append(taken)
+            emits.extend(
+                self._take("endpoint" if speech_final else "punctuation"))
+        else:
+            # The fragment ended mid-sentence, but a sentence may have
+            # finished inside it. Held until the rest arrived, that
+            # sentence waited out the whole next phrase, which is how
+            # lines covering thirteen seconds of speech reached phones.
+            emits.extend(self._split())
         return emits
 
     def check_ceiling(self):
-        """Returns a unit if the buffer has been held too long."""
+        """Units to emit if the buffer has been held too long.
+
+        Finished sentences have already gone out as they arrived, so the
+        cut falls at the last comma, and the rest waits for its own ending.
+        Cutting wherever the buffer happened to stop left lines ending on
+        "and" or "the", and a language that puts its verb last cannot
+        translate the front half of a clause without guessing at the back.
+        """
         if not self.parts or self.first_seen is None:
-            return None
+            return []
         if time.monotonic() - self.first_seen < self.ceiling:
-            return None
-        return self._take("ceiling")
+            return []
+        return self._split_clause() or self._take("ceiling")
 
     def drain(self):
-        return self._take("drain") if self.parts else None
+        return self._take("drain")
+
+    def _split(self):
+        """Emit the finished sentences in the buffer, keep the unfinished.
+
+        Nothing is split off shorter than min_words, so "Right?" or
+        "Yeah." stays with what follows instead of costing a model call of
+        its own.
+        """
+        pieces = sentences(" ".join(self.parts).strip())
+        if len(pieces) < 2:
+            return []
+        lines, leftover = group(pieces[:-1], self.min_words)
+        if not lines:
+            return []
+        self._keep(" ".join(filter(None, [leftover, pieces[-1]])))
+        return [self._unit(line, "sentence") for line in lines]
+
+    def _split_clause(self):
+        """Emit up to the last comma, when there is enough before it."""
+        text = " ".join(self.parts).strip()
+        cut = text.rfind(", ")
+        if cut < 0 or len(text[:cut].split()) < self.min_words:
+            return []
+        self._keep(text[cut + 2:])
+        return [self._unit(text[:cut + 1], "ceiling")]
+
+    def _keep(self, text):
+        """Leave only this in the buffer, waiting a fresh ceiling.
+
+        The confidence stays, because the fragment the text came from is
+        still the shakiest thing known about it.
+        """
+        self.parts = [text]
+        self.first_seen = time.monotonic()
 
     def _take(self, reason):
-        """Closes the buffer and returns the unit, or None if it was empty.
+        """Close the buffer and return its units, one per sentence.
 
-        The sequence number travels with the text rather than being read off
-        the segmenter afterwards. One fragment can close two sentences, and
-        both takes run before either unit is built, so a caller reading
-        self.seq later would stamp both with the second number.
+        The same min_words rule as a split, and a short last sentence joins
+        the line before it rather than standing alone.
         """
         text = " ".join(self.parts).strip()
-        confidence = self.confidence
         self.parts = []
         self.first_seen = None
-        self.confidence = None
         if not text:
-            return None
+            self.confidence = None
+            return []
+        lines, leftover = group(sentences(text), self.min_words)
+        if leftover:
+            if lines:
+                lines[-1] += " " + leftover
+            else:
+                lines.append(leftover)
+        units = [self._unit(line, reason) for line in lines]
+        self.confidence = None
+        return units
+
+    def _unit(self, text, reason):
+        """One unit, numbered as it is made.
+
+        The sequence number travels with the text rather than being read off
+        the segmenter afterwards. One fragment can close several sentences,
+        and all of them are built before any is emitted, so a caller reading
+        self.seq later would stamp every one with the last number.
+        """
         self.seq += 1
-        return self.seq, text, reason, self.audio_end, confidence
+        return self.seq, text, reason, self.audio_end, self.confidence
+
+
+def sentences(text):
+    """Split text after terminal punctuation followed by a capital or digit.
+
+    A capital is required because the recognizer capitalizes the sentences
+    it punctuates, and an abbreviation such as "Dr." is rejoined, since the
+    name after it is not the start of anything.
+    """
+    if not text:
+        return []
+    pieces = []
+    for piece in SENTENCE_BREAK.split(text):
+        if pieces and pieces[-1].split()[-1] in ABBREVIATIONS:
+            pieces[-1] += " " + piece
+        else:
+            pieces.append(piece)
+    return pieces
+
+
+def group(pieces, min_words):
+    """(lines, leftover): sentences joined until each holds min_words."""
+    lines, current, words = [], [], 0
+    for piece in pieces:
+        current.append(piece)
+        words += len(piece.split())
+        if words >= min_words:
+            lines.append(" ".join(current))
+            current, words = [], 0
+    return lines, " ".join(current)
 
 
 class Translator:
@@ -420,11 +525,13 @@ class Translator:
                                                     504):
                         break
                 else:
-                    choice = response.json()["choices"][0]
+                    reply = response.json()
+                    choice = reply["choices"][0]
                     if choice.get("finish_reason") == "length":
                         raise ValueError("truncated: raise --max-tokens")
-                    parsed = parse_translations(
-                        choice["message"]["content"], outputs)
+                    parsed = Translations(parse_translations(
+                        choice["message"]["content"], outputs))
+                    parsed.usage = usage_of(reply)
                     return parsed, time.monotonic() - started
             # IndexError covers an empty choices array, which is what a
             # filtered or truncated response looks like. Letting it escape
@@ -435,6 +542,44 @@ class Translator:
             if attempt + 1 < self.max_attempts:
                 await asyncio.sleep(self.retry_delay * (2 ** attempt))
         raise RuntimeError(last_error or "unknown translation failure")
+
+
+class Translations(dict):
+    """Output name to text, carrying what the call cost alongside.
+
+    A dict still, so every caller that reads a language by name is
+    unchanged, and the token counts ride with the answer they paid for
+    rather than on the Translator, where concurrent calls would overwrite
+    each other's.
+    """
+
+    usage = None
+
+
+def usage_of(reply):
+    """Token counts from a chat completion, or None if it sent none.
+
+    Thinking tokens are named where the provider names them, and otherwise
+    are whatever the total holds beyond the prompt and the answer, which is
+    how Gemini's compatible endpoint reports them.
+    """
+    usage = reply.get("usage")
+    if not isinstance(usage, dict):
+        return None
+
+    def count(value):
+        return value if isinstance(value, int) else 0
+
+    prompt = count(usage.get("prompt_tokens"))
+    output = count(usage.get("completion_tokens"))
+    details = usage.get("completion_tokens_details") or {}
+    reasoning = count(details.get("reasoning_tokens"))
+    if not reasoning:
+        reasoning = max(0, count(usage.get("total_tokens")) - prompt - output)
+    cached = count((usage.get("prompt_tokens_details") or {})
+                   .get("cached_tokens"))
+    return {"prompt_tokens": prompt, "output_tokens": output,
+            "reasoning_tokens": reasoning, "cached_tokens": cached}
 
 
 def parse_translations(text, languages):
@@ -710,6 +855,7 @@ ARGUMENT_HELP = {
     "endpointing": "milliseconds of silence that ends an utterance",
     "ceiling": "seconds to hold fragments before forcing a sentence",
     "gap": "seconds of silence that closes the buffered sentence",
+    "min_words": "fewest words in a line split out of a longer passage",
     "model": "translation model, e.g. gemini-3.8-flash",
     "reasoning_effort": "low is usually right; translation needs no thinking",
     "correct_english": "fix recognition errors on the English channel using "
@@ -786,7 +932,8 @@ def add_settings_arguments(parser, names):
 # until one was building a Deepgram URL from names it had never imported.
 #
 # A sink provides:
-#     fragment(text)          a raw recognition result arrived
+#     fragment(text, start, audio_end, speech_final, confidence)
+#                             a raw recognition result arrived
 #     unit(unit) -> outputs   a sentence closed; returns the output names
 #                             worth requesting, where an empty list means do
 #                             not call the model for this sentence at all
@@ -845,8 +992,7 @@ async def listen(socket, segmenter, translator, sink, queue):
     async def watch_ceiling():
         while True:
             await asyncio.sleep(0.25)
-            taken = segmenter.check_ceiling()
-            if taken:
+            for taken in segmenter.check_ceiling():
                 await emit(taken)
 
     ceiling_task = asyncio.create_task(watch_ceiling())
@@ -864,18 +1010,17 @@ async def listen(socket, segmenter, translator, sink, queue):
             if not text:
                 continue
 
-            sink.fragment(text)
             start = payload.get("start", 0.0)
             audio_end = start + payload.get("duration", 0.0)
             speech_final = payload.get("speech_final", False)
             confidence = alternatives[0].get("confidence")
+            sink.fragment(text, start, audio_end, speech_final, confidence)
             for taken in segmenter.add(text, speech_final, start, audio_end,
                                        confidence):
                 await emit(taken)
     finally:
         ceiling_task.cancel()
-        taken = segmenter.drain()
-        if taken:
+        for taken in segmenter.drain():
             await emit(taken)
         await queue.put(None)
 
@@ -928,10 +1073,11 @@ class TerminalSink:
         self.started = started
         self.dim, self.reset = (DIM, RESET) if color else ("", "")
         self.latencies = []
+        self.tokens = {}
         self.failures = 0
         self.timeouts = 0
 
-    def fragment(self, text):
+    def fragment(self, text, start, audio_end, speech_final, confidence):
         print(f"{self.dim}  . {text}{self.reset}")
 
     def unit(self, unit):
@@ -941,6 +1087,9 @@ class TerminalSink:
 
     def translated(self, unit, languages, translations, elapsed):
         self.latencies.append(elapsed)
+        for name, value in (getattr(translations, "usage", None)
+                            or {}).items():
+            self.tokens[name] = self.tokens.get(name, 0) + value
         revised = translations.get("English")
         if revised and revised != unit.text:
             print(f"     en*: {revised}")
@@ -965,8 +1114,14 @@ class TerminalSink:
     def summary(self):
         if not self.latencies:
             return None
-        return (f"{len(self.latencies)} translated, {self.failures} failed, "
-                f"{self.timeouts} too slow. {latency_summary(self.latencies)}")
+        summary = (f"{len(self.latencies)} translated, {self.failures} "
+                   f"failed, {self.timeouts} too slow. "
+                   f"{latency_summary(self.latencies)}")
+        if self.tokens:
+            summary += "\nTokens: " + ", ".join(
+                f"{value} {name.removesuffix('_tokens')}"
+                for name, value in self.tokens.items())
+        return summary
 
 
 async def run(args, settings, keys):
@@ -992,7 +1147,8 @@ async def run(args, settings, keys):
             settings["correct_english"])
 
     keyterms = load_file_lines(settings["keyterms"])
-    segmenter = Segmenter(settings["ceiling"], settings["gap"])
+    segmenter = Segmenter(settings["ceiling"], settings["gap"],
+                          min_words=settings["min_words"])
     queue = asyncio.Queue()
 
     try:
@@ -1077,7 +1233,7 @@ def main():
     add_settings_arguments(parser, [
         "capture", "encoding",
         "asr_model", "endpointing",
-        "ceiling", "gap",
+        "ceiling", "gap", "min_words",
         "model", "reasoning_effort", "correct_english", "max_tokens",
         "timeout", "hold",
         "languages",

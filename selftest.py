@@ -241,6 +241,13 @@ class FakeTranslator:
             # runs and only the sink can save the reader.
             rendered = {name: ("" if name != "English" else rendered[name])
                         for name in rendered}
+        # Counts that differ per sentence, so a row stored against the
+        # wrong line would show. From the text rather than a call counter,
+        # because calls run concurrently and finish in any order.
+        rendered = pipeline.Translations(rendered)
+        rendered.usage = {"prompt_tokens": 600 + len(text),
+                          "output_tokens": 40, "reasoning_tokens": 12,
+                          "cached_tokens": 0}
         return rendered, 0.5
 
     async def close(self):
@@ -251,7 +258,8 @@ def fake_config(**overrides):
     """A Session config carrying every key the pipeline reads."""
     config = {
         "languages": ["French", "Swahili"], "grace": 90.0,
-        "correct_english": True, "ceiling": 4.0, "gap": 0.6, "hold": 8.0,
+        "correct_english": True, "ceiling": 4.0, "gap": 0.6, "min_words": 6,
+        "hold": 8.0,
         "capture": "auto", "encoding": "pcm", "asr_model": "nova-3",
         "endpointing": 400, "keyterms": ["Kalema"], "glossary": "",
         "model": "fake-model", "max_tokens": 2000, "timeout": 15.0,
@@ -288,6 +296,97 @@ async def drive(sink, translator, hold=5.0):
 
 
 # -- the shared loops, against both sinks ------------------------------------
+
+
+def check_sentence_splitting(checks):
+    """Where a line ends when a sentence finishes inside a fragment.
+
+    The texts are shaped like the ones a recorded meeting produced, where
+    the recognizer handed over a sentence and the start of the next in one
+    result and the whole of it waited for the next endpoint.
+    """
+    checks.section("Sentences that finish inside a fragment")
+
+    def segmenter(**overrides):
+        return pipeline.Segmenter(ceiling_seconds=overrides.get("ceiling", 99),
+                                  gap_seconds=0.6)
+
+    split = segmenter()
+    emitted = split.add("And you probably have some favorite scriptures "
+                        "from this week. So I just", False, 0.0, 3.0)
+    checks.check("a finished sentence goes out as soon as it arrives",
+                 [unit[1] for unit in emitted]
+                 == ["And you probably have some favorite scriptures "
+                     "from this week."], emitted)
+    checks.check("and says it was split out",
+                 [unit[2] for unit in emitted] == ["sentence"], emitted)
+    checks.check("the unfinished rest stays for its own ending",
+                 split.parts == ["So I just"], split.parts)
+    emitted = split.add("wanted to begin with a thought.", True, 3.0, 2.0)
+    checks.check("and goes out whole when that ending comes",
+                 [unit[1] for unit in emitted]
+                 == ["So I just wanted to begin with a thought."], emitted)
+    checks.check("every line has a number of its own",
+                 split.seq == 2, split.seq)
+
+    short = segmenter()
+    emitted = short.add("Right? So when we are sustained in", False, 0.0, 2.0)
+    checks.check("a sentence too short to be worth a call waits with the "
+                 "next", emitted == [] and short.parts
+                 == ["Right? So when we are sustained in"], emitted)
+
+    several = segmenter()
+    emitted = several.add(
+        "This is a very interesting chapter indeed. This is where we learn "
+        "about his calling or commission. Right?", True, 0.0, 6.0)
+    checks.check("an endpoint closing several sentences gives a line each",
+                 [unit[1] for unit in emitted]
+                 == ["This is a very interesting chapter indeed.",
+                     "This is where we learn about his calling or "
+                     "commission. Right?"], emitted)
+    checks.check("numbered in order, none sharing a number",
+                 [unit[0] for unit in emitted] == [1, 2], emitted)
+
+    title = segmenter()
+    emitted = title.add("I went to see my good friend Dr. Smith about it and",
+                        False, 0.0, 3.0)
+    checks.check("an abbreviation is not the end of a sentence",
+                 emitted == [], emitted)
+
+    lowered = segmenter()
+    emitted = lowered.add("we read about it in verse 16 of chapter one. and "
+                          "then", False, 0.0, 3.0)
+    checks.check("a full stop before a lowercase word is not a boundary",
+                 emitted == [], emitted)
+
+    ceiling = segmenter(ceiling=0)
+    ceiling.add("not far north where the Samaritans are from, and then "
+                "you have", False, 0.0, 3.0)
+    emitted = ceiling.check_ceiling()
+    checks.check("the ceiling cuts at the last comma",
+                 [unit[1] for unit in emitted]
+                 == ["not far north where the Samaritans are from,"],
+                 emitted)
+    checks.check("and keeps the clause after it",
+                 ceiling.parts == ["and then you have"], ceiling.parts)
+
+    bare = segmenter(ceiling=0)
+    bare.add("the history of the house of Israel and Judah at", False,
+             0.0, 3.0)
+    emitted = bare.check_ceiling()
+    checks.check("with no comma the ceiling takes everything, as before",
+                 [unit[1] for unit in emitted]
+                 == ["the history of the house of Israel and Judah at"]
+                 and bare.parts == [], emitted)
+
+    early = segmenter(ceiling=0)
+    early.add("you know, the history of the house of Israel", False,
+              0.0, 3.0)
+    emitted = early.check_ceiling()
+    checks.check("a comma too early to leave a real clause is not a cut",
+                 [unit[1] for unit in emitted]
+                 == ["you know, the history of the house of Israel"],
+                 emitted)
 
 
 async def check_pipeline(checks):
@@ -327,6 +426,8 @@ async def check_pipeline(checks):
     checks.check("the summary counts every call",
                  sink.summary().startswith("3 translated, 0 failed"),
                  sink.summary())
+
+    check_sentence_splitting(checks)
 
     checks.section("The same loops, publishing to a Hub, one French reader")
     translator = FakeTranslator()
@@ -525,6 +626,43 @@ async def check_pipeline(checks):
                  isinstance(raised, RuntimeError), repr(raised))
     checks.check("it was retried like any other bad answer",
                  len(posts) == 2, len(posts))
+
+    checks.section("What a translation call reports it cost")
+    translator = pipeline.Translator(
+        base_url="http://invalid.invalid/v1", api_key="selftest",
+        model="fake-model", languages=["French"], glossary="",
+        max_tokens=100, timeout=1.0)
+    # Gemini's compatible endpoint names no thinking tokens, and counts
+    # them only in the total.
+    reply = {"choices": [{"message": {"content": '{"French": "Bonjour"}'}}],
+             "usage": {"prompt_tokens": 650, "completion_tokens": 20,
+                       "total_tokens": 790}}
+
+    async def answered(url, json=None):
+        return SimpleNamespace(status_code=200, json=lambda: reply)
+
+    translator.client.post = answered
+    try:
+        translations, _ = await translator.translate("hello", [], ["French"])
+    finally:
+        await translator.close()
+    checks.check("the answer still reads like a dict of languages",
+                 translations["French"] == "Bonjour", translations)
+    checks.check("and carries the tokens it cost",
+                 translations.usage == {"prompt_tokens": 650,
+                                        "output_tokens": 20,
+                                        "reasoning_tokens": 120,
+                                        "cached_tokens": 0},
+                 translations.usage)
+    named = pipeline.usage_of({"usage": {
+        "prompt_tokens": 650, "completion_tokens": 20, "total_tokens": 790,
+        "completion_tokens_details": {"reasoning_tokens": 90},
+        "prompt_tokens_details": {"cached_tokens": 512}}})
+    checks.check("thinking and cached tokens are read where a provider "
+                 "names them", named["reasoning_tokens"] == 90
+                 and named["cached_tokens"] == 512, named)
+    checks.check("a reply with no usage records none rather than zeros",
+                 pipeline.usage_of({"choices": []}) is None)
 
     checks.section("Stopping the session mid translation")
     translator = FakeTranslator(delay=5.0)
@@ -2415,6 +2553,23 @@ async def check_store(checks):
     checks.check("the requested outputs were recorded",
                  json.loads(stored[0]["requested"]) == ["English", "French"],
                  stored[0]["requested"])
+    checks.check("each line records the tokens its own call cost",
+                 [row["prompt_tokens"] for row in stored]
+                 == [600 + len(sentence) for sentence in SENTENCES]
+                 and stored[0]["reasoning_tokens"] == 12,
+                 [dict(row) for row in stored])
+    fragments = handle.execute(
+        "SELECT * FROM fragments WHERE session_id = 1 ORDER BY id").fetchall()
+    checks.check("every fragment the recognizer sent was kept, in order",
+                 [row["text"] for row in fragments]
+                 == [json.loads(message)["channel"]["alternatives"][0]
+                     ["transcript"] for message in FRAGMENTS],
+                 [row["text"] for row in fragments])
+    checks.check("with its timing, so the meeting can be replayed",
+                 [(row["start"], row["audio_end"], row["speech_final"])
+                  for row in fragments[2:3]] == [(5.0, 6.5, 1)]
+                 and all(row["run"] == 1 and row["at"] for row in fragments),
+                 [dict(row) for row in fragments])
     grouped = record.translations_of(handle, 1)
     checks.check("the translation was stored against its language",
                  grouped[1][0]["language"] == "French"
@@ -2433,6 +2588,18 @@ async def check_store(checks):
     heading = report.read_text(encoding="utf-8").splitlines()[0]
     checks.check("and the document read back afterwards names it",
                  heading.startswith("# Session 1, chapel, "), heading)
+    checks.check("and reports what the calls cost",
+                 "## Tokens" in report.read_text(encoding="utf-8"))
+    handle.close()
+
+    # The handle main passes it, which reads rows by name.
+    handle = record.open_read_only(str(path))
+    # A negative age puts the cutoff in the future, so everything goes.
+    record.purge(handle, -1)
+    left = [handle.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+            for table in ("sessions", "lines", "translations", "fragments")]
+    checks.check("a purge takes the fragments along with the lines",
+                 left == [0, 0, 0, 0], left)
     handle.close()
 
     checks.section("A recording made before the room column existed")
@@ -2443,8 +2610,15 @@ async def check_store(checks):
         " ended_at REAL, device TEXT, asr_model TEXT, model TEXT,"
         " languages TEXT, correct_english INTEGER, settings TEXT,"
         " glossary TEXT, keyterms TEXT, prompt_hash TEXT)")
-    # The rest of the file as it is today: only sessions differs, which is
-    # what a database recorded by an earlier version actually looks like.
+    # And lines from before the calls reported their tokens.
+    earlier.execute(
+        "CREATE TABLE lines (id INTEGER PRIMARY KEY,"
+        " session_id INTEGER NOT NULL, seq INTEGER NOT NULL, run INTEGER,"
+        " at REAL, audio_end REAL, lag REAL, confidence REAL, heard TEXT,"
+        " english TEXT, reason TEXT, latency REAL, outcome TEXT,"
+        " requested TEXT, UNIQUE (session_id, seq))")
+    # The rest of the file as it is today, which is what a database
+    # recorded by an earlier version actually looks like.
     earlier.executescript(record.SCHEMA)
     earlier.execute("INSERT INTO sessions (started_at, device) VALUES (?,?)",
                     (time.time(), "a microphone from last year"))
@@ -2463,6 +2637,10 @@ async def check_store(checks):
     columns = [row[1] for row in handle.execute("PRAGMA table_info(sessions)")]
     checks.check("opening it to record gains the column",
                  "room" in columns, columns)
+    columns = [row[1] for row in handle.execute("PRAGMA table_info(lines)")]
+    checks.check("and the token columns on its lines",
+                 all(column in columns for column in record.TOKEN_COLUMNS),
+                 columns)
     kept = [row[0] for row in
             handle.execute("SELECT device FROM sessions")]
     checks.check("and the session already in the file is still there",
