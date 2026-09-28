@@ -331,6 +331,34 @@ def resolve_session(handle, which):
 WORD = re.compile(r"[\w'-]+")
 PROPER = re.compile(r"^[A-Z][\w'-]*$")
 
+# Words a correction changes for reasons that have nothing to do with the
+# recognizer missing a term: grammar mended around a repair, a word
+# recapitalized after a full stop was added. They made up most of the first
+# worklist a real meeting produced, above the names it was for.
+COMMON_WORDS = {
+    "a", "an", "the", "and", "or", "but", "so", "then", "if", "of", "in",
+    "on", "at", "to", "for", "from", "with", "by", "as", "is", "are", "was",
+    "were", "be", "been", "am", "it", "its", "it's", "this", "that", "these",
+    "those", "what", "which", "who", "how", "i", "you", "he", "she", "we",
+    "they", "me", "him", "her", "us", "them", "my", "your", "his", "our",
+    "their", "right", "yes", "yeah", "okay", "oh", "well", "like", "kind",
+    "look", "not", "no", "do", "did", "have", "has", "had",
+}
+
+
+def worth_a_keyterm(word, heard):
+    """Whether a word a correction added is a term the recognizer missed.
+
+    Not a common word, not a number, which is formatting rather than
+    hearing, and not a name the recognizer already heard with a possessive
+    on it, which is the correction editing grammar.
+    """
+    lowered = word.lower()
+    if lowered in COMMON_WORDS or word.isdigit():
+        return False
+    heard = {token.lower() for token in heard}
+    return lowered + "'s" not in heard and lowered + "\u2019s" not in heard
+
 
 def changed_words(heard, english, fold=False):
     """Words the correction introduced, and the ones it replaced.
@@ -458,7 +486,10 @@ def _corrections(page, lines):
     counts = {}
     for line in available:
         added, removed = changed_words(line["heard"], line["english"])
+        heard = WORD.findall(line["heard"] or "")
         for word in added:
+            if not worth_a_keyterm(word, heard):
+                continue
             key = word.lower()
             entry = counts.setdefault(key, {"word": word, "n": 0, "was": []})
             entry["n"] += 1
@@ -469,7 +500,9 @@ def _corrections(page, lines):
     page.write("The recognizer missed these and the glossary repaired them "
                "afterwards. Putting them in keyterms.txt gets them right at "
                "the source, so the line never has to be revised on a "
-               "phone.\n\n")
+               "phone. A term that is also under Names to check may be one "
+               "the model invented, and adding that to keyterms.txt would "
+               "teach the recognizer to hear it, so check those first.\n\n")
     page.write("| term | times | heard instead |\n|---|---|---|\n")
     for entry in sorted(counts.values(), key=lambda e: -e["n"]):
         was = ", ".join(sorted(set(entry["was"]))[:4]) or "-"

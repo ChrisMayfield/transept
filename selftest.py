@@ -2890,6 +2890,40 @@ async def check_store(checks):
     checks.check("capitalizing the first word is not a finding",
                  opening == ([], []), opening)
 
+    worth = record.worth_a_keyterm
+    checks.check("a common word the correction changed is not a key term",
+                 not worth("The", ["the", "prince"])
+                 and not worth("of", ["or"]), "common words listed")
+    checks.check("nor is a number written as digits",
+                 not worth("2", ["two"]))
+    checks.check("nor a name that only lost its possessive",
+                 not worth("Isaiah", ["Isaiah's", "chapter"]))
+    checks.check("but a name the recognizer missed is",
+                 worth("Immanuel", ["Emmanuel"]))
+    checks.check("and so is one it heard without its capital",
+                 worth("Kalema", ["kalema"]))
+
+    worklist = Path(tempfile.mkdtemp()) / "worklist.db"
+    handle = record.connect(str(worklist))
+    handle.execute("INSERT INTO sessions (started_at, languages) VALUES "
+                   "(?, '[]')", (time.time(),))
+    handle.execute(
+        "INSERT INTO lines (session_id, seq, heard, english, reason) VALUES"
+        " (1, 1, 'read chapter two. the words of brother kalema',"
+        " 'Read chapter 2. The words of Brother Kalema', 'endpoint')")
+    handle.close()
+    handle = record.open_read_only(str(worklist))
+    listed = Path(tempfile.mkdtemp()) / "worklist.md"
+    record.write_report(handle, record.resolve_session(handle, "last"),
+                        str(listed))
+    handle.close()
+    table = [row.split("|")[1].strip()
+             for row in listed.read_text(encoding="utf-8").splitlines()
+             if row.startswith("| ") and not row.startswith("| term")]
+    checks.check("the worklist in the report keeps the name and drops the "
+                 "rest", "Kalema" in table and "The" not in table
+                 and "2" not in table, table)
+
     report = Path(tempfile.mkdtemp()) / "review.md"
     handle = record.open_read_only(str(path))
     record.write_report(handle, record.resolve_session(handle, "last"),
