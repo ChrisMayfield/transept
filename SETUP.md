@@ -467,6 +467,11 @@ If the message names a port and `./transept status` says no server is running, s
 The address in `config.toml` is not the address the tunnel just published, so the QR code points somewhere that will not answer.
 Copy the address from the warning into `public_url` as in step 9.
 
+**The operator page says there has been no audio from the microphone.**
+The microphone has stopped delivering anything at all, which is different from a quiet room.
+A laptop whose screen locks or whose lid closes can mute its microphone without any error, so set the laptop never to lock or sleep during a meeting, and leave the lid open.
+The session holds its connection through the silence and carries on when the audio comes back.
+
 **Phones cannot reach the address.**
 Check `./transept status`, or `tailscale funnel status`, to see whether the tunnel is actually open.
 Remember that the address only works with the token on the end, so hand out the whole line or the QR code rather than just the hostname.

@@ -775,6 +775,75 @@ async def check_pipeline(checks):
     checks.check("and the recognizer is told the stream is over",
                  socket.close_stream_sent, socket.close_stream_sent)
 
+    checks.section("A local microphone that stops delivering")
+
+    class StalledSource:
+        """A device that has gone quiet the way a muted one does."""
+
+        encoding = "pcm"
+
+        def __init__(self):
+            self.release = asyncio.Event()
+            self.reads = 0
+            self.cancelled = False
+
+        async def read(self):
+            self.reads += 1
+            try:
+                await self.release.wait()
+            except asyncio.CancelledError:
+                self.cancelled = True
+                raise
+            self.release.clear()
+            return b"\x00\x00" * capture.CHUNK_FRAMES
+
+    stalled = StalledSource()
+    socket = FakeSocket([])
+    original_stall = pipeline.STALL_KEEPALIVE
+    pipeline.STALL_KEEPALIVE = 0.05
+    try:
+        pump = asyncio.create_task(pipeline.pump_audio(stalled, socket))
+        await asyncio.sleep(0.2)
+        checks.check("a stalled read sends KeepAlives to hold the socket",
+                     socket.keepalives >= 2 and socket.audio_chunks == 0,
+                     f"{socket.keepalives} keepalives, "
+                     f"{socket.audio_chunks} chunks")
+        checks.check("while waiting on the same read, not a new one",
+                     stalled.reads == 1, stalled.reads)
+        stalled.release.set()
+        await asyncio.sleep(0.02)
+        checks.check("and the audio that read returns still goes up",
+                     socket.audio_chunks == 1, socket.audio_chunks)
+        pump.cancel()
+        await asyncio.gather(pump, return_exceptions=True)
+        checks.check("stopping cancels the read left waiting",
+                     stalled.cancelled, "the read was left pending")
+        checks.check("and still tells the recognizer the stream is over",
+                     socket.close_stream_sent)
+    finally:
+        pipeline.STALL_KEEPALIVE = original_stall
+
+    clock = pipeline.StreamClock()
+    checks.check("a device that never delivered is silent since it opened",
+                 clock.silent_for(now=clock.opened + 4.0) == 4.0,
+                 clock.silent_for(now=clock.opened + 4.0))
+    clock.advance(0.1, now=100.0)
+    checks.check("and one that did is silent since its last chunk",
+                 clock.silent_for(now=107.5) == 7.5,
+                 clock.silent_for(now=107.5))
+
+    session, _ = make_session(["French"], True, [])
+    session.run_source = SimpleNamespace(clock=pipeline.StreamClock())
+    session.run_source.clock.advance(0.1, now=time.monotonic() - 9.0)
+    session.state = "running"
+    checks.check("the operator page is told how long the microphone has "
+                 "been silent", 8.5 < session.status()["no_audio_for"] < 10,
+                 session.status()["no_audio_for"])
+    session.state = "stopped"
+    checks.check("and nothing once the session has stopped",
+                 session.status()["no_audio_for"] == 0,
+                 session.status()["no_audio_for"])
+
     checks.section("What the recognizer is told it is being sent")
     settings = {"asr_model": "nova-3", "endpointing": 400}
     pcm = pipeline.build_asr_url(settings, ["Kalema"], "pcm")
@@ -1226,6 +1295,17 @@ async def check_sender_proxy(checks):
     checks.check("and says the server is not there rather than saying "
                  "nothing", status["state"] == "stopped"
                  and "connect" in (status["error"] or ""), status)
+    checks.check("the blank status carries every field Session sends",
+                 not [key for key in expected
+                      if key not in sender.blank_status()],
+                 [key for key in expected
+                  if key not in sender.blank_status()])
+    remote.source = SimpleNamespace(clock=pipeline.StreamClock())
+    remote.source.clock.advance(0.1, now=time.monotonic() - 12.0)
+    checks.check("a sender reports its own microphone going silent",
+                 remote.status()["no_audio_for"] > 11,
+                 remote.status()["no_audio_for"])
+    remote.source = None
     ok, message = remote.set_override("French", "on")
     checks.check("a language button with no socket is refused, not dropped",
                  ok is False and "connect" in message, message)

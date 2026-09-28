@@ -62,7 +62,7 @@
 
   .note { font-size: .85rem; color: var(--quiet); margin: .5rem 0 0; }
   /* Not a quiet note. Somebody in the room has to be told about this. */
-  #recording { color: #8a5300; font-weight: 600; }
+  #recording, #noAudio { color: #8a5300; font-weight: 600; }
   .alert {
     margin: 1rem 0; padding: .8rem 1rem; border-left: 3px solid var(--halt);
     background: #fff; color: var(--halt); font-size: .9rem;
@@ -145,6 +145,7 @@
 <div id="alert"></div>
 <p class="note" id="recording" hidden></p>
 <p class="note" id="quiet"></p>
+<p class="note" id="noAudio"></p>
 
 <div style="margin-top:1.25rem">
   <label for="device">Microphone feed</label>
@@ -270,6 +271,10 @@ function seconds(value) {
     : Math.floor(total / 60) + "m " + (total % 60) + "s";
 }
 
+// Seconds without a single sample before the page says so. Longer than a
+// blip, much shorter than the minute a room would spend wondering.
+const NO_AUDIO_WARNING = 5;
+
 function render(status) {
   const recording = el("recording");
   recording.hidden = !status.recording;
@@ -298,6 +303,16 @@ function render(status) {
     (status.state === "running" && limit > 0 && quiet > limit / 2)
       ? "Nothing heard for " + seconds(quiet)
         + ". Stopping on its own in " + seconds(limit - quiet) + "."
+      : "";
+
+  // Not a quiet room, which still delivers audio: a microphone that has
+  // stopped, the way a locked screen can mute one without any error.
+  const silent = status.no_audio_for || 0;
+  el("noAudio").textContent =
+    (status.state === "running" && silent >= NO_AUDIO_WARNING)
+      ? "No audio from the microphone for " + seconds(silent)
+        + ". Check that it is not muted and that this computer has not "
+        + "locked or gone to sleep."
       : "";
 
   el("units").textContent = status.units;

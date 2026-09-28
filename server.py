@@ -500,7 +500,21 @@ class Session:
             "median": (sorted(latencies)[len(latencies) // 2]
                        if latencies else None),
             "recent": list(self.hub.buffers["English"])[-6:],
+            "no_audio_for": self.no_audio_for(),
         }
+
+    def no_audio_for(self):
+        """Seconds the microphone has delivered nothing, or 0.
+
+        A locked screen can mute a laptop's microphone without the capture
+        failing, and in the room that looks exactly like nobody speaking.
+        Zero where there is no clock to ask, which is between runs and on a
+        hosted server, whose sender reports its own microphone instead.
+        """
+        clock = getattr(self.run_source, "clock", None)
+        if self.state != "running" or clock is None:
+            return 0
+        return clock.silent_for()
 
     # -- the pipeline ------------------------------------------------------
 

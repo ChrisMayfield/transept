@@ -277,6 +277,11 @@ Treating it as a translation failure publishes an English line into every channe
 `pump_audio` sends `CloseStream` in a `finally` block.
 Without it, a dead capture device leaves the websocket open and the session hangs in `running` with no audio and no reconnect.
 
+`pump_audio` waits on its read with a timeout and sends a `KeepAlive` when the timeout passes, then goes on waiting on the same read.
+A microphone muted by a locked screen stops delivering without failing, and the recognizer closes a socket that has heard nothing for about ten seconds, which would turn a locked screen into a reconnect.
+The read is kept rather than cancelled and restarted because a read abandoned partway could lose audio it had already taken off the device.
+The same silence reaches the operator page as `no_audio_for`, read off the capture clock, because in the room a muted microphone looks exactly like nobody speaking.
+
 The 48 kHz fallback averages groups of three samples rather than taking every third one, because plain decimation would alias everything above 8 kHz back into the speech band.
 
 `do_start` runs the server with `-u`.

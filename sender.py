@@ -44,8 +44,9 @@ except ImportError:
 import capture
 import controls
 from controls import OPERATOR_HOST, mint_token
-from pipeline import (add_settings_arguments, install_stop_handler,
-                      load_config, load_keys, open_encoder, resolve)
+from pipeline import (Stamped, add_settings_arguments,
+                      install_stop_handler, load_config, load_keys,
+                      open_encoder, resolve)
 
 # Seconds between attempts to reach the server, and how long a connection
 # has to last before the next drop starts counting from the beginning
@@ -84,7 +85,7 @@ def blank_status():
         "reconnects": 0, "corrections": 0, "reader_url": "", "idle_stop": 0,
         "quiet_for": 0, "skipped": 0, "capped": 0, "recording": False,
         "dropped": 0, "languages": [], "english_listeners": 0,
-        "median": None, "recent": [],
+        "median": None, "recent": [], "no_audio_for": 0,
     }
 
 
@@ -199,6 +200,10 @@ class Remote:
                 status["state"] = "reconnecting"
         status["device"] = self.device or status.get("device", "")
         status["reader_url"] = self.config.get("reader_url", "")
+        # The microphone is on this laptop, so only this laptop can say it
+        # has gone quiet in the way a muted one does.
+        clock = getattr(self.source, "clock", None)
+        status["no_audio_for"] = clock.silent_for() if clock else 0
         return status
 
     # -- the microphone ----------------------------------------------------
@@ -210,7 +215,10 @@ class Remote:
         what it falls back to is what the hello has to declare: the server
         builds its recognizer URL from that and cannot be told later.
         """
-        source = await capture.open_capture(device, self.config["capture"])
+        # Stamped for the reason Session stamps its device: the clock is
+        # what notices a microphone that has stopped delivering.
+        source = Stamped(await capture.open_capture(device,
+                                                    self.config["capture"]))
         source, note = await open_encoder(source, self.encoding)
         if note:
             print(note)

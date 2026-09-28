@@ -879,6 +879,17 @@ class StreamClock:
     def __init__(self):
         self.position = 0.0
         self.marks = deque(maxlen=CLOCK_MARKS)
+        self.opened = time.monotonic()
+
+    def silent_for(self, now=None):
+        """Seconds since the device last delivered any audio at all.
+
+        Not a quiet room, which still delivers audio: a microphone that has
+        stopped, the way one muted by a locked screen does.
+        """
+        now = time.monotonic() if now is None else now
+        last = self.marks[-1][1] if self.marks else self.opened
+        return max(0.0, now - last)
 
     def advance(self, seconds, now=None):
         """Note that the stream grew by this much, read just now."""
@@ -1041,6 +1052,10 @@ def add_settings_arguments(parser, names):
 
 
 # -- the pipeline ------------------------------------------------------------
+
+# Seconds a read from the device may take before the recognizer is sent a
+# KeepAlive. Well inside the ten seconds after which it closes the socket.
+STALL_KEEPALIVE = 3.0
 #
 # server.py and pipeline.py both run these three tasks over one websocket: a
 # pump feeding audio in, a listener segmenting results, and a publisher
@@ -1072,10 +1087,25 @@ async def pump_audio(source, socket, stop=None):
     device never produces: a sender's connection blinked, and the sentence
     in progress is not over. A KeepAlive holds the recognizer socket open
     through it. Silence would do the same and be billed as audio.
+
+    A local device can stall without saying so, as a microphone muted by a
+    locked screen does, and the recognizer closes a socket that has heard
+    nothing for about ten seconds. So a read that takes longer than
+    STALL_KEEPALIVE sends a KeepAlive too, and goes on waiting on the same
+    read rather than starting another: a read abandoned partway could lose
+    the audio it had already taken off the device.
     """
+    pending = None
     try:
         while stop is None or not stop.is_set():
-            chunk = await source.read()
+            if pending is None:
+                pending = asyncio.ensure_future(source.read())
+            done, _ = await asyncio.wait({pending}, timeout=STALL_KEEPALIVE)
+            if not done:
+                await socket.send(json.dumps({"type": "KeepAlive"}))
+                continue
+            chunk = pending.result()
+            pending = None
             if chunk is None:
                 await socket.send(json.dumps({"type": "KeepAlive"}))
                 continue
@@ -1083,6 +1113,9 @@ async def pump_audio(source, socket, stop=None):
                 return
             await socket.send(chunk)
     finally:
+        if pending is not None:
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
         try:
             await socket.send(json.dumps({"type": "CloseStream"}))
         except (websockets.ConnectionClosed, RuntimeError):
