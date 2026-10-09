@@ -510,14 +510,17 @@ class Translator:
         body = {
             "model": self.model,
             "messages": self._messages(text, context, outputs),
-            "temperature": 0,
             "max_tokens": self.max_tokens,
         }
+        # No temperature, top_p, or top_k: Gemini deprecated custom sampling
+        # and will reject it, and the model's own defaults are tuned for it.
         if self.reasoning_effort:
             # Translation is mechanical and does not benefit from thinking.
-            # Gemini 3 cannot disable it outright, but "low" floors the
-            # budget. Thinking tokens count against max_tokens, which is
-            # what truncated responses earlier.
+            # Gemini 3 cannot disable it outright, but "low" sets a low
+            # thinking_level. This is the portable spelling: a Google-only
+            # thinking_config would break other providers, and Gemini refuses
+            # both at once. Thinking tokens count against max_tokens, which
+            # is what truncated responses earlier.
             body["reasoning_effort"] = self.reasoning_effort
         last_error = None
         for attempt in range(self.max_attempts):
