@@ -11,9 +11,11 @@ local/
 config.toml
 glossary.txt
 keyterms.txt
+sessions.db*
 transept.log
 transept.pid
-sessions.db*
+
+# Audio recordings and transcripts
 *.wav
 *.flac
 transcript*.txt
@@ -21,14 +23,12 @@ review*.md
 
 # Python
 __pycache__/
-*.py[cod]
 .venv/
-venv/
-*.egg-info/
 .ruff_cache/
 
-# Editors and operating systems
-.vscode/
-.idea/
-.DS_Store
+# Temporary files, editor backups, and OS metadata
+._*
 *.swp
+.~lock.*#
+*~
+.DS_Store

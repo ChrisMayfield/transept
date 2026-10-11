@@ -1,9 +1,9 @@
 # One room on a hosted server, for the deployment HOSTED.md describes.
-# Copy to /srv/transept/local/<room>/config.toml and edit. Ignored by git wherever
-# it lands, because it holds this room's two tokens.
+# Copy to /srv/transept/local/<room>/config.toml and edit. Ignored by git
+# wherever it lands, because it holds this room's two tokens.
 #
 # Only what a room has to say for itself. The unit reads ../config.toml
-# first, an edited copy of examples/config.example.toml, so the
+# first, an edited copy of the project's own config.example.toml, so the
 # keys, the model, the backend, the languages, and the hostname come from
 # there and are not repeated here. Anything a room does differ on, its own
 # deepgram_api_key when its spend is worth attributing separately, goes here
