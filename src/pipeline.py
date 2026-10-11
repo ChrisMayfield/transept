@@ -87,7 +87,7 @@ SETTINGS = [
     ("asr_model", "recognition", "model", str, "nova-3"),
     ("endpointing", "recognition", "endpointing", int, 400),
 
-    ("ceiling", "segmentation", "ceiling", float, 4.0),
+    ("ceiling", "segmentation", "ceiling", float, 5.0),
     ("gap", "segmentation", "gap", float, 0.6),
     ("min_words", "segmentation", "min_words", int, MIN_WORDS),
 

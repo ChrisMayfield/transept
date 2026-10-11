@@ -377,10 +377,10 @@ Set it to `pcm` if a real run shows recognition getting worse, which would be a 
 `endpointing` (400 milliseconds) is how much silence ends an utterance for the speech recognizer.
 Lower is snappier but clips people who pause in the middle of a sentence.
 
-`ceiling` (4 seconds) is how long a half-finished sentence waits before being translated anyway.
+`ceiling` (5 seconds) is how long a half-finished sentence waits before being translated anyway.
 When it runs out, the sentence is cut at its last comma if there is one, and the rest waits for its own ending.
-The operator page tags each sentence with why the sentence was sent.
-A lot of `ceiling` means people are talking over each other, and raising `ceiling` trades a little delay for sentences that make sense.
+The recognizer sends speech in pieces about four seconds long, so a ceiling at or below that cuts many sentences just before the rest of them arrives.
+Raising `ceiling` trades a little delay for sentences that make sense, and lowering it below 5 brings back lines that end on "and" or "the".
 
 `gap` (0.6 seconds) is the silence that separates one person's abandoned sentence from the next person's new one.
 Lower `gap` if two unrelated remarks are being glued into one line.

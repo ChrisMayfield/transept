@@ -64,9 +64,10 @@ endpointing = 400
 
 [segmentation]
 # Seconds a half-finished sentence waits before being translated anyway.
-# Watch how often sentences close with reason "ceiling": a lot of them means
-# people are talking over each other.
-ceiling = 4.0
+# Keep it above the four seconds or so the recognizer usually takes to send
+# the next piece: at 4, half the cuts came under a second before the rest of
+# the sentence arrived, and a cut line is the front half of a clause.
+ceiling = 5.0
 # Silence that separates one person's abandoned sentence from the next
 # person's new one.
 gap = 0.6
