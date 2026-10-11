@@ -232,18 +232,21 @@ Sender to server:
 hello     room, encoding ("pcm" or "opus"), device, intent ("start" or "attach")
 stop      end the session
 language  name, mode ("on", "off", or "auto")
+level     seconds, rms, peak, once a second, measured before encoding
 ```
 
 Server to sender:
 
 ```
-ready     reader_url, the language list, and the current session state
+ready     reader_url, the language list, the current session state, levels
 status    the dict Session.status() already returns, which the page already renders
 error     text, for a start that failed
 ```
 
 `hello` carries the encoding because the server has to build the Deepgram URL to match, and carries the intent because a page reload opens a new socket for a room that may already be running.
 `status` is the existing snapshot rather than a new shape, so the operator page keeps rendering what it renders now.
+`level` is measured on the laptop because the samples are there and the server has only Opus, and it is sent only when `ready` says `levels`, so a sender newer than its server does not draw an error a second.
+The server records it beside how much audio reached the recognizer, counted from the Ogg pages as they arrive, and how many results the recognizer sent back empty, which is what tells a quiet room from audio that never arrived.
 
 ## Listeners and tokens
 

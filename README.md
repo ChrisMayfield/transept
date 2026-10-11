@@ -152,7 +152,7 @@ A hosted room adds one more party, since the audio and every sentence pass throu
 
 By default nothing is stored on disk, so subtitles live in memory and disappear when the session stops.
 Turning on `record` in `config.toml` changes that, and is a decision to make with whoever leads the meeting.
-A recorded session keeps every English sentence, every translation, and how long each one took, in `local/sessions.db`.
+A recorded session keeps every English sentence, every translation, how long each one took, and how loud the audio was every few seconds, in `local/sessions.db`.
 That file is not encrypted, `.gitignore` keeps the file out of your fork, and nothing is ever deleted automatically.
 The operator page says "Recording this session to disk" the `record` option is set.
 `python ../src/record.py --purge --older-than 30`, run from inside `local`, deletes old recordings.

@@ -24,6 +24,7 @@ Usage, from the top of the checkout:
 Exits non-zero if any check fails.
 """
 
+import array
 import asyncio
 import base64
 import collections
@@ -104,6 +105,12 @@ def asr_result(text, speech_final, start, duration):
         "duration": duration,
         "channel": {"alternatives": [{"transcript": text}]},
     })
+
+
+def ogg_page(granule, payload):
+    """One Ogg page with this granule position and a one-segment payload."""
+    return (b"OggS" + bytes(2) + granule.to_bytes(8, "little", signed=True)
+            + bytes(12) + bytes([1, len(payload)]) + payload)
 
 
 # Three sentences over four fragments, one for each way the buffer closes.
@@ -354,6 +361,76 @@ async def check_stream_clock(checks):
                  pipeline.stream_lag(None, time.monotonic() - 3.0, 1.0)
                  is not None
                  and pipeline.stream_lag(None, None, 1.0) is None)
+
+    checks.section("How loud the audio was")
+    meter = pipeline.LevelMeter()
+    checks.check("a meter nobody fed has measured nothing, not silence",
+                 meter.take() == (None, 0.0, 0.0))
+    # A tenth of a second alternating at half scale: RMS and peak 0.5.
+    meter.add(array.array("h", [16384, -16384] * 800).tobytes())
+    seconds, rms, peak = meter.take()
+    checks.check("a chunk at half scale reads -6 dBFS",
+                 abs(seconds - 0.1) < 1e-9
+                 and pipeline.decibels(rms) == -6.0
+                 and pipeline.decibels(peak) == -6.0,
+                 (seconds, rms, peak))
+    checks.check("and taking a reading starts the next one empty",
+                 meter.take() == (None, 0.0, 0.0))
+    # One loud second and three silent ones are quiet on average, which
+    # is the weighting a sender's one-second reports depend on.
+    meter.merge(1.0, 0.5, 0.9)
+    meter.merge(3.0, 0.0, 0.0)
+    seconds, rms, peak = meter.take()
+    checks.check("readings from a sender are weighted by their length",
+                 seconds == 4.0 and abs(rms - 0.25) < 1e-9 and peak == 0.9,
+                 (seconds, rms, peak))
+    meter.merge(0.0, 0.0, 0.0)
+    checks.check("a sender reporting no audio at all is a reading of zero",
+                 meter.take() == (0.0, 0.0, 0.0))
+    checks.check("silence is floored rather than minus infinity",
+                 pipeline.decibels(0.0) == pipeline.LEVEL_FLOOR)
+
+    stamped = pipeline.Stamped(FakeSource())
+    await stamped.read()
+    checks.check("the capture wrapper measures what it reads",
+                 stamped.meter.take()[0] == 0.1)
+
+    checks.section("The server's own clock for a sender's audio")
+    # Twenty milliseconds a page, the encoder's own page duration, after
+    # the two pages that say what the stream is.
+    stream = (ogg_page(0, b"OpusHead") + ogg_page(0, b"OpusTags")
+              + b"".join(ogg_page(960 * step, bytes(60))
+                         for step in range(100, 151)))
+    pages = pipeline.OggGranules()
+    # Split badly on purpose, the way a sender's reads fall.
+    counted = sum(pages.feed(stream[at:at + 37])
+                  for at in range(0, len(stream), 37))
+    checks.check("Opus pages split across chunks are counted as audio",
+                 abs(counted - 1.0) < 1e-9, counted)
+    checks.check("a page that finishes no packet adds nothing",
+                 pages.feed(ogg_page(-1, bytes(60))) == 0.0)
+    checks.check("and a new encoder starting again is not counted backwards",
+                 pages.feed(ogg_page(960, bytes(60))) == 0.0
+                 and abs(pages.feed(ogg_page(1920, bytes(60))) - 0.02)
+                 < 1e-9)
+
+    arriving = capture.RemoteCapture(1.0, "opus")
+    received = pipeline.Received(arriving)
+    arriving.feed(stream)
+    await received.read()
+    checks.check("a sender's audio is clocked as it reaches the server",
+                 abs(received.clock.position - 1.0) < 1e-9,
+                 received.clock.position)
+    checks.check("so lag on a hosted server is measured, not guessed",
+                 pipeline.stream_lag(received, None, 1.0) is not None)
+    raw = capture.RemoteCapture(1.0)
+    received = pipeline.Received(raw)
+    raw.feed(b"\x00\x00" * 1600)
+    await received.read()
+    checks.check("as is raw audio, by its length",
+                 abs(received.clock.position - 0.1) < 1e-9
+                 and received.encoding == "pcm",
+                 received.clock.position)
 
 
 def check_sentence_splitting(checks):
@@ -2525,8 +2602,21 @@ async def drive_audio(checks):
         checks.check("and the server holds the encoding the sender declared",
                      room.encoding == remote.source.encoding,
                      f"{room.encoding} against {remote.source.encoding}")
+        # By getattr, so a source with no clock fails here rather than
+        # ending the suite in a traceback.
+        clock = getattr(source, "clock", None)
+        checks.check("the server counts the audio as it arrives",
+                     clock is not None and clock.position > 0,
+                     clock and clock.position)
+        checks.check("and tells the sender it records levels",
+                     remote.levels)
+        reporting = asyncio.create_task(remote.report_levels())
+        checks.check("the levels measured on the laptop reach the server",
+                     await settle(lambda: getattr(
+                         getattr(source, "meter", None), "samples", 0) > 0))
+        reporting.cancel()
         pump.cancel()
-        await asyncio.gather(pump, return_exceptions=True)
+        await asyncio.gather(pump, reporting, return_exceptions=True)
     finally:
         capture.open_capture = original
         if link is not None:
@@ -2723,6 +2813,22 @@ async def check_store(checks):
     session.translator = translator
     checks.check("the recorder opened", session.recording(), session.error)
     await drive(session, translator)
+    # What a run's watcher writes as each window closes: the recognizer
+    # answered four times, the meter heard five seconds at -6 dBFS, and the
+    # clock moved on from where the last window left it.
+    session.recognized(False)
+    meter = pipeline.LevelMeter()
+    meter.merge(5.0, 0.5, 0.5)
+    place = session._audio_row(clock, meter, 3.0)
+    checks.check("a window ends where the clock is",
+                 abs(place - clock.position) < 1e-9, place)
+    # Then thirty seconds in which nothing with words came back, written
+    # as the rows they would have been, at a level of -60 dBFS.
+    began = time.time()
+    for step in range(1, 8):
+        session.recorder.audio(run=1, at=began + 5 * step, captured=5.0,
+                               received=5.0, rms_db=-60.0, peak_db=-40.0,
+                               results=1 if step < 7 else 2, empty=1)
     await session.recorder.close()
 
     handle = record.open_read_only(str(path))
@@ -2785,6 +2891,37 @@ async def check_store(checks):
                  heading.startswith("# Session 1, chapel, "), heading)
     checks.check("and reports what the calls cost",
                  "## Tokens" in report.read_text(encoding="utf-8"))
+    windows = record.audio_rows(handle, 1)
+    checks.check("each audio window records what reached the recognizer",
+                 windows[0]["results"] == 5 and windows[0]["empty"] == 1
+                 and windows[0]["captured"] == 5.0
+                 and windows[0]["rms_db"] == -6.0
+                 and abs(windows[0]["received"] - 5.0) < 1e-6,
+                 dict(windows[0]))
+    stretches = record.silent_stretches(windows)
+    checks.check("windows with only empty results make one stretch",
+                 len(stretches) == 1 and len(stretches[0][2]) == 6
+                 and abs(stretches[0][1] - stretches[0][0] - 30) < 0.5,
+                 [(start, end, len(rows)) for start, end, rows in stretches])
+    text = report.read_text(encoding="utf-8")
+    checks.check("and the report says it was a quiet feed, not lost audio",
+                 "## Stretches with no words" in text
+                 and "30s, level -60 dBFS" in text
+                 and "nobody was speaking into it" in text,
+                 text[text.find("## Stretches"):][:300])
+    lost = [{"run": 1, "at": 5.0 * step, "captured": 5.0,
+             "received": 1.0, "rms_db": -20.0, "peak_db": -3.0,
+             "results": 0, "empty": 0} for step in range(1, 6)]
+    checks.check("audio that did not reach the recognizer is named so",
+                 "reached the recognizer"
+                 in record.explain_silence(20.0, lost[1:]))
+    loud = [dict(row, received=5.0) for row in lost]
+    checks.check("and audio at speaking level with nothing back is too",
+                 "sent nothing back" in record.explain_silence(20.0, loud[1:]))
+    muted = [dict(row, captured=0.0, received=0.0) for row in lost]
+    checks.check("a microphone that delivered nothing is named first",
+                 "microphone delivered" in record.explain_silence(20.0,
+                                                                  muted[1:]))
     handle.close()
 
     # The handle main passes it, which reads rows by name.
@@ -2792,9 +2929,10 @@ async def check_store(checks):
     # A negative age puts the cutoff in the future, so everything goes.
     record.purge(handle, -1)
     left = [handle.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
-            for table in ("sessions", "lines", "translations", "fragments")]
-    checks.check("a purge takes the fragments along with the lines",
-                 left == [0, 0, 0, 0], left)
+            for table in ("sessions", "lines", "translations", "fragments",
+                          "audio")]
+    checks.check("a purge takes the fragments and audio with the lines",
+                 left == [0, 0, 0, 0, 0], left)
     handle.close()
 
     checks.section("A recording made before the room column existed")

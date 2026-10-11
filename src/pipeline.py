@@ -30,8 +30,10 @@ Ctrl-C to stop.
 """
 
 import argparse
+import array
 import asyncio
 import json
+import math
 import os
 import re
 import signal
@@ -842,6 +844,9 @@ class Encoder:
         # The capture clock of the device underneath, which is where lag is
         # measured from: this side of ffmpeg a byte is not a duration.
         self.clock = getattr(source, "clock", None)
+        # And its level meter, for the same reason: loudness is a property
+        # of samples, and past ffmpeg there are none.
+        self.meter = getattr(source, "meter", None)
         self.feeding = asyncio.create_task(self._feed())
 
     async def _feed(self):
@@ -978,6 +983,7 @@ class Stamped:
     def __init__(self, source):
         self.source = source
         self.clock = StreamClock()
+        self.meter = LevelMeter()
 
     def __getattr__(self, name):
         # Everything else a source is asked, its backend and encoding among
@@ -988,19 +994,181 @@ class Stamped:
         chunk = await self.source.read()
         if chunk:
             self.clock.advance(len(chunk) / BYTES_PER_SECOND)
+            self.meter.add(chunk)
         return chunk
 
     async def close(self):
         await self.source.close()
 
 
+# Samples per second an Ogg Opus granule position counts, whatever rate the
+# audio was captured at: the format fixes it.
+OPUS_GRANULE_RATE = 48000
+
+
+class OggGranules:
+    """Seconds of Opus audio in a stream read piece by piece.
+
+    Every Ogg page ends with a granule position, the count of samples
+    decoded so far, so the difference between two pages is how much audio
+    the later one carried. The pages arrive split across chunks however
+    the sender happened to read its encoder, so whole pages are found
+    here rather than assumed.
+    """
+
+    def __init__(self):
+        self.buffer = b""
+        self.last = None
+
+    def feed(self, chunk):
+        """Seconds of audio completed by this chunk."""
+        self.buffer += chunk
+        seconds = 0.0
+        while True:
+            start = self.buffer.find(b"OggS")
+            if start < 0:
+                # Kept short, so a stream that is not Ogg cannot grow it.
+                self.buffer = self.buffer[-3:]
+                return seconds
+            page = self.buffer[start:]
+            if len(page) < OGG_PAGE_HEADER:
+                self.buffer = page
+                return seconds
+            segments = page[OGG_PAGE_HEADER - 1]
+            table = OGG_PAGE_HEADER + segments
+            if len(page) < table:
+                self.buffer = page
+                return seconds
+            end = table + sum(page[OGG_PAGE_HEADER:table])
+            if len(page) < end:
+                self.buffer = page
+                return seconds
+            granule = int.from_bytes(page[6:14], "little", signed=True)
+            # Zero is a header page, and -1 a page that finishes no
+            # packet; neither says anything about how much was heard.
+            if granule > 0:
+                if self.last is not None and granule > self.last:
+                    seconds += (granule - self.last) / OPUS_GRANULE_RATE
+                # A smaller one is a new encoder starting again from zero,
+                # which counts from here rather than backwards.
+                self.last = granule
+            self.buffer = page[end:]
+
+
+class Received:
+    """A remote source that keeps a StreamClock as it is read.
+
+    The audio was captured on a laptop whose clock this machine cannot
+    read, but the moment it reaches this server is still a mark the
+    recognizer's timestamps can be measured against, and it is the only
+    one that tells a gap in what arrived from a gap in what was said.
+    Measured instead from when the run began, as every hosted line was on
+    the second field test, the first silence made every later line wrong.
+
+    The level meter is filled by the room from what the sender reports,
+    since the samples it was measured on never left the laptop.
+    """
+
+    def __init__(self, source):
+        self.source = source
+        self.clock = StreamClock()
+        self.meter = LevelMeter()
+        self.pages = OggGranules() if source.encoding == "opus" else None
+
+    def __getattr__(self, name):
+        return getattr(self.source, name)
+
+    async def read(self):
+        chunk = await self.source.read()
+        if chunk:
+            seconds = (self.pages.feed(chunk) if self.pages
+                       else len(chunk) / BYTES_PER_SECOND)
+            if seconds:
+                self.clock.advance(seconds)
+        return chunk
+
+    async def close(self):
+        await self.source.close()
+
+
+# Quieter than this is reported as this, since the log of silence is
+# minus infinity and sixteen bits cannot say anything quieter anyway.
+LEVEL_FLOOR = -96.0
+FULL_SCALE = 32768.0
+
+
+def decibels(value):
+    """A fraction of full scale as dBFS, floored."""
+    if value <= 0:
+        return LEVEL_FLOOR
+    return max(LEVEL_FLOOR, round(20 * math.log10(value), 1))
+
+
+class LevelMeter:
+    """How loud the audio was, gathered until somebody asks.
+
+    A field test lost stretches of thirty seconds with the audio arriving
+    the whole time and nothing recognized, and nothing recorded could say
+    whether those stretches were silent, quiet, or ordinary speech. RMS
+    over a stretch says which; the peak says whether it was clipping.
+    """
+
+    def __init__(self):
+        self.measured = False
+        self.samples = 0
+        self.energy = 0.0
+        self.peak = 0.0
+
+    def add(self, chunk):
+        """Fold in one chunk of 16-bit PCM."""
+        samples = array.array("h")
+        samples.frombytes(chunk[:len(chunk) - len(chunk) % 2])
+        if not samples:
+            return
+        self.measured = True
+        self.samples += len(samples)
+        self.energy += sum(sample * sample for sample in samples) \
+            / (FULL_SCALE * FULL_SCALE)
+        self.peak = max(self.peak,
+                        max(abs(min(samples)), max(samples)) / FULL_SCALE)
+
+    def merge(self, seconds, rms, peak):
+        """Fold in a stretch somebody else measured, as a sender does."""
+        samples = seconds * SAMPLE_RATE
+        # Even at zero seconds: a sender saying its microphone delivered
+        # nothing is a reading, and not the same as no sender reading.
+        self.measured = True
+        self.samples += samples
+        self.energy += rms * rms * samples
+        self.peak = max(self.peak, peak)
+
+    def take(self):
+        """(seconds, rms, peak) since the last take, then start again.
+
+        rms and peak are fractions of full scale, which is what travels
+        from a sender, and decibels() is for whoever reads them. seconds is
+        None when nothing was measured at all.
+        """
+        samples = self.samples
+        if samples:
+            result = (samples / SAMPLE_RATE,
+                      math.sqrt(self.energy / samples), self.peak)
+        else:
+            result = (0.0 if self.measured else None, 0.0, 0.0)
+        self.measured = False
+        self.samples = 0
+        self.energy = 0.0
+        self.peak = 0.0
+        return result
+
+
 def stream_lag(source, started, audio_end):
     """Seconds between words being spoken and this moment, or None.
 
-    Measured from the capture clock where the source keeps one. A remote
-    source keeps none, since its audio was captured on another machine
-    whose clock this one cannot read, and falls back to the time its run
-    began, which is right until the stream has a gap in it.
+    Measured from the capture clock where the source keeps one, which a
+    remote source does too, counted as its audio reaches this server. A
+    source with no clock at all falls back to the time its run began,
+    which is right until the stream has a gap in it.
     """
     clock = getattr(source, "clock", None)
     if clock is not None:
@@ -1147,6 +1315,8 @@ STALL_KEEPALIVE = 3.0
 # until one was building a Deepgram URL from names it had never imported.
 #
 # A sink provides:
+#     recognized(words)       the recognizer finalized a stretch of audio,
+#                             and words says whether it heard any in it
 #     fragment(text, start, audio_end, speech_final, confidence)
 #                             a raw recognition result arrived
 #     unit(unit) -> outputs   a sentence closed; returns the output names
@@ -1240,6 +1410,10 @@ async def listen(socket, segmenter, translator, sink, queue):
             if not alternatives:
                 continue
             text = alternatives[0].get("transcript", "").strip()
+            # Counted before an empty one is skipped, because a recognizer
+            # answering with nothing is what tells a room it cannot hear
+            # from a recognizer that is not answering at all.
+            sink.recognized(bool(text))
             if not text:
                 continue
 
@@ -1310,6 +1484,9 @@ class TerminalSink:
         self.tokens = {}
         self.failures = 0
         self.timeouts = 0
+
+    def recognized(self, words):
+        pass
 
     def fragment(self, text, start, audio_end, speech_final, confidence):
         print(f"{self.dim}  . {text}{self.reset}")

@@ -110,13 +110,15 @@ A setting holding that address outright would be a second copy of the hostname a
 `record.py` is both halves of persistence: the `Recorder` a `Session` writes through, and the command that reads a session back as a Markdown document.
 Recording is off unless `[session] record` is set, and nothing is ever deleted without `--purge`.
 A recorded session keeps every fragment the recognizer finalized, with its timing and when it arrived, and the tokens each translation call reported.
+It also keeps a row in `audio` every `AUDIO_WINDOW` seconds: how much audio was captured and how loud, how much reached the recognizer, and how many results came back and how many of those were empty.
+A field test lost half minutes at a time with nothing recorded to say whether the room was silent, the feed quiet, the audio missing, or heard and not understood, and the report's "Stretches with no words" walks those three points in the order the audio travels to say which.
 The fragments are there so a change to the segmenter can be replayed against a real meeting rather than judged from the lines the old one happened to produce, and the tokens so that a change making lines shorter can be weighed against what the extra calls cost.
 `Translator.translate` returns its answer as a `Translations`, which is a dict with a `usage` attribute, so every caller that reads a language by name is unchanged and the counts ride with the call that paid for them.
 
 ### One pipeline, two sinks
 
 Both entry points run the same three tasks over one websocket and differ only in where finished text goes, so that difference sits behind a sink.
-A sink provides `fragment(text, start, audio_end, speech_final, confidence)`, `unit(unit)` returning the output names worth requesting, `translated`, `timed_out`, and `failed`.
+A sink provides `recognized(words)` for every finalized result, empty or not, `fragment(text, start, audio_end, speech_final, confidence)`, `unit(unit)` returning the output names worth requesting, `translated`, `timed_out`, and `failed`.
 `TerminalSink` prints; `Session` is its own sink, publishing to the `Hub` and keeping the counters the operator page shows.
 An empty list from `unit` means do not call the model for that sentence at all.
 
@@ -271,7 +273,9 @@ A local device is wrapped in `Stamped` before it is wrapped in the encoder, and 
 The clock counts audio as it comes off the device, which is also what the recognizer's timestamps count, so a line's lag is how long ago its words were captured.
 Measuring from the run start instead made every prompt line negative, because the microphone opens and queues audio before the socket does, and made every line after a muted microphone late by the length of the silence, because the stream stops while the clock does not.
 It goes inside the encoder because a byte of PCM is a duration and a byte of Opus is not.
-A remote source has no clock, since its audio was captured on a machine whose clock this one cannot read, and falls back to the run start.
+A remote source is wrapped in `Received`, whose clock counts audio as it reaches the server, by length for PCM and by Ogg granule positions for Opus, since the laptop's own clock cannot be read from here.
+That leaves out the hop from the laptop, and it is still what makes hosted lag a measurement: the run start it replaced was wrong after the first gap in the stream.
+The level meter rides on the same wrappers, filled from samples by `Stamped` and from the sender's `level` messages by `ControlRoom`, because past the encoder there are no samples to measure.
 
 `Hub.publish` revises an existing entry in place when the sequence number already exists.
 Revising in place is how a glossary-corrected English line replaces the raw one on phones already showing that line, and clients key on `seq`, so duplicates are replacements rather than new lines.

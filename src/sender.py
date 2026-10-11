@@ -73,6 +73,9 @@ START_GRACE = 5.0
 # never goes out is a sender that never says anything at all.
 HEADER_WAIT = 3.0
 HEADER_POLL = 0.05
+# Seconds between the level reports sent up with the audio. The server
+# records a row every few seconds, so this only has to be finer than that.
+LEVEL_INTERVAL = 1.0
 
 
 def blank_status():
@@ -130,6 +133,9 @@ class Remote:
         # A device that would not reopen, so a meeting running without this
         # laptop is not retried once a second for the rest of the hour.
         self.declined = ""
+        # Whether the server said it records levels. One that does not
+        # answers every report with an error the page would show.
+        self.levels = False
 
     # -- what the operator page calls --------------------------------------
 
@@ -269,6 +275,27 @@ class Remote:
                 # writing until there is a socket again.
                 pass
 
+    async def report_levels(self):
+        """How loud this laptop's audio was, sent up once a second.
+
+        Measured here because the samples are here: past the encoder the
+        server has only Opus, and decoding it to learn the level would cost
+        the server a codec pass per room. A reading taken while there is no
+        socket is dropped, the way the audio taken then is.
+        """
+        while True:
+            await asyncio.sleep(LEVEL_INTERVAL)
+            meter = getattr(self.source, "meter", None)
+            if meter is None:
+                continue
+            seconds, rms, peak = meter.take()
+            if not self.levels:
+                continue
+            # Zero rather than nothing when the microphone delivered
+            # nothing, which is the reading a muted one gives.
+            self.tell({"type": "level", "seconds": round(seconds or 0, 3),
+                       "rms": round(rms, 6), "peak": round(peak, 6)})
+
     async def lost(self, message):
         """The microphone stopped, which is not something to hide.
 
@@ -320,6 +347,7 @@ class Remote:
         """What the server tells a sender when the socket opens."""
         self.config["reader_url"] = ready.get("reader_url", "")
         self.languages = list(ready.get("languages") or [])
+        self.levels = bool(ready.get("levels"))
 
     def attach(self, socket):
         self.socket = socket
@@ -547,6 +575,7 @@ async def run(remote, url, token, settings):
         recorded = write_pid_file(
             "sender", {"operator_port": settings["operator_port"]})
         tasks = [asyncio.create_task(remote.pump()),
+                 asyncio.create_task(remote.report_levels()),
                  asyncio.create_task(supervise(remote, url))]
         stop = asyncio.Event()
         install_stop_handler(stop)

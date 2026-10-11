@@ -47,6 +47,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import math
 import sys
 import time
 from collections import deque
@@ -61,8 +62,8 @@ import capture
 import record
 from controls import (OPERATOR_HOST, authorized, build_operator_app,
                       mint_token, page)
-from pipeline import (SYSTEM_PROMPT, Segmenter, Stamped, Translator,
-                      add_settings_arguments,
+from pipeline import (SYSTEM_PROMPT, Received, Segmenter, Stamped,
+                      Translator, add_settings_arguments, decibels,
                       build_asr_url, describe_file, install_stop_handler,
                       listen, load_config, load_file_lines, load_glossary,
                       load_keys, open_encoder, publish, pump_audio,
@@ -82,6 +83,9 @@ RECONNECT_BACKOFF = [1, 2, 5, 10, 20]
 # Seconds a run must last to count as healthy and reset the backoff. Without
 # it, a few blips early in a meeting make a later one cost twenty seconds.
 HEALTHY_RUN = 60
+# The most seconds one level message from a sender may claim. It reports
+# every second, so anything far beyond that is not a reading of this room.
+LEVEL_LIMIT = 10.0
 # Seconds a control socket may stay silent before it is pinged, how long a
 # sender has to say hello once connected, and how often the status the
 # sender's page renders is pushed down to it. The hello is bounded because
@@ -255,6 +259,9 @@ class Session:
         # The source of the current run, whose capture clock lag is read
         # from. None between runs.
         self.run_source = None
+        # What the recognizer finalized in the current audio window, and
+        # how much of it held no words at all.
+        self.heard = {"results": 0, "empty": 0}
         self.stats = {"units": 0, "translated": 0, "failures": 0,
                       "timeouts": 0, "reconnects": 0, "corrections": 0,
                       "skipped": 0, "capped": 0, "latencies": []}
@@ -506,8 +513,10 @@ class Session:
 
         A locked screen can mute a laptop's microphone without the capture
         failing, and in the room that looks exactly like nobody speaking.
-        Zero where there is no clock to ask, which is between runs and on a
-        hosted server, whose sender reports its own microphone instead.
+        Zero where there is no clock to ask, which is between runs. A hosted
+        server counts what reaches it, though its sender's page shows the
+        laptop's own clock instead, since that is where a muted microphone
+        is.
         """
         clock = getattr(self.run_source, "clock", None)
         if self.state != "running" or clock is None:
@@ -587,6 +596,10 @@ class Session:
                 self.error = None
                 self.run += 1
                 self.run_started = time.monotonic()
+                self.heard = {"results": 0, "empty": 0}
+                # Beside the three legs rather than among them: it never
+                # finishes, and nothing it does should be able to end a run.
+                watching = asyncio.create_task(self._watch_audio(source))
                 tasks = [
                     asyncio.create_task(pump_audio(source, socket)),
                     asyncio.create_task(
@@ -601,9 +614,10 @@ class Session:
                     done, pending = await asyncio.wait(
                         tasks, return_when=asyncio.FIRST_COMPLETED)
                 finally:
-                    for task in tasks:
+                    for task in tasks + [watching]:
                         task.cancel()
-                    await asyncio.gather(*tasks, return_exceptions=True)
+                    await asyncio.gather(*tasks, watching,
+                                         return_exceptions=True)
                 for task in done:
                     # Surface a real failure to the supervisor rather than
                     # treating every exit as a clean end of stream.
@@ -613,7 +627,47 @@ class Session:
             await source.close()
             self.run_source = None
 
+    async def _watch_audio(self, source):
+        """A recorded row every few seconds of what the audio did.
+
+        A field test lost half minutes at a time with nothing recorded to
+        say why. Each row answers it at three points along the way: how
+        much audio was captured and how loud, how much of it reached the
+        recognizer, and whether the recognizer answered with words, with
+        nothing, or not at all. The last window is written as the run ends.
+        """
+        clock = getattr(source, "clock", None)
+        meter = getattr(source, "meter", None)
+        position = 0.0
+        try:
+            while True:
+                await asyncio.sleep(record.AUDIO_WINDOW)
+                position = self._audio_row(clock, meter, position)
+        finally:
+            self._audio_row(clock, meter, position)
+
+    def _audio_row(self, clock, meter, position):
+        """Write one window and start the next. Returns the clock's place."""
+        heard, self.heard = self.heard, {"results": 0, "empty": 0}
+        captured, rms, peak = meter.take() if meter else (None, 0.0, 0.0)
+        now = clock.position if clock else None
+        self._record(
+            "audio", run=self.run, at=time.time(),
+            # None where nobody measured, which is different from zero:
+            # a sender too old to report levels has not reported silence.
+            captured=captured,
+            received=None if now is None else round(now - position, 2),
+            rms_db=decibels(rms) if captured else None,
+            peak_db=decibels(peak) if captured else None,
+            results=heard["results"], empty=heard["empty"])
+        return position if now is None else now
+
     # -- sink: what the shared pipeline does with finished text ------------
+
+    def recognized(self, words):
+        self.heard["results"] += 1
+        if not words:
+            self.heard["empty"] += 1
 
     def fragment(self, text, start, audio_end, speech_final, confidence):
         """Raw fragments are half sentences. Only whole ones reach a phone.
@@ -770,6 +824,9 @@ class ControlRoom:
         # which any run can read from wherever it joins.
         self.headers = b""
         self.watch = None
+        # The run's source with its clock and meter, which is what the
+        # levels a sender reports are folded into.
+        self.received = None
 
     async def open_source(self):
         """A fresh source for one recognizer run.
@@ -788,7 +845,27 @@ class ControlRoom:
                                             self.encoding)
         if self.headers:
             self.source.feed(self.headers)
-        return self.source
+        self.received = Received(self.source)
+        return self.received
+
+    def level(self, message):
+        """A stretch of the sender's audio as it measured it, or nothing.
+
+        Measured on the laptop because the samples are there, before they
+        were compressed. Anything malformed is dropped rather than refused,
+        since a meter reading is not worth an error on the operator page.
+        """
+        try:
+            values = [float(message[key])
+                      for key in ("seconds", "rms", "peak")]
+        except (KeyError, TypeError, ValueError):
+            return
+        if self.received is None or not all(
+                math.isfinite(value) and 0 <= value for value in values):
+            return
+        seconds, rms, peak = values
+        self.received.meter.merge(min(seconds, LEVEL_LIMIT),
+                                  min(rms, 1.0), min(peak, 1.0))
 
     def feed(self, chunk):
         """Audio from the socket, dropped while no run is reading."""
@@ -1075,6 +1152,9 @@ async def handle_message(room, socket, data):
         await send_error(socket, "Not a JSON object.")
         return
     kind = message.get("type")
+    if kind == "level":
+        room.level(message)
+        return
     if kind == "stop":
         ok, text = await room.session.stop()
     elif kind == "language":
@@ -1128,6 +1208,9 @@ async def control(request):
         "reader_url": room.config.get("reader_url", ""),
         "languages": room.config["languages"],
         "state": room.session.state,
+        # Says this server records what a sender measures, so a sender
+        # newer than its server does not fill the page with refusals.
+        "levels": True,
     })
     if hello.get("intent") == "start":
         started, message = await room.session.start(hello.get("device"))

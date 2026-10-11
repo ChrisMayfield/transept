@@ -70,11 +70,23 @@ CREATE TABLE IF NOT EXISTS fragments (
   at REAL, start REAL, audio_end REAL,
   speech_final INTEGER, confidence REAL, text TEXT);
 
+-- One row per few seconds of a run, saying what the audio did on its way
+-- to the recognizer: seconds captured and how loud (rms and peak in dBFS,
+-- as the microphone's own machine measured them), seconds that reached the
+-- recognizer, and how many results it finalized, how many of them empty.
+-- NULL means nothing measured it, which is not the same as zero.
+CREATE TABLE IF NOT EXISTS audio (
+  id INTEGER PRIMARY KEY,
+  session_id INTEGER NOT NULL, run INTEGER, at REAL,
+  captured REAL, received REAL, rms_db REAL, peak_db REAL,
+  results INTEGER, empty INTEGER);
+
 CREATE INDEX IF NOT EXISTS lines_by_session ON lines (session_id, seq);
 CREATE INDEX IF NOT EXISTS fragments_by_session
   ON fragments (session_id, id);
 CREATE INDEX IF NOT EXISTS translations_by_session
   ON translations (session_id, seq);
+CREATE INDEX IF NOT EXISTS audio_by_session ON audio (session_id, id);
 """
 
 # Queue depth. A meeting produces ten to twenty lines a minute and about as
@@ -200,6 +212,9 @@ class Recorder:
     def usage(self, **row):
         self._put(("usage", row))
 
+    def audio(self, **row):
+        self._put(("audio", row))
+
     def _put(self, item):
         if self.task is None:
             return
@@ -267,6 +282,14 @@ class Recorder:
                 (self.session_id, row["run"], row["at"], row["start"],
                  row["audio_end"], int(bool(row["speech_final"])),
                  row["confidence"], row["text"]))
+        elif kind == "audio":
+            self.handle.execute(
+                "INSERT INTO audio (session_id, run, at, captured, received,"
+                " rms_db, peak_db, results, empty)"
+                " VALUES (?,?,?,?,?,?,?,?,?)",
+                (self.session_id, row["run"], row["at"], row["captured"],
+                 row["received"], row["rms_db"], row["peak_db"],
+                 row["results"], row["empty"]))
         elif kind == "usage":
             self.handle.execute(
                 "UPDATE lines SET "
@@ -431,6 +454,7 @@ def write_report(handle, session, out):
         _corrections(page, lines)
         _closings(page, lines)
         _latency(page, lines)
+        _silences(page, handle, session, lines)
         _tokens(page, lines)
         _fallbacks(page, grouped)
         _transcript(page, lines, grouped)
@@ -547,6 +571,141 @@ def _latency(page, lines):
         page.write("\n")
 
 
+# Seconds of audio each row of the audio table describes, here because both
+# the server writing them and the report reading them need it. Short enough
+# that a thirty second dropout is six rows rather than a blur, long enough
+# that an hour is seven hundred rows rather than one per fragment.
+AUDIO_WINDOW = 5.0
+# Seconds without a word before a stretch is worth a line in the report.
+# A pause between speakers is a few seconds; what the second field test
+# lost was half a minute at a time.
+SILENCE_REPORTED = 20
+# Below this RMS level a stretch is a room nobody is speaking into. Speech
+# on a sound board feed sits around -35 to -15 dBFS, and an idle line is
+# well under -60.
+QUIET_DB = -50
+# What share of a stretch has to have been measured, or to have reached the
+# recognizer, before the next explanation down the list is the right one.
+DELIVERED = 0.5
+
+
+def has_table(handle, name):
+    """Whether a table exists, which in a recording read back it may not.
+
+    Reading a session back must not write to the file it is reading, so an
+    older recording is never migrated and has only the tables it was made
+    with.
+    """
+    return handle.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table'"
+        " AND name = ?", (name,)).fetchone() is not None
+
+
+def audio_rows(handle, session_id):
+    """The audio windows of one session, or none for an older recording."""
+    if not has_table(handle, "audio"):
+        return []
+    return handle.execute(
+        "SELECT * FROM audio WHERE session_id = ? ORDER BY id",
+        (session_id,)).fetchall()
+
+
+def silent_stretches(rows):
+    """Runs of consecutive windows in which nothing with words came back.
+
+    Each is (start, end, windows). A row is stamped when its window closes,
+    so a stretch starts where the row before it ended, and a stretch that
+    opens a run starts one window before its first row.
+    """
+    stretches, current, start, previous = [], [], None, None
+    for row in rows:
+        silent = (row["results"] or 0) == (row["empty"] or 0)
+        same_run = previous is not None and previous["run"] == row["run"]
+        if current and not (silent and same_run):
+            stretches.append((start, current))
+            current = []
+        if silent:
+            if not current:
+                start = previous["at"] if same_run else None
+            current.append(row)
+        previous = row
+    if current:
+        stretches.append((start, current))
+    result = []
+    for start, windows in stretches:
+        if start is None:
+            start = windows[0]["at"] - AUDIO_WINDOW
+        result.append((start, windows[-1]["at"], windows))
+    return result
+
+
+def explain_silence(seconds, windows):
+    """Which link in the chain a stretch with no words points at.
+
+    Walked in the order the audio travels, so the first link that lost it
+    is the one named.
+    """
+    measured = [row for row in windows if row["captured"] is not None]
+    if measured and sum(row["captured"] for row in measured) \
+            < DELIVERED * seconds:
+        return "the microphone delivered little audio"
+    received = [row["received"] for row in windows
+                if row["received"] is not None]
+    if received and sum(received) < DELIVERED * seconds:
+        return ("little audio reached the recognizer: the microphone, or "
+                "on a hosted server the sender or the network")
+    if not measured:
+        return "no levels were reported, so nothing more can be said"
+    levels = sorted(row["rms_db"] for row in measured
+                    if row["rms_db"] is not None)
+    if levels and levels[len(levels) // 2] < QUIET_DB:
+        return "the feed was quiet, so nobody was speaking into it"
+    if sum(row["results"] or 0 for row in windows) == 0:
+        return "audio at speaking level, and the recognizer sent nothing back"
+    return "audio at speaking level, and the recognizer heard no words in it"
+
+
+def _silences(page, handle, session, lines):
+    """Stretches with no words, and where along the way they were lost.
+
+    The second field test lost half minutes, often as the speaker changed,
+    with nothing recorded to say whether the audio was silent, quiet,
+    missing, or heard and not understood. Each window of the audio table
+    answers that, and the lines either side say who was speaking.
+    """
+    rows = audio_rows(handle, session["id"])
+    if not rows:
+        return
+    page.write("## Stretches with no words\n\n")
+    stretches = [stretch for stretch in silent_stretches(rows)
+                 if stretch[1] - stretch[0] >= SILENCE_REPORTED]
+    if not stretches:
+        page.write(f"None as long as {SILENCE_REPORTED} seconds.\n\n")
+        return
+    page.write(f"Every stretch of {SILENCE_REPORTED} seconds or more in "
+               f"which the recognizer returned no words, with the median "
+               f"level of the feed and the loudest moment in it.\n\n")
+    began = session["started_at"]
+    for start, end, windows in stretches:
+        seconds = end - start
+        levels = sorted(row["rms_db"] for row in windows
+                        if row["rms_db"] is not None)
+        peaks = [row["peak_db"] for row in windows
+                 if row["peak_db"] is not None]
+        level = (f"level {levels[len(levels) // 2]:.0f} dBFS, "
+                 f"peak {max(peaks):.0f} dBFS" if levels else "no levels")
+        page.write(f"- **{(start - began) / 60:.1f} min**, "
+                   f"{seconds:.0f}s, {level}: "
+                   f"{explain_silence(seconds, windows)}.\n")
+        before = [line for line in lines if (line["at"] or 0) <= start]
+        after = [line for line in lines if (line["at"] or 0) >= end]
+        if before:
+            page.write(f"  - before: {before[-1]['heard']}\n")
+        if after:
+            page.write(f"  - after: {after[0]['heard']}\n")
+    page.write("\n")
+
+
 def _tokens(page, lines):
     """What the translation calls cost, for weighing a segmentation change.
 
@@ -631,6 +790,9 @@ def purge(handle, older_than_days):
                        (session_id,))
         handle.execute("DELETE FROM fragments WHERE session_id = ?",
                        (session_id,))
+        if has_table(handle, "audio"):
+            handle.execute("DELETE FROM audio WHERE session_id = ?",
+                           (session_id,))
         handle.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
     handle.commit()
     return len(doomed)
