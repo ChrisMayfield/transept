@@ -62,7 +62,7 @@
 
   .note { font-size: .85rem; color: var(--quiet); margin: .5rem 0 0; }
   /* Not a quiet note. Somebody in the room has to be told about this. */
-  #recording, #noAudio { color: #8a5300; font-weight: 600; }
+  #recording, #noAudio, #files.missing { color: #8a5300; font-weight: 600; }
   .alert {
     margin: 1rem 0; padding: .8rem 1rem; border-left: 3px solid var(--halt);
     background: #fff; color: var(--halt); font-size: .9rem;
@@ -146,6 +146,7 @@
 <p class="note" id="recording" hidden></p>
 <p class="note" id="quiet"></p>
 <p class="note" id="noAudio"></p>
+<p class="note" id="files"></p>
 
 <div style="margin-top:1.25rem">
   <label for="device">Microphone feed</label>
@@ -314,6 +315,19 @@ function render(status) {
         + ". Check that it is not muted and that this computer has not "
         + "locked or gone to sleep."
       : "";
+
+  // What the server loaded rather than what config.toml names, since a
+  // path that finds no file loads nothing and says so nowhere else the
+  // operator can see. Zero is allowed, so it is a warning and not an alert.
+  // Null from a sender that has not reached its server yet, which knows
+  // nothing either way and says nothing.
+  const glossary = status.glossary || 0;
+  const keyterms = status.keyterms || 0;
+  const files = el("files");
+  files.className = "note" + (glossary && keyterms ? "" : " missing");
+  files.textContent = status.glossary == null ? "" : "Glossary: "
+    + (glossary ? glossary + " entries" : "none loaded")
+    + ". Key terms: " + (keyterms ? keyterms : "none loaded") + ".";
 
   el("units").textContent = status.units;
   el("failures").textContent = status.failures;

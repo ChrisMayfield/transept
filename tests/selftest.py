@@ -621,6 +621,9 @@ async def check_pipeline(checks):
     hub.subscribe("English")
     hub.subscribe("English")
     status = session.status()
+    checks.check("the operator page is told what the server loaded",
+                 (status["glossary"], status["keyterms"]) == (0, 1),
+                 (status["glossary"], status["keyterms"]))
     checks.check("the readers on English are counted for the operator",
                  status["english_listeners"] == 2
                  and all(row["name"] != "English"
@@ -1703,6 +1706,37 @@ def check_config_merge(checks):
                      "keys": {"llm_api_key": "shared-key"},
                      "languages": {"available": ["French", "Swahili"]}},
                  pipeline.load_config(shared))
+
+    # The hosted layout: the shared file and the glossary it names one
+    # level up, the room's file in a directory of its own, and the process
+    # started somewhere else again. Read against the working directory, the
+    # path found nothing, and a whole field test ran without the glossary.
+    (home / "glossary.txt").write_text("Rivanna Ward\n")
+    tuned = home / "tuned.toml"
+    tuned.write_text('[files]\nglossary = "glossary.txt"\n'
+                     'keyterms = "/etc/absolute.txt"\n'
+                     '[session]\ndatabase = "sessions.db"\n')
+    (home / "chapel").mkdir()
+    chapel = home / "chapel" / "config.toml"
+    chapel.write_text('[server]\nroom = "chapel"\n')
+    files = pipeline.resolve(SimpleNamespace(),
+                             pipeline.load_config(tuned, chapel))
+    checks.check("a [files] path is read beside the file that names it",
+                 pipeline.load_file_lines(files["glossary"])
+                 == ["Rivanna Ward"], files["glossary"])
+    checks.check("an absolute [files] path is left alone",
+                 files["keyterms"] == "/etc/absolute.txt", files["keyterms"])
+    checks.check("and sessions.db stays the room's, not the shared file's",
+                 files["database"] == "sessions.db", files["database"])
+    chapel.write_text('[files]\nglossary = "own.txt"\n')
+    own = pipeline.resolve(SimpleNamespace(),
+                           pipeline.load_config(tuned, chapel))["glossary"]
+    checks.check("a room naming its own glossary gets the one beside it",
+                 Path(own) == home / "chapel" / "own.txt", own)
+    checks.check("a missing glossary says where it was looked for",
+                 pipeline.describe_file("Glossary", own, [])
+                 == f"Glossary: not found at {os.path.abspath(own)}",
+                 pipeline.describe_file("Glossary", own, []))
     shutil.rmtree(home, ignore_errors=True)
 
 

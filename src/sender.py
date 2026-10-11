@@ -90,6 +90,9 @@ def blank_status():
         "quiet_for": 0, "skipped": 0, "capped": 0, "recording": False,
         "dropped": 0, "languages": [], "english_listeners": 0,
         "median": None, "recent": [], "no_audio_for": 0,
+        # None rather than 0: nothing is known until a server says, and a
+        # zero would warn of a missing glossary the server may well have.
+        "glossary": None, "keyterms": None,
     }
 
 

@@ -155,6 +155,17 @@ def load_config(*paths):
             continue
         except tomllib.TOMLDecodeError as exc:
             sys.exit(f"{path} is not valid TOML: {exc}")
+        # A path under [files] means beside the file that names it. Read
+        # against the working directory instead, the glossary a hosted
+        # server's shared file names is looked for in each room's own
+        # directory, is not there, and loads as nothing without a word.
+        # Only [files]: sessions.db belongs to the room that writes it.
+        base = os.path.dirname(path)
+        files = loaded.get("files")
+        if base and isinstance(files, dict):
+            for key, value in files.items():
+                if isinstance(value, str) and value:
+                    files[key] = os.path.join(base, value)
         for section, values in loaded.items():
             if isinstance(values, dict) and isinstance(
                     merged.get(section), dict):
@@ -617,6 +628,24 @@ def load_file_lines(path):
                     if line.strip() and not line.startswith("#")]
     except OSError:
         return []
+
+
+def describe_file(name, path, lines):
+    """One startup line saying what a [files] entry actually loaded.
+
+    load_file_lines is quiet about a missing file on purpose, so this line
+    is the only place a run says it has no glossary, and a meeting run
+    without one looks like a meeting run with one until a name comes out
+    wrong.
+    """
+    if not path:
+        return f"{name}: none configured"
+    where = os.path.abspath(path)
+    if lines:
+        return f"{name}: {len(lines)} lines from {where}"
+    if os.path.exists(where):
+        return f"{name}: nothing usable in {where}"
+    return f"{name}: not found at {where}"
 
 
 def load_glossary(path):
@@ -1351,8 +1380,11 @@ async def run(args, settings, keys):
             load_glossary(settings["glossary"]), settings["max_tokens"],
             settings["timeout"], settings["reasoning_effort"],
             settings["correct_english"])
+        print(describe_file("Glossary", settings["glossary"],
+                            load_file_lines(settings["glossary"])))
 
     keyterms = load_file_lines(settings["keyterms"])
+    print(describe_file("Keyterms", settings["keyterms"], keyterms))
     segmenter = Segmenter(settings["ceiling"], settings["gap"],
                           min_words=settings["min_words"])
     queue = asyncio.Queue()

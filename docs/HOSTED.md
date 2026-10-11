@@ -113,6 +113,7 @@ The room name must differ because it is what tells the rooms apart.
 Everything else can be inherited and usually should be.
 `deepgram_api_key` and `llm_api_key` may be overridden per room when spend is worth separating, which is an option rather than a requirement.
 `languages`, `glossary`, and `keyterms` are the same for one congregation meeting in two rooms, so they belong in the shared file until a room genuinely differs.
+A path under `[files]` is read beside the file that names it, so `glossary = "glossary.txt"` in the shared file means the glossary beside the shared file, not one in each room's directory.
 
 The shared file holds the rest: `backend`, `host`, `public_url`, `model`, `llm_base_url`, `ceiling`, `gap`, `hold`, `timeout`, and the tuning generally.
 `CLAUDE.md` calls changing the translation provider the change most likely to be made in a hurry, and that change should not be one edit per room.

@@ -63,8 +63,8 @@ from controls import (OPERATOR_HOST, authorized, build_operator_app,
                       mint_token, page)
 from pipeline import (SYSTEM_PROMPT, Segmenter, Stamped, Translator,
                       add_settings_arguments,
-                      build_asr_url, install_stop_handler, listen,
-                      load_config, load_file_lines, load_glossary,
+                      build_asr_url, describe_file, install_stop_handler,
+                      listen, load_config, load_file_lines, load_glossary,
                       load_keys, open_encoder, publish, pump_audio,
                       remove_pid_file, resolve, stream_lag,
                       write_pid_file)
@@ -495,6 +495,10 @@ class Session:
                        if latencies else None),
             "recent": list(self.hub.buffers["English"])[-6:],
             "no_audio_for": self.no_audio_for(),
+            # What this server actually loaded, which is not always what
+            # config.toml names: a path that finds no file loads nothing.
+            "glossary": self.config.get("glossary_lines", 0),
+            "keyterms": len(self.config.get("keyterms", [])),
         }
 
     def no_audio_for(self):
@@ -1294,6 +1298,12 @@ def main():
     config = dict(settings)
     config["keyterms"] = load_file_lines(settings["keyterms"])
     config["glossary"] = load_glossary(settings["glossary"])
+    # Counted for the operator page as well as printed here, because on a
+    # hosted server nobody in the room reads the journal.
+    glossary = load_file_lines(settings["glossary"])
+    config["glossary_lines"] = len(glossary)
+    print(describe_file("Glossary", settings["glossary"], glossary))
+    print(describe_file("Keyterms", settings["keyterms"], config["keyterms"]))
     config["deepgram_key"] = keys["deepgram_key"]
     config["llm_key"] = keys["llm_key"]
     config["llm_base"] = keys["llm_base"]

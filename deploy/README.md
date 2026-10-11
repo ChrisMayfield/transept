@@ -106,6 +106,7 @@ _Setgid_, so `sessions.db` is created in the `transept` group rather than inheri
 _Sticky_, because write permission on a directory is otherwise permission to delete anything in it whatever the file's own mode says.
 (A server that cannot edit `config.toml` but can replace it is a server that can still change its own `llm_base_url`.)
 Anything else the room reads rather than writes, a `glossary.txt` or a `keyterms.txt`, belongs to root the same way.
+Those two usually sit beside the shared `config.toml` in `/srv/transept/local/`, since a path under `[files]` is read beside the file that names it, and the server prints how many lines of each it loaded when it starts, which the operator page shows too.
 
 Four values have to be filled in: `reader_token`, `control_token`, `room`, and the two ports, which have to differ from every other room's.
 You can generate the tokens rather than inventing them:
