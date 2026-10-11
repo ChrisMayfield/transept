@@ -10,9 +10,9 @@ This is the same pipeline server.py runs, without the web layer. Use it to
 check a microphone feed, tune segmentation, or measure translation latency,
 because a terminal is a better place to see what is happening than a browser.
 
-Usage:
-    python3 pipeline.py --model gemini-3.8-flash
-    python3 pipeline.py --device <source> --model gemini-3.8-flash \\
+Usage, from inside local/ where config.toml is:
+    python3 ../src/pipeline.py --model gemini-3.8-flash
+    python3 ../src/pipeline.py --device <source> --model gemini-3.8-flash \\
         --languages "French,Congolese Swahili" \\
         --keyterms keyterms.txt --glossary glossary.txt --correct-english
 
@@ -1032,6 +1032,52 @@ def install_stop_handler(stop):
             loop.add_signal_handler(sig, stop.set)
         except (NotImplementedError, AttributeError, ValueError):
             signal.signal(sig, lambda *_: stop.set())
+
+
+# Where a running server or sender records itself so the transept script
+# can stop it later. In the working directory rather than beside the code,
+# because that is where config.toml, the glossary, and sessions.db already
+# live, and "a process running out of this directory" is what is identified.
+PID_FILE = "transept.pid"
+
+
+def write_pid_file(role, ports):
+    """Record this process, once it is really listening.
+
+    Written after the ports are bound, so a second process that fails on
+    "address already in use" cannot overwrite the record of the one that
+    holds them. The ports are in the file as well as the pid, which is how
+    stopping works without reading config.toml, and how a recycled pid is
+    told from a process that is still serving. The role is "server" or
+    "sender", which is what the status command names.
+
+    A directory that will not take the file costs the operator a convenient
+    stop, not the meeting, so the failure is reported and swallowed.
+    """
+    record = {"pid": os.getpid(), "role": role, **ports,
+              "started_at": time.time()}
+    try:
+        with open(PID_FILE, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(record) + "\n")
+    except OSError as failure:
+        print(f"Could not write {PID_FILE}, so ./transept stop will not "
+              f"find this {role}: {failure}")
+        return False
+    return True
+
+
+def remove_pid_file():
+    """Take the record away again, but only if it is still ours.
+
+    A process that started after this one owns the file by then, and
+    deleting that record would leave the running one unstoppable.
+    """
+    try:
+        with open(PID_FILE, encoding="utf-8") as handle:
+            if json.loads(handle.read())["pid"] == os.getpid():
+                os.remove(PID_FILE)
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
 
 
 def add_settings_arguments(parser, names):

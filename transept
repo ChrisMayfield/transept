@@ -1,5 +1,5 @@
 #!/bin/sh
-# Find a Python, then hand the whole job to transept.py.
+# Find a Python, then hand the whole job to src/transept.py.
 #
 #     ./transept start | stop | restart | status
 #
@@ -12,14 +12,14 @@ cd "$(dirname "$0")" || exit 1
 
 for candidate in .venv/bin/python3 .venv/Scripts/python.exe; do
     if [ -x "$candidate" ]; then
-        exec "$candidate" transept.py "$@"
+        exec "$candidate" src/transept.py "$@"
     fi
 done
 for candidate in python3 python; do
     if command -v "$candidate" >/dev/null 2>&1; then
-        exec "$candidate" transept.py "$@"
+        exec "$candidate" src/transept.py "$@"
     fi
 done
 
-echo "No Python found. See step 1 of SETUP.md."
+echo "No Python found. See step 1 of docs/SETUP.md."
 exit 1

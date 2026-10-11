@@ -1,6 +1,7 @@
 # One room of Transept, as a systemd template. Copy to
 # /etc/systemd/system/transept@.service, then `systemctl enable --now
-# transept@chapel` runs the room whose files are in /srv/transept/chapel.
+# transept@chapel` runs the room whose files are in
+# /srv/transept/local/chapel.
 #
 # A room is a process: its own working directory, its own config.toml, its
 # own sessions.db, its own ports. Nothing in this file names a room, which
@@ -27,7 +28,7 @@ Group=transept
 # What makes the room. server.py reads config.toml from the directory it
 # starts in, and writes sessions.db and transept.pid there, so the working
 # directory is the whole of a room's separation from its neighbors.
-WorkingDirectory=/srv/transept/%i
+WorkingDirectory=/srv/transept/local/%i
 
 # Two config files, merged left to right: the tuning every room on this
 # server shares, and then the file naming only what this room is. A room
@@ -39,7 +40,7 @@ WorkingDirectory=/srv/transept/%i
 # journal is a pipe, so without it the startup lines and everything after
 # them wait for the process to exit, which is when they stop being worth
 # having.
-ExecStart=/srv/transept/.venv/bin/python -u /srv/transept/server.py \
+ExecStart=/srv/transept/.venv/bin/python -u /srv/transept/src/server.py \
           --config ../config.toml --config config.toml
 
 # The checkout is read-only to this process, so Python cannot write its
@@ -67,7 +68,7 @@ ProtectHome=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
-ReadWritePaths=/srv/transept/%i
+ReadWritePaths=/srv/transept/local/%i
 # AF_UNIX because asyncio's signal wakeup is a socketpair, and AF_NETLINK
 # because glibc's getaddrinfo asks the kernel for local interfaces before
 # it resolves Deepgram or the translation provider. Leaving either out

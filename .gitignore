@@ -1,26 +1,23 @@
-# Settings and API keys. A fork can commit its own copy so a second room
-# starts from a known-good file, but only after taking out the API keys.
-config.toml
+# Everything a room keeps for itself: settings and API keys, the glossary
+# and key terms (which may name members), the recording database, and what
+# a running server leaves behind (a log carrying this run's tokens, and the
+# record of which process to stop). On a hosted server the shared config
+# and one directory per room live here too.
+local/
 
-# May include names of members. Keep these out of a public repository.
+# The same files anywhere else in the checkout, in case one is created by
+# hand outside local/. A recorded session holds every word said in the
+# room, so it is more sensitive than the glossary.
+config.toml
 glossary.txt
 keyterms.txt
-
-# What a running server leaves behind. The log holds both addresses with
-# the tokens that run minted, and the record names the process to stop.
 transept.log
 transept.pid
-
-# Recordings, transcripts, and review documents. A recorded session holds
-# every word said in the room, so it is more sensitive than the glossary.
+sessions.db*
 *.wav
 *.flac
 transcript*.txt
 review*.md
-review/
-sessions.db
-sessions.db-wal
-sessions.db-shm
 
 # Python
 __pycache__/

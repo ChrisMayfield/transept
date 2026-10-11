@@ -109,7 +109,7 @@ A machine without one sends uncompressed audio and says so in the first few line
 Now check that the software itself works:
 
 ```sh
-python selftest.py
+python tests/selftest.py
 ```
 
 The self test needs no keys, no microphone, and no network, and should end by saying every check passed.
@@ -118,15 +118,19 @@ If a check fails, something went wrong above, and the cause is worth sorting out
 ### 5. Make your settings file
 
 ```sh
-cp config.example.toml config.toml
+mkdir local
+cp examples/config.example.toml local/config.toml
 ```
 
-Open `config.toml` in any plain text editor.
+The `local` folder is where everything that belongs to your room lives: your settings, the glossary and key terms if you make them, any recordings, and the log of the last run.
+Everything else in the Transept folder is the program itself, so `local` is the folder to back up or move to a new laptop.
+
+Open `local/config.toml` in any plain text editor.
 The file is a list of settings with an explanation above each one, and the only two you have to fill in are the API keys you are about to create.
 
 One thing about the file is worth knowing now.
 `config.toml` holds your API keys, so do not mail the file to anyone or commit the file to a public repository.
-(Transept already excludes `config.toml` from git for that reason.)
+(git already ignores the whole `local` folder for that reason.)
 
 While the file is open, find the `[languages]` section and set `available` to the languages your room actually needs:
 
@@ -192,10 +196,16 @@ Any service with an OpenAI-compatible endpoint works, including a [LiteLLM](http
 
 What the microphone hears decides whether the subtitles are any good, so do not skip this step.
 
+The commands in this step, and the others on this page that run a Python file directly, run from inside `local`, which is how they find your settings:
+
+```sh
+cd local
+```
+
 First, see what the machine can listen to:
 
 ```sh
-python server.py --list-devices
+python ../src/server.py --list-devices
 ```
 
 The result is a list of names:
@@ -211,8 +221,8 @@ Now listen through one of them.
 Leave off `--device` to use whatever the system calls the default input, or paste one of the names above:
 
 ```sh
-python pipeline.py --no-translate
-python pipeline.py --no-translate --device "alsa_input.pci-0000_00_1f.3.analog-stereo.9"
+python ../src/pipeline.py --no-translate
+python ../src/pipeline.py --no-translate --device "alsa_input.pci-0000_00_1f.3.analog-stereo.9"
 ```
 
 Talk.
@@ -223,7 +233,7 @@ Press Ctrl-C to stop.
 Once words are appearing, run the same command once more without `--no-translate`:
 
 ```sh
-python pipeline.py
+python ../src/pipeline.py
 ```
 
 Each sentence is now followed by its translations.
@@ -312,6 +322,7 @@ One script starts the server and the tunnel together, and stops both:
 ```
 
 Run those from the Transept folder, in a terminal you have not had to activate anything in, since the script finds the virtual environment on its own.
+The same three commands are the weekly routine for a room that uses a hosted server, where they start and stop the sender instead; [`deploy/README.md`](../deploy/README.md) covers that setup.
 If `./transept start` says permission denied, the zip download lost the file's executable bit, and `bash transept start` works just as well.
 
 Starting prints two addresses, each carrying a token of its own:
@@ -395,8 +406,8 @@ A language over the cap shows English rather than nothing.
 `max_readers` (100) caps how many phones can be connected at once, which is more than a room holds.
 The cap is there because the reader link can travel further than the room, and every phone reading costs a connection the laptop has to write to on every line.
 
-Most of these can also be changed for a single run without editing the file, for example `python server.py --ceiling 6`.
-Run `python server.py --help` for the exact flag names, a few of which differ from the setting names.
+Most of these can also be changed for a single run without editing the file, for example `python ../src/server.py --ceiling 6` from inside `local`.
+Run `python ../src/server.py --help` for the exact flag names, a few of which differ from the setting names.
 
 ## Troubleshooting
 
@@ -406,7 +417,8 @@ A line out from the sound board is far better than a laptop microphone on a tabl
 Take the laptop to the room, plug the laptop in the way it will be plugged in on Sunday, and run:
 
 ```sh
-python pipeline.py --no-translate
+cd local
+python ../src/pipeline.py --no-translate
 ```
 
 Have somebody talk from where people actually sit.
@@ -416,7 +428,7 @@ That check is the single most valuable thing on this page, and takes ten minutes
 `keyterms.txt` nudges the speech recognizer toward words the recognizer would otherwise mishear, such as the names of people who speak often, place names, and vocabulary particular to your congregation.
 
 ```sh
-cp keyterms.example.txt keyterms.txt
+cp examples/keyterms.example.txt local/keyterms.txt
 ```
 
 One term per line, and keep the list to a few dozen, because a very long list dilutes the effect.
@@ -426,31 +438,31 @@ One term per line, and keep the list to a few dozen, because a very long list di
 The glossary is for names, for terms that have an official published rendering in your target languages, and for set phrases a general model would translate too literally.
 
 ```sh
-cp glossary.example.txt glossary.txt
+cp examples/glossary.example.txt local/glossary.txt
 ```
 
 The entries are free text, written as instructions, and the example file shows the shape.
 By default the glossary also repairs recognition errors on the English channel, so a name the recognizer spelled wrong gets fixed for everyone.
 
 Both files are much easier to write after a real meeting than before one.
-If you turn on `record` under `[session]` in `config.toml`, Transept keeps each session and can hand you a worklist:
+If you turn on `record` under `[session]` in `config.toml`, Transept keeps each session and can hand you a worklist, from inside `local`:
 
 ```sh
-python record.py --list                                   # what has been kept
-python record.py --session last --out review-sunday.md
+python ../src/record.py --list                            # what has been kept
+python ../src/record.py --session last --out review-sunday.md
 ```
 
 That document leads with anything the correction introduced that was not in the audio, then the terms the recognizer missed, which are exactly the ones to add to `keyterms.txt`.
 Recording keeps every word said in the room on the laptop's disk, unencrypted, so turning recording on is a decision to make with whoever leads the meeting.
-Nothing is ever deleted unless you ask: `python record.py --purge --older-than 30`.
+Nothing is ever deleted unless you ask: `python ../src/record.py --purge --older-than 30`.
 
 **Review a language before you offer it.**
 You cannot judge a translation you cannot read, and neither can the readers depending on that language.
 Run a real transcript through the offline reviewer and have a native speaker mark up the result:
 
 ```sh
-python record.py --session last --plain transcript-sunday.txt   # if you record
-python review.py --input transcript-sunday.txt --review review-french.md
+python ../src/record.py --session last --plain transcript-sunday.txt   # if you record
+python ../src/review.py --input transcript-sunday.txt --review review-french.md
 ```
 
 Ask reviewers for wrong meaning first and awkward phrasing second.
@@ -479,9 +491,11 @@ A building that blocks the tunnel outright, or an uplink too congested to carry 
 
 **Something is broken and you want to know whether Transept is the cause.**
 
+From the Transept folder:
+
 ```sh
-python selftest.py            # everything, in a few seconds
-python selftest.py server     # just the web server and its routes
+python tests/selftest.py            # everything, in a few seconds
+python tests/selftest.py server     # just the web server and its routes
 ```
 
 The self test needs no keys, no microphone, and no network.

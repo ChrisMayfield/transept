@@ -2,7 +2,7 @@
 
 This is the design record for an optional deployment that is built, deployed, and running: why it exists, what shape it has, and which alternatives were turned down.
 Nothing here is a plan waiting to be carried out.
-To set a server up, follow [`deploy/README.md`](deploy/README.md), which has the steps for the machine, for each room on it, and for the laptop in the room.
+To set a server up, follow [`deploy/README.md`](../deploy/README.md), which has the steps for the machine, for each room on it, and for the laptop in the room.
 
 The default is the self-hosted mode `SETUP.md` describes: one laptop in the room, running `server.py`, with a Tailscale Funnel in front of it.
 That remains the architecture.
@@ -64,14 +64,15 @@ One room is one `server.py` process, with its own config file, its own ports, an
 
 This falls out of what `server.py` already does.
 `--config` exists, the ports are `SETTINGS` rows, `PID_FILE` is relative to the working directory, and `STATIC` is relative to the code.
-So `WorkingDirectory=/srv/transept/chapel` with a shared checkout gives each room its own pid file, database, and log with no code change at all.
+So `WorkingDirectory=/srv/transept/local/chapel` with a shared checkout gives each room its own pid file, database, and log with no code change at all.
+It is the laptop's `local/` folder with one more level in it, a folder per room beside the file they share.
 
 ```
-/srv/transept/config.toml             tuning shared by every room
-/srv/transept/chapel/config.toml      this room's ports, keys, tokens, name
-/srv/transept/chapel/sessions.db
-/srv/transept/classroom/config.toml
-/srv/transept/classroom/sessions.db
+/srv/transept/local/config.toml             tuning shared by every room
+/srv/transept/local/chapel/config.toml      this room's ports, keys, tokens, name
+/srv/transept/local/chapel/sessions.db
+/srv/transept/local/classroom/config.toml
+/srv/transept/local/classroom/sessions.db
 ```
 
 The alternative considered was one process with a room registry and the room in the request path.
@@ -341,8 +342,8 @@ The difference between sensible US regions is tens of milliseconds, against the 
 
 `sessions.db` needs a volume that survives redeploys if recording is on.
 
-`transept.py` and `transept.log` are unchanged and are not deleted.
-They are the self-hosted mode's weekly command, and a room whose network behaves should keep using them.
+`transept.py` and `transept.log` are not deleted.
+They are the weekly command in both modes: on a laptop whose `config.toml` holds a `control_token`, `./transept start` runs `sender.py` in place of the server and the funnel, so a room that moves to a hosted server keeps the same three commands.
 On the rented server a systemd unit takes their place, which is the form `CLAUDE.md` already says `server.py` must stay runnable in.
 
 ## Bandwidth and compression

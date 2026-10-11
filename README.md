@@ -10,11 +10,11 @@ A second or two after that, the same sentence appears in French, Swahili, or wha
 Nothing is projected on a screen and readers install nothing.
 Each person opens a link and chooses their own language and their own text size.
 
-![A phone reading the German channel](images/reader.png)
+![A phone reading the German channel](docs/images/reader.png)
 
 ## Getting started
 
-To install and configure Transept, follow the steps in [**SETUP.md**](SETUP.md).
+To install and configure Transept, follow the steps in [**SETUP.md**](docs/SETUP.md).
 That file walks through the whole process, from installing Python to handing out the first QR code, and assumes no programming experience.
 
 Transept runs in one of two modes, depending on which machine does the work:
@@ -23,7 +23,7 @@ Transept runs in one of two modes, depending on which machine does the work:
 * **Third-party hosted** moves recognition and translation onto a small backend server, leaving the laptop in the room to capture audio and nothing more.
   It is the answer when the building's network cannot carry a meeting, and it lets several rooms share one address and one set of API keys.
 
-[HOSTED.md](HOSTED.md) explains what changes and why for using third-party hosted mode, and [**deploy/README.md**](deploy/README.md) contains the instructions for setting up the backend server.
+[HOSTED.md](docs/HOSTED.md) explains what changes and why for using third-party hosted mode, and [**deploy/README.md**](deploy/README.md) contains the instructions for setting up the backend server.
 
 ## How it works
 
@@ -98,17 +98,24 @@ The operator page is unchanged and still on loopback, forwarding Start, Stop, an
 
 ## The code
 
-**Source files:**
+The top of the checkout holds the weekly command, `./transept start | stop | status`, which runs whichever half of Transept this laptop is configured for.
+Everything else is in a folder of its own:
 
-* `server.py` is the web server and session manager, and the whole of a self-hosted Sunday, whether run directly or through the `transept.py` script that also opens the tunnel; `static/` holds the two web pages.
-* `pipeline.py` is the underlying pipeline without the web layer, which is the fastest way to check a microphone or tune segmentation; `capture.py` is the audio layer.
-* `review.py` translates a text file offline, and `record.py` keeps a session and turns it into a review document.
-* `selftest.py` checks the software without a microphone or an API key.
-* `controls.py` holds the operator page and its routes, which both entry points serve, and `sender.py` is the room's half of a hosted deployment, alongside the server configuration in `deploy/`.
+* `src/` is the program.
+  `server.py` is the web server and session manager, and the whole of a self-hosted Sunday; `static/` holds the two web pages.
+  `sender.py` is the room's half of a hosted deployment, and `controls.py` holds the operator page and its routes, which both of them serve.
+  `pipeline.py` is the underlying pipeline without the web layer, which is the fastest way to check a microphone or tune segmentation, and `capture.py` is the audio layer.
+  `review.py` translates a text file offline, and `record.py` keeps a session and turns it into a review document.
+  `transept.py` is what the weekly command runs.
+* `tests/` holds `selftest.py`, which checks the software without a microphone or an API key, and `check_backend.sh`, which probes a hosted server from outside.
+* `docs/` is the setup manual and the design record for the hosted mode, and `deploy/` is the server configuration for that mode.
+* `examples/` holds the starting point for each file a room fills in.
+* `local/` is the room's own: `config.toml`, the glossary and key terms, the recordings, and the log.
+  git ignores the whole folder, and every program in `src/` runs from inside it.
 
 **Config files:**
 
-- Every setting is in `config.toml`, keys included, so switching translation providers is one edit.
+- Every setting is in `local/config.toml`, keys included, so switching translation providers is one edit.
 - The file is git-ignored, because the file holds your keys once you fill them in.
 - A fork that wants to commit its settings so a second room starts from a known-good file should take the keys back out first, or set the keys through the environment instead.
 
@@ -125,7 +132,7 @@ Running Transept takes a sound system, a laptop, and somebody to press a button 
 - A key for any provider with an OpenAI-compatible endpoint for translation.
   [Google AI Studio](https://aistudio.google.com/), [Claude Platform](https://platform.claude.com/), [OpenAI Platform](https://platform.openai.com/), a [LiteLLM](https://www.litellm.ai/) proxy, and a local [Ollama](https://ollama.com/) install all work.
 - A way for phones to reach the laptop over HTTPS, either a tunnel or backend server.
-  [Tailscale Funnel](https://tailscale.com/) needs no domain and costs nothing, and is what [SETUP.md](SETUP.md) uses.
+  [Tailscale Funnel](https://tailscale.com/) needs no domain and costs nothing, and is what [SETUP.md](docs/SETUP.md) uses.
 
 Capture goes through PortAudio by way of the `sounddevice` package, so the laptop already plugged into the chapel sound system for Zoom should generally work as is.
 A second backend, `parec`, is available on Linux and is used by default there.
@@ -145,10 +152,10 @@ A hosted room adds one more party, since the audio and every sentence pass throu
 
 By default nothing is stored on disk, so subtitles live in memory and disappear when the session stops.
 Turning on `record` in `config.toml` changes that, and is a decision to make with whoever leads the meeting.
-A recorded session keeps every English sentence, every translation, and how long each one took, in `sessions.db` next to the code.
+A recorded session keeps every English sentence, every translation, and how long each one took, in `local/sessions.db`.
 That file is not encrypted, `.gitignore` keeps the file out of your fork, and nothing is ever deleted automatically.
 The operator page says "Recording this session to disk" the `record` option is set.
-`python record.py --purge --older-than 30` can be used to deletes old recordings.
+`python ../src/record.py --purge --older-than 30`, run from inside `local`, deletes old recordings.
 
 The reader address carries a token, because a tunnel is open to the internet by design.
 What reaches the room is a link people are handed, not a hostname somebody scanning the internet can open.

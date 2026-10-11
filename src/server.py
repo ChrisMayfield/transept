@@ -32,8 +32,8 @@ has forced it on, so an unread language costs nothing.
 Both addresses are printed at startup with tokens minted for that run,
 unless reader_token and operator_token in config.toml pin them.
 
-Usage:
-    python3 server.py --model gemini-3.8-flash --reasoning-effort low \\
+Usage, from inside local/ where config.toml is:
+    python3 ../src/server.py --model gemini-3.8-flash --reasoning-effort low \\
         --languages "French,Swahili,Spanish" --correct-english \\
         --glossary glossary.txt --keyterms keyterms.txt
 
@@ -47,11 +47,9 @@ import asyncio
 import base64
 import hashlib
 import json
-import os
 import sys
 import time
 from collections import deque
-from pathlib import Path
 
 try:
     import websockets
@@ -68,13 +66,9 @@ from pipeline import (SYSTEM_PROMPT, Segmenter, Stamped, Translator,
                       build_asr_url, install_stop_handler, listen,
                       load_config, load_file_lines, load_glossary,
                       load_keys, open_encoder, publish, pump_audio,
-                      resolve, stream_lag)
+                      remove_pid_file, resolve, stream_lag,
+                      write_pid_file)
 
-# Where this process records itself so the transept script can stop it
-# later. In the working directory rather than beside the code, because that
-# is where config.toml, the glossary, and sessions.db already live, and "a
-# server running out of this directory" is the thing being identified.
-PID_FILE = Path("transept.pid")
 HISTORY = 60
 # How long a reader's stream waits for a line before it looks at the session
 # state again, and how long it may stay silent before a keepalive is written.
@@ -1169,44 +1163,6 @@ def build_control_app(room, token):
     return app
 
 
-def write_pid_file(settings):
-    """Record this process, once it is really listening.
-
-    Written after the ports are bound, so a second server that fails on
-    "address already in use" cannot overwrite the record of the one that
-    holds them. The ports are in the file as well as the pid, which is how
-    stopping works without reading config.toml, and how a recycled pid is
-    told from a server that is still serving.
-
-    A directory that will not take the file costs the operator a convenient
-    stop, not the meeting, so the failure is reported and swallowed.
-    """
-    record = {"pid": os.getpid(), "reader_port": settings["reader_port"],
-              "operator_port": settings["operator_port"],
-              "started_at": time.time()}
-    try:
-        PID_FILE.write_text(json.dumps(record) + "\n", encoding="utf-8")
-    except OSError as failure:
-        print(f"Could not write {PID_FILE}, so ./transept stop will not "
-              f"find this server: {failure}")
-        return False
-    return True
-
-
-def remove_pid_file():
-    """Take the record away again, but only if it is still ours.
-
-    A server that started after this one owns the file by then, and
-    deleting that record would leave the running server unstoppable.
-    """
-    try:
-        if json.loads(PID_FILE.read_text(encoding="utf-8"))["pid"] \
-                == os.getpid():
-            PID_FILE.unlink()
-    except (OSError, ValueError, KeyError, TypeError):
-        pass
-
-
 def reader_address(base, room, token):
     """The whole address a phone opens: a reachable base, path, and token.
 
@@ -1275,7 +1231,9 @@ async def serve(config, tokens, settings):
             await runner.setup()
             runners.append(runner)
             await web.TCPSite(runner, host, port).start()
-        recorded = write_pid_file(settings)
+        recorded = write_pid_file("server", {
+            "reader_port": settings["reader_port"],
+            "operator_port": settings["operator_port"]})
         stop = asyncio.Event()
         install_stop_handler(stop)
         await stop.wait()
@@ -1296,7 +1254,7 @@ def main():
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="Any setting may live in config.toml instead, which is the "
-               "point: a weekly run should be just `python3 server.py`.")
+               "point: a weekly run should be just `./transept start`.")
     parser.add_argument("--list-devices", action="store_true",
                         help="list audio input devices and exit")
     # Repeatable, and merged left to right, so a hosted room passes the

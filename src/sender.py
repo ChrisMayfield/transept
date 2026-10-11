@@ -14,8 +14,11 @@ pipeline.py. What it holds is the microphone, one websocket, and a proxy
 that makes the server look to controls.py like the Session it serves the
 same page against in the default deployment.
 
-    python3 sender.py                  the whole thing
-    python3 sender.py --list-devices   find an audio source
+From inside local/, or ./transept start, which runs this when config.toml
+holds a control_token:
+
+    python3 ../src/sender.py                  the whole thing
+    python3 ../src/sender.py --list-devices   find an audio source
 
 Three settings and one key, in the same config.toml as everything else:
 
@@ -46,7 +49,8 @@ import controls
 from controls import OPERATOR_HOST, mint_token
 from pipeline import (Stamped, add_settings_arguments,
                       install_stop_handler, load_config, load_keys,
-                      open_encoder, resolve)
+                      open_encoder, remove_pid_file, resolve,
+                      write_pid_file)
 
 # Seconds between attempts to reach the server, and how long a connection
 # has to last before the next drop starts counting from the beginning
@@ -533,15 +537,20 @@ async def run(remote, url, token, settings):
     runner = web.AppRunner(controls.build_operator_app(remote, token))
     await runner.setup()
     tasks = []
+    recorded = False
     try:
         await web.TCPSite(runner, OPERATOR_HOST,
                           settings["operator_port"]).start()
+        recorded = write_pid_file(
+            "sender", {"operator_port": settings["operator_port"]})
         tasks = [asyncio.create_task(remote.pump()),
                  asyncio.create_task(supervise(remote, url))]
         stop = asyncio.Event()
         install_stop_handler(stop)
         await stop.wait()
     finally:
+        if recorded:
+            remove_pid_file()
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -556,7 +565,7 @@ def main():
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="Any setting may live in config.toml instead, which is the "
-               "point: a weekly run should be just `python3 sender.py`.")
+               "point: a weekly run should be just `./transept start`.")
     parser.add_argument("--list-devices", action="store_true",
                         help="list audio input devices and exit")
     # Repeatable, and merged left to right, so a hosted room passes the

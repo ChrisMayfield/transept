@@ -1,19 +1,20 @@
 # Deployment
 
 How to set up the third-party hosted mode on a rented server, which supports multiple rooms.
-`HOSTED.md` is the design record behind it, for why any of this is shaped the way it is.
+[`HOSTED.md`](../docs/HOSTED.md) is the design record behind it, for why any of this is shaped the way it is.
 
 Four files go on the server: three from this directory, and the fourth the project's own settings example.
 
-| File                     | Goes to                            | What it is                               |
-| ------------------------ | ---------------------------------- | ---------------------------------------- |
-| `Caddyfile`              | `/etc/caddy/Caddyfile`             | TLS, and which room answers which prefix |
-| `transept@.service`      | `/etc/systemd/system/`             | a single room as a systemd template      |
-| `room.example.toml`      | `/srv/transept/<room>/config.toml` | that room's ports, tokens, and name      |
-| `../config.example.toml` | `/srv/transept/config.toml`        | the keys and tuning every room shares    |
+| File                                  | Goes to                                  | What it is                               |
+| ------------------------------------- | ---------------------------------------- | ---------------------------------------- |
+| `Caddyfile`                           | `/etc/caddy/Caddyfile`                   | TLS, and which room answers which prefix |
+| `transept@.service`                   | `/etc/systemd/system/`                   | a single room as a systemd template      |
+| `room.example.toml`                   | `/srv/transept/local/<room>/config.toml` | that room's ports, tokens, and name      |
+| `../examples/config.example.toml`     | `/srv/transept/local/config.toml`        | the keys and tuning every room shares    |
 
 Each room lives under its own name: `https://transept.example.org/<room>/reader`.
 Caddy strips the `<room>` prefix before forwarding, so the server behind it serves `/reader` and `/control` exactly as it does on a laptop.
+Everything that belongs to the rooms lives under `/srv/transept/local`, which git ignores, the same folder a laptop keeps its own room in.
 The room name is the same value as the working directory, the systemd instance, and `[server] room`.
 One hostname, one certificate, one DNS record, however many rooms.
 
@@ -56,11 +57,12 @@ sudo ufw enable
 The ordinary settings file, the same one a laptop runs on:
 
 ```sh
-sudo cp /srv/transept/config.example.toml /srv/transept/config.toml
-sudo nano /srv/transept/config.toml
+sudo mkdir /srv/transept/local
+sudo cp /srv/transept/examples/config.example.toml /srv/transept/local/config.toml
+sudo nano /srv/transept/local/config.toml
 
-sudo chown root:transept /srv/transept/config.toml
-sudo chmod 0640 /srv/transept/config.toml
+sudo chown root:transept /srv/transept/local/config.toml
+sudo chmod 0640 /srv/transept/local/config.toml
 ```
 
 Four lines to change (with `nano`), and the file's own comments explain each of them:
@@ -86,13 +88,13 @@ That is what keeps changing the translation provider one edit per server rather 
 In the following example, the room is named `chapel`.
 
 ```sh
-sudo mkdir -p /srv/transept/chapel
-sudo cp /srv/transept/deploy/room.example.toml /srv/transept/chapel/config.toml
-sudo nano /srv/transept/chapel/config.toml
+sudo mkdir -p /srv/transept/local/chapel
+sudo cp /srv/transept/deploy/room.example.toml /srv/transept/local/chapel/config.toml
+sudo nano /srv/transept/local/chapel/config.toml
 
-sudo chown root:transept /srv/transept/chapel /srv/transept/chapel/config.toml
-sudo chmod 3770 /srv/transept/chapel
-sudo chmod 0640 /srv/transept/chapel/config.toml
+sudo chown root:transept /srv/transept/local/chapel /srv/transept/local/chapel/config.toml
+sudo chmod 3770 /srv/transept/local/chapel
+sudo chmod 0640 /srv/transept/local/chapel/config.toml
 ```
 
 The directory belongs to root and the `transept` group, not to the `transept` user, which is worth getting right.
@@ -128,6 +130,17 @@ curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
 sudo apt update && sudo apt install -y caddy
 ```
 
+That repository runs on a free Cloudsmith plan with a monthly bandwidth quota, and when the quota runs out it answers `402 Payment Required`.
+Caddy is still free, and the Caddy already installed keeps running, but apt treats the unreadable source as an error and `apt update` fails for every other package too.
+Set the source aside until the quota resets, and leave the keyring where it is:
+
+```sh
+sudo mv /etc/apt/sources.list.d/caddy-stable.list{,.disabled}
+```
+
+Move it back once `curl -I https://dl.cloudsmith.io/public/caddy/stable/deb/debian/dists/any-version/InRelease` answers 200.
+A new server that needs Caddy in the meantime can install the `.deb` from its [GitHub release](https://github.com/caddyserver/caddy/releases), checked against that release's checksums file.
+
 Then:
 
 ```sh
@@ -158,7 +171,7 @@ It is there rather than in `transept.log` because systemd is the supervisor here
 ## Testing
 
 The server should be up and running now.
-Test it by running [`check_backend.sh`](../check_backend.sh).
+Test it by running [`check_backend.sh`](../tests/check_backend.sh) from any machine.
 This script issues four web requests that between them cover what each listener serves and what it turns away.
 
 ## Second room
@@ -166,13 +179,13 @@ This script issues four web requests that between them cover what each listener 
 In the following example, the room is named `classroom`.
 
 ```sh
-sudo mkdir -p /srv/transept/classroom
-sudo cp /srv/transept/deploy/room.example.toml /srv/transept/classroom/config.toml
-sudo nano /srv/transept/classroom/config.toml    # room, both tokens, both ports
+sudo mkdir -p /srv/transept/local/classroom
+sudo cp /srv/transept/deploy/room.example.toml /srv/transept/local/classroom/config.toml
+sudo nano /srv/transept/local/classroom/config.toml    # room, both tokens, both ports
 
-sudo chown root:transept /srv/transept/classroom /srv/transept/classroom/config.toml
-sudo chmod 3770 /srv/transept/classroom
-sudo chmod 0640 /srv/transept/classroom/config.toml
+sudo chown root:transept /srv/transept/local/classroom /srv/transept/local/classroom/config.toml
+sudo chmod 3770 /srv/transept/local/classroom
+sudo chmod 0640 /srv/transept/local/classroom/config.toml
 
 sudo nano /etc/caddy/Caddyfile                   # its prefix and its two ports
 sudo caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
@@ -189,7 +202,7 @@ The operating system gives the isolation for free, and a handler that blocks sta
 
 ## Starting a session
 
-The room's laptop needs the following settings in `config.toml` (the rest can be left unchanged):
+The room's laptop needs the following settings in `local/config.toml` (the rest can be left unchanged):
 
 ```toml
 [keys]
@@ -208,7 +221,9 @@ The address the laptop dials is built from the last two: `wss://transept.example
 The room's name is in the url because a hosted room lives under a path prefix.
 A laptop dialing the wrong prefix reaches the wrong room, which refuses the connection.
 
-Run `python sender.py` on the laptop, which prints the operator address on loopback and connects to the backend server.
+Run `./transept start` on the laptop, the same weekly command a self-hosted room uses.
+The `control_token` is what tells it this laptop is a sender, so it starts `sender.py` rather than a server and a funnel, prints the operator address on loopback, and connects to the backend server.
+`./transept stop` ends it, and `./transept status` says whether it is running and where it is sending.
 The address to hand the room appears on the operator page once the sender has reached the server, because the server is what holds the reader token.
 
 ## Troubleshooting

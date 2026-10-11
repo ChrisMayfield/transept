@@ -12,14 +12,14 @@ accuracy is decided. What it catches is the wiring between pipeline.py and
 server.py coming apart, which once put every session start into a NameError
 that a supervisor caught and retried forever.
 
-Usage:
-    python3 selftest.py             everything
-    python3 selftest.py lint        ruff, with the rules in ruff.toml
-    python3 selftest.py pipeline    the shared loops, against both sinks
-    python3 selftest.py session     a whole Session start and stop
-    python3 selftest.py store       recording a session and reading it back
-    python3 selftest.py server      boot server.py and exercise the routes
-    python3 selftest.py script      the operator script, without a funnel
+Usage, from the top of the checkout:
+    python3 tests/selftest.py            everything
+    python3 tests/selftest.py lint       ruff, with the rules in ruff.toml
+    python3 tests/selftest.py pipeline   the shared loops, both sinks
+    python3 tests/selftest.py session    a whole Session start and stop
+    python3 tests/selftest.py store      recording a session, read back
+    python3 tests/selftest.py server     boot server.py, exercise routes
+    python3 tests/selftest.py script     the operator script, no funnel
 
 Exits non-zero if any check fails.
 """
@@ -49,6 +49,12 @@ import websockets
 from aiohttp import web
 from websockets.sync.client import connect as ws_connect
 
+# The code under test is in src/, beside this directory rather than in it,
+# and nothing is installed, so the path is the only way to reach it.
+ROOT = Path(__file__).resolve().parent.parent
+SRC = ROOT / "src"
+sys.path.insert(0, str(SRC))
+
 import capture
 import controls
 import pipeline
@@ -57,7 +63,6 @@ import sender
 import server
 import transept
 
-HERE = Path(__file__).parent
 
 
 class Checks:
@@ -1600,7 +1605,8 @@ def check_example_config(checks):
     """
     checks.section("config.example.toml against SETTINGS and SECRETS")
     section, listed = None, []
-    for line in (HERE / "config.example.toml").read_text().splitlines():
+    example = ROOT / "examples" / "config.example.toml"
+    for line in example.read_text().splitlines():
         if line.startswith("["):
             section = line.strip("[]")
         elif line[:1].isalpha() and "=" in line:
@@ -1713,7 +1719,7 @@ def check_reader_page(checks):
     spelled the regex out again would pass against a page that had lost it.
     """
     checks.section("The reader page under a path prefix")
-    page = (HERE / "static" / "reader.html").read_text(encoding="utf-8")
+    page = (SRC / "static" / "reader.html").read_text(encoding="utf-8")
     found = re.search(r'location\.pathname\.replace\(/(.+?)/, "(.*?)"\)',
                       page)
     checks.check("the page derives a base from its own address",
@@ -1943,7 +1949,7 @@ def check_server(checks):
     home = Path(tempfile.mkdtemp())
     pid_file = home / "transept.pid"
     process = subprocess.Popen(
-        [sys.executable, "-u", str(HERE / "server.py"),
+        [sys.executable, "-u", str(SRC / "server.py"),
          "--config", "selftest-no-such-config.toml",
          "--model", "selftest-model", "--languages", "French,Swahili",
          "--host", "127.0.0.1", "--reader-port", str(port),
@@ -1986,6 +1992,8 @@ def check_server(checks):
                      (written.get("reader_port"),
                       written.get("operator_port")) == (port, operator),
                      written)
+        checks.check("and says it is a server, which status names",
+                     written.get("role") == "server", written)
 
         status, body = request(port, "/api/channels", token=READER)
         checks.check("channels are fixed at startup",
@@ -2188,7 +2196,7 @@ def check_control(checks):
     )
     home = Path(tempfile.mkdtemp())
     process = subprocess.Popen(
-        [sys.executable, "-u", str(HERE / "server.py"),
+        [sys.executable, "-u", str(SRC / "server.py"),
          "--config", "selftest-no-such-config.toml",
          "--model", "selftest-model", "--languages", "French",
          "--capture", "remote", "--room", "chapel",
@@ -2625,7 +2633,7 @@ def check_sender(checks):
         CONTROL_TOKEN="shared",
     )
     process = subprocess.Popen(
-        [sys.executable, "-u", str(HERE / "server.py"),
+        [sys.executable, "-u", str(SRC / "server.py"),
          "--config", "shared.toml", "--config", "room.toml",
          "--model", "selftest-model",
          "--capture", "remote", "--room", "chapel",
@@ -2969,7 +2977,9 @@ def check_script(checks):
     checks.section("Reading the ports out of config.toml")
     missing = home / "no-such-config.toml"
     checks.check("a missing config leaves the defaults in place",
-                 transept.read_config(missing) == (8080, 8081, ""),
+                 transept.read_config(missing)
+                 == {"reader_port": 8080, "operator_port": 8081,
+                     "public_url": "", "sends": False},
                  transept.read_config(missing))
     written = home / "config.toml"
     written.write_text('[server]\nreader_port = 9000\n'
@@ -2977,8 +2987,32 @@ def check_script(checks):
                        'public_url = "https://chapel.example/"\n')
     checks.check("the ports and the address come out of the file",
                  transept.read_config(written)
-                 == (9000, 9001, "https://chapel.example/"),
+                 == {"reader_port": 9000, "operator_port": 9001,
+                     "public_url": "https://chapel.example/",
+                     "sends": False},
                  transept.read_config(written))
+
+    # Which half this laptop runs is read off the control token, so the
+    # weekly command is one command whichever way the room is set up.
+    saved = os.environ.pop("CONTROL_TOKEN", None)
+    try:
+        written.write_text('[keys]\ncontrol_token = "abc"\n')
+        checks.check("a laptop holding a control token is a sender",
+                     transept.read_config(written)["sends"])
+        written.write_text('[keys]\ncontrol_token = "abc"\n'
+                           '[audio]\nbackend = "remote"\n')
+        checks.check("but not the hosted server's own file, which has one",
+                     not transept.read_config(written)["sends"])
+        written.write_text('[keys]\ncontrol_token = ""\n')
+        checks.check("an empty token is no token",
+                     not transept.read_config(written)["sends"])
+        os.environ["CONTROL_TOKEN"] = "abc"
+        checks.check("and the environment counts, as load_keys reads it",
+                     transept.read_config(written)["sends"])
+    finally:
+        os.environ.pop("CONTROL_TOKEN", None)
+        if saved is not None:
+            os.environ["CONTROL_TOKEN"] = saved
     # A config that will not parse and a port that is not a number both have
     # to stop here, rather than be passed on to something that probes ports
     # and sends signals.
@@ -3012,6 +3046,16 @@ def check_script(checks):
         found = transept.server_record()
         checks.check("a live process still holding a port is the server",
                      found is not None and found["pid"] == os.getpid(), found)
+        checks.check("a record with no role is a server",
+                     found is not None and found["role"] == "server", found)
+
+        # A sender binds only the operator port, so its record names only
+        # that one, and that has to be enough to find it.
+        transept.PID_FILE.write_text(json.dumps(
+            {"pid": os.getpid(), "role": "sender", "operator_port": held}))
+        found = transept.server_record()
+        checks.check("a sender is found by its one port, and named",
+                     found is not None and found["role"] == "sender", found)
 
         transept.PID_FILE.write_text(json.dumps(
             {"pid": os.getpid(), "reader_port": quiet,
@@ -3067,7 +3111,7 @@ def check_lint(checks):
     try:
         result = subprocess.run(
             [sys.executable, "-m", "ruff", "check", "."],
-            cwd=HERE, capture_output=True, text=True, timeout=120)
+            cwd=ROOT, capture_output=True, text=True, timeout=120)
     except (OSError, subprocess.SubprocessError) as exc:
         checks.check("ruff is installed",
                      False, f"{exc}. pip install -r requirements.txt")

@@ -1,19 +1,25 @@
 #!/usr/bin/env python3
 """
-Transept: the subtitle server and the Tailscale Funnel in front of it.
+Transept: the weekly command, for either way a room can run.
 
     ./transept start | stop | restart | status
 
-The weekly command for a room behind Tailscale Funnel. Starting clears
-anything left from last time, which is why restarting is only another name
-for starting.
+A room behind Tailscale Funnel runs the subtitle server here, with the
+funnel in front of it. A room with a hosted server runs sender.py here,
+which carries the microphone to that server. Which one is decided by
+local/config.toml rather than by a flag: a control_token under [keys] is
+what a sender needs and what nothing else on a laptop uses, so a laptop
+holding one sends to the server that token belongs to.
 
-Run it from anywhere. server.py reads config.toml, the glossary, the key
-terms, and the recording database out of the directory it starts in, so
-everything here is anchored to the directory this file sits in.
+Starting clears anything left from last time, which is why restarting is
+only another name for starting.
 
-The server is found through the file server.py writes on its way up, since
-no portable command answers "which python is running server.py out of this
+Run it from anywhere. server.py and sender.py read config.toml, the
+glossary, the key terms, and the recording database out of the directory
+they start in, so everything here is anchored to local/ beside src/.
+
+The process is found through the file it writes on its way up, since no
+portable command answers "which python is running server.py out of this
 directory". Nothing else in the project imports this file, and server.py
 stays runnable on its own, which is also the form a systemd unit would take.
 """
@@ -31,14 +37,19 @@ import tomllib
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-# Beside the code rather than in /tmp: Windows has no /tmp, and two checkouts
+ROOT = HERE.parent
+# The room's own files, which git ignores, and the working directory every
+# process started here runs in.
+LOCAL = ROOT / "local"
+CONFIG_FILE = LOCAL / "config.toml"
+# In the checkout rather than in /tmp: Windows has no /tmp, and two checkouts
 # on one machine should not share a log that carries this run's tokens.
-LOG_FILE = HERE / "transept.log"
-# Written by server.py into its working directory, which do_start makes this
-# one. The name is spelled out again rather than imported, because importing
-# server.py would pull aiohttp and the whole pipeline into a script that only
-# needs to send a signal.
-PID_FILE = HERE / "transept.pid"
+LOG_FILE = LOCAL / "transept.log"
+# Written by server.py or sender.py into its working directory, which
+# do_start makes local/. The name is spelled out again rather than imported,
+# because importing pipeline.py would pull httpx and websockets into a script
+# that only needs to send a signal.
+PID_FILE = LOCAL / "transept.pid"
 # Seconds to wait for each half of the work. A server on its way down has
 # lines to drain; a server on its way up has two ports to bind.
 STOP_GRACE = 10
@@ -98,8 +109,8 @@ def server_python():
     SETUP.md has the operator create one in .venv, and the point of this
     script is that a meeting starts without activating anything first.
     """
-    for candidate in (HERE / ".venv" / "bin" / "python3",
-                      HERE / ".venv" / "Scripts" / "python.exe"):
+    for candidate in (ROOT / ".venv" / "bin" / "python3",
+                      ROOT / ".venv" / "Scripts" / "python.exe"):
         if candidate.exists():
             return str(candidate)
     return sys.executable
@@ -117,22 +128,32 @@ def detached():
 
 
 def read_config(path=None):
-    """The two ports and the address on the card, from config.toml.
+    """The ports, the address on the card, and which half this laptop is.
 
-    Never copied into this file, since a second copy of the port is a copy
-    that will one day disagree with the one server.py binds.
+    The ports are never copied into this file, since a second copy of the
+    port is a copy that will one day disagree with the one server.py binds.
+
+    sends is true when this laptop should run sender.py. The token can come
+    from the environment as well as the file, the way load_keys reads it,
+    and a backend of "remote" is the hosted server's own file, which holds
+    a control token too but is never the laptop in the room.
     """
     try:
-        with open(path or HERE / "config.toml", "rb") as handle:
-            server = tomllib.load(handle).get("server", {})
+        with open(path or CONFIG_FILE, "rb") as handle:
+            parsed = tomllib.load(handle)
     except FileNotFoundError:
-        server = {}
+        parsed = {}
     except (OSError, tomllib.TOMLDecodeError) as failure:
         sys.exit(f"Could not read config.toml: {failure}")
+    server = parsed.get("server", {})
+    token = os.environ.get("CONTROL_TOKEN",
+                           parsed.get("keys", {}).get("control_token", ""))
+    backend = parsed.get("audio", {}).get("backend", "auto")
     try:
-        return (int(server.get("reader_port", 8080)),
-                int(server.get("operator_port", 8081)),
-                str(server.get("public_url", "")))
+        return {"reader_port": int(server.get("reader_port", 8080)),
+                "operator_port": int(server.get("operator_port", 8081)),
+                "public_url": str(server.get("public_url", "")),
+                "sends": bool(token) and backend != "remote"}
     except (TypeError, ValueError):
         sys.exit("The ports in config.toml are not numbers. "
                  "Check the [server] section.")
@@ -156,7 +177,8 @@ def server_record():
                                record.get("operator_port"))
              if isinstance(port, int)]
     if alive(pid) and any(listening(port) for port in ports):
-        return {"pid": pid, "ports": ports}
+        return {"pid": pid, "ports": ports,
+                "role": record.get("role", "server")}
     return None
 
 
@@ -270,6 +292,9 @@ def funnel_open(port):
 
 # -- the commands -------------------------------------------------------------
 
+# What each kind of record is called when talking to the operator.
+DESCRIBED = {"server": "subtitle server", "sender": "sender"}
+
 
 def do_stop(indent=""):
     """Close the funnel, then stop the server. Safe when neither is up."""
@@ -278,22 +303,26 @@ def do_stop(indent=""):
 
     # reset rather than naming a port: the per-port "off" form was dropped
     # from the Tailscale CLI, and this script owns the funnel config anyway.
-    say("Closing the Tailscale Funnel...")
-    worked, output = tailscale("funnel", "reset")
-    if not worked:
-        say(f"Could not close the funnel. {output.strip()}")
-        say("Check 'tailscale funnel status'.")
+    # A laptop with no Tailscale at all, which is the usual sender, has no
+    # funnel to close, and saying it could not close one would be a false
+    # alarm every week.
+    if tailscale_binary():
+        say("Closing the Tailscale Funnel...")
+        worked, output = tailscale("funnel", "reset")
+        if not worked:
+            say(f"Could not close the funnel. {output.strip()}")
+            say("Check 'tailscale funnel status'.")
 
     found = server_record()
     if found is None:
         if PID_FILE.exists():
             PID_FILE.unlink(missing_ok=True)
-            say("Cleared the record of a server that had already stopped.")
-        say("No subtitle server was running here.")
+            say("Cleared the record of a process that had already stopped.")
+        say("Nothing was running here.")
         return
 
     pid, ports = found["pid"], found["ports"]
-    say(f"Stopping the subtitle server (PID {pid})...")
+    say(f"Stopping the {DESCRIBED[found['role']]} (PID {pid})...")
     stop_process(pid)
     # Waiting on the ports rather than on the process. The ports are what
     # the next server needs back, they are the last thing server.py lets go
@@ -312,41 +341,85 @@ def do_stop(indent=""):
     PID_FILE.unlink(missing_ok=True)
 
 
-def do_start(port, operator_port, public_url):
-    """Clear what is left of last time, start the server, open the funnel."""
-    # A server left from a previous meeting holds both ports, and by then
+def launch(script, port):
+    """Start one of the two programs in local/, and wait for it to listen.
+
+    -u because the addresses are printed once at startup and Python block
+    buffers stdout when it is a file, which would hold them back until the
+    process exits, which is when they stop being worth having.
+    """
+    try:
+        LOCAL.mkdir(exist_ok=True)
+        with open(LOG_FILE, "wb") as log:
+            process = subprocess.Popen(
+                [server_python(), "-u", str(HERE / script)],
+                cwd=LOCAL, stdout=log, stderr=subprocess.STDOUT,
+                **detached())
+    except OSError as failure:
+        print(f"Could not start {script}: {failure}")
+        return False
+    if not wait_until(lambda: listening(port), START_GRACE):
+        print(f"{script} never listened on port {port}:")
+        for line in log_lines()[-3:]:
+            print("  " + line)
+        process.terminate()
+        return False
+    return True
+
+
+def do_start(config):
+    """Clear what is left of last time, then start whichever half this is."""
+    if not CONFIG_FILE.exists():
+        print(f"There is no {CONFIG_FILE.relative_to(ROOT)} yet. Copy "
+              "examples/config.example.toml there")
+        print("and fill it in, as docs/SETUP.md describes.")
+        return 1
+
+    # A process left from a previous meeting holds the ports, and by then
     # there is rarely a terminal left to press Ctrl-C in, so refusing would
     # send a volunteer hunting for a process five minutes before a meeting.
     print("Clearing anything left over from a previous run:")
     do_stop(indent="  ")
 
     # Anything still holding a port now is genuinely not Transept, which is
-    # the one case worth stopping for.
-    for name, number in (("reader", port), ("operator", operator_port)):
+    # the one case worth stopping for. A sender binds only the operator one.
+    ports = [("operator", config["operator_port"])]
+    if not config["sends"]:
+        ports.insert(0, ("reader", config["reader_port"]))
+    for name, number in ports:
         if listening(number):
             print(f"The {name} port {number} is held by something that is "
                   "not Transept,")
-            print("so the server has nowhere to listen. Find what is using "
+            print("so there is nowhere to listen. Find what is using "
                   "the port and stop it first.")
             return 1
 
-    # -u because both addresses are printed once at startup and Python
-    # block buffers stdout when it is a file, which would hold them back
-    # until the server exits, which is when they stop being worth having.
-    print("Starting the subtitle server...")
-    try:
-        with open(LOG_FILE, "wb") as log:
-            process = subprocess.Popen(
-                [server_python(), "-u", str(HERE / "server.py")],
-                cwd=HERE, stdout=log, stderr=subprocess.STDOUT, **detached())
-    except OSError as failure:
-        print(f"Could not start server.py: {failure}")
+    if config["sends"]:
+        return start_sender(config)
+    return start_server(config)
+
+
+def start_sender(config):
+    """The laptop half of a hosted room: no server here and no funnel."""
+    print("Starting the sender...")
+    if not launch("sender.py", config["operator_port"]):
         return 1
-    if not wait_until(lambda: listening(port), START_GRACE):
-        print(f"The server never listened on port {port}:")
-        for line in log_lines()[-3:]:
-            print("  " + line)
-        process.terminate()
+    print()
+    print(banner("Operator:"))
+    print(banner("Sending:"))
+    print("The address to hand the room appears on the operator page once "
+          "the sender")
+    print("has reached the server.")
+    print(f"Log:      {LOG_FILE}")
+    print("Stop the sender with ./transept stop")
+    return 0
+
+
+def start_server(config):
+    """The whole room on this laptop: the server, then the funnel."""
+    port, public_url = config["reader_port"], config["public_url"]
+    print("Starting the subtitle server...")
+    if not launch("server.py", port):
         return 1
 
     # --bg so the funnel outlives this script, --yes because nobody is at a
@@ -384,14 +457,25 @@ def do_start(port, operator_port, public_url):
     return 0
 
 
-def do_status(port, operator_port, public_url):
+def do_status(config):
     """Answer the two questions worth asking mid-meeting.
 
     Is the room being subtitled, and what address do I hand somebody.
-    Nonzero when the server is not running, the way systemctl status
-    answers.
+    Nonzero when nothing is running, the way systemctl status answers.
     """
+    port, operator_port = config["reader_port"], config["operator_port"]
+    public_url = config["public_url"]
     found = server_record()
+    if found is not None and found["role"] == "sender":
+        print(f"Sender:   running (PID {found['pid']})")
+        print(banner("Sending:") or "Sending:  unknown")
+        print(banner("Operator:")
+              or "Operator: unknown, since this sender was not started here")
+        print(f"Log:      {LOG_FILE}")
+        return 0
+    if found is None and config["sends"]:
+        print("Sender:   not running")
+        return 1
     if found is None:
         print("Server:   not running")
     else:
@@ -424,10 +508,12 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
         "command", choices=("start", "restart", "stop", "status", "help"),
-        help="start: stop leftovers, start the server, open the funnel. "
+        help="start: stop leftovers, then start the server and open the "
+             "funnel, or start the sender when config.toml holds a "
+             "control_token. "
              "restart: the same thing, spelled the way you meant it. "
-             "stop: close the funnel, then stop the server. "
-             "status: whether either is up, and the addresses.")
+             "stop: close the funnel, then stop whichever is running. "
+             "status: whether anything is up, and the addresses.")
     command = parser.parse_args().command
     if command == "help":
         parser.print_help()
@@ -438,10 +524,10 @@ def main():
     if command == "stop":
         do_stop()
         return 0
-    port, operator_port, public_url = read_config()
+    config = read_config()
     if command == "status":
-        return do_status(port, operator_port, public_url)
-    return do_start(port, operator_port, public_url)
+        return do_status(config)
+    return do_start(config)
 
 
 if __name__ == "__main__":

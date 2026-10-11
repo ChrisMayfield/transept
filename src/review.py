@@ -15,10 +15,10 @@ live pipeline, so what you review here is what a reader will see. Only the
 retry policy differs: waiting out a failure beats losing a line when nobody
 is waiting on the answer.
 
-Usage:
-    python3 review.py --input transcript.txt --model gemini-3.8-flash
-    python3 review.py --input transcript.txt --languages "French,Swahili" \\
-        --review review.md
+Usage, from inside local/ where config.toml is:
+    python3 ../src/review.py --input transcript.txt --model gemini-3.8-flash
+    python3 ../src/review.py --input transcript.txt \\
+        --languages "French,Swahili" --review review.md
 
 Input may be a plain transcript or raw pipeline.py output. In the second
 case the sentence prefix comes off and the fragment and translation lines

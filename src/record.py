@@ -10,11 +10,11 @@ and keyterms.txt.
 Recording is off unless [session] record is true in config.toml. Nothing is
 ever deleted on its own; --purge is the only way, and it has to be typed.
 
-Usage:
-    python3 record.py --list
-    python3 record.py --session last --out review/2026-09-13.md
-    python3 record.py --session last --plain sunday.txt
-    python3 record.py --purge --older-than 30
+Usage, from inside local/ where config.toml is:
+    python3 ../src/record.py --list
+    python3 ../src/record.py --session last --out review/2026-09-13.md
+    python3 ../src/record.py --session last --plain sunday.txt
+    python3 ../src/record.py --purge --older-than 30
 
 --plain writes what review.py --input already parses, so trying a prompt or
 glossary change means exporting a real transcript, editing the prompt, and

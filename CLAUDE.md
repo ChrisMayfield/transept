@@ -2,9 +2,27 @@
 
 Guidance for Claude Code (claude.ai/code) when working in this repository.
 `README.md` is the introduction, for somebody deciding whether Transept suits their meeting, and it names the two modes the other files document.
-`SETUP.md` is the volunteer's manual for the self-hosted mode: installing, keys, tunnels, running a meeting, tuning, and troubleshooting.
-`HOSTED.md` is the design record for the third-party hosted mode, for a room whose network cannot carry a meeting, and `deploy/README.md` is how a rented server is actually set up.
+`docs/SETUP.md` is the volunteer's manual for the self-hosted mode: installing, keys, tunnels, running a meeting, tuning, and troubleshooting.
+`docs/HOSTED.md` is the design record for the third-party hosted mode, for a room whose network cannot carry a meeting, and `deploy/README.md` is how a rented server is actually set up.
 The notes here are about the code.
+
+## Layout
+
+```
+transept     the weekly command, at the top because it is the one thing typed
+src/         every module and both pages in static/, run as scripts, not a package
+tests/       selftest.py, and check_backend.sh for probing a hosted server
+docs/        SETUP.md, HOSTED.md, and the screenshots they show
+examples/    the starting point for each file a room fills in
+deploy/      the hosted server's Caddyfile, unit, and room template
+local/       git-ignored: config.toml, glossary, keyterms, sessions.db, log, pid
+```
+
+`src/` is flat rather than a package because a `transept/` package cannot sit beside the `transept` launcher, and because a script's own directory is already on `sys.path`, so `import pipeline` works from `python3 src/server.py` with nothing installed.
+`tests/selftest.py` puts `src/` on the path itself, which is the one place an import follows code and why `ruff.toml` allows E402 in that file alone.
+
+Every program in `src/` reads `config.toml`, the glossary, the key terms, and `sessions.db` from the directory it starts in, and writes `transept.pid` there, so the room's files stay out of the code by running from `local/` rather than by any path in the code.
+That is the same arrangement as the hosted server, where each room is a directory under `/srv/transept/local/` and the unit's `WorkingDirectory` is the whole of what separates one room from the next.
 
 ## What this is
 
@@ -30,22 +48,29 @@ When a translation fails, times out, or comes back missing a language, the Engli
 
 ## Commands
 
+From the top of the checkout:
+
 ```
-python3 server.py                     the whole thing: pipeline, listeners, pages
-python3 server.py --list-devices      find an audio source
-python3 sender.py                     the room's half of a hosted deployment
-python3 pipeline.py --no-translate    check the audio path, no translation key needed
-python3 selftest.py [section]         lint, pipeline, session, store, server, script
+./transept start                      stop leftovers, then the server and funnel, or the sender
+./transept stop                       the funnel, then whichever is running
+./transept status                     whether anything is up, and the addresses
+python3 tests/selftest.py [section]   lint, pipeline, session, store, server, script
 ruff check .                          the linter alone, as selftest runs it
-python3 review.py --input t.txt --review review.md         offline translation review
-python3 record.py --session last --out review/sunday.md    read a session back
-./transept start                      stop leftovers, start, open the funnel
-./transept stop                       the funnel, then the server
-./transept status                     whether either is up, and the addresses
+```
+
+From inside `local/`, where the config and the room's files are:
+
+```
+python3 ../src/server.py                  the whole thing: pipeline, listeners, pages
+python3 ../src/server.py --list-devices   find an audio source
+python3 ../src/sender.py                  the room's half of a hosted deployment
+python3 ../src/pipeline.py --no-translate check the audio path, no translation key needed
+python3 ../src/review.py --input t.txt --review review.md         offline translation review
+python3 ../src/record.py --session last --out review/sunday.md    read a session back
 ```
 
 A setting becomes a flag only where an entry point names it in its `add_settings_arguments` call, so the sets built from `SETTINGS` overlap rather than match.
-Any of those may be overridden for a one-off, for example `python3 server.py --ceiling 6`.
+Any of those may be overridden for a one-off, for example `python3 ../src/server.py --ceiling 6`.
 There is no build step and no CI, so `selftest.py` is the whole mechanical check, and it runs `ruff check` as its first section for that reason.
 
 ## Architecture
@@ -180,21 +205,26 @@ A language missing from the table falls back to English, so adding one to `confi
 
 ### The transept script
 
-`./transept start | stop | restart | status` is the weekly command for a room behind Tailscale Funnel, and `SETUP.md` covers what the script does for the operator.
-The work is in `transept.py`; the `transept` beside it is a dozen lines of `sh` that pick an interpreter and hand over.
+`./transept start | stop | restart | status` is the weekly command in both modes, and `docs/SETUP.md` and `deploy/README.md` cover what it does for the operator in each.
+The work is in `src/transept.py`; the `transept` at the top of the checkout is a dozen lines of `sh` that pick an interpreter and hand over.
 Two files rather than one because a shebang cannot choose between `.venv/bin/python3` and `.venv/Scripts/python.exe`, and on Windows there is frequently no `python3` at all, so one spelling of the command works on three platforms only if something looks first.
 The launcher holds no logic beyond that search, and nothing new belongs in it.
 
-Tailscale is assumed, which is a narrower bet than the rest of the project makes.
-Nothing else may depend on either file, and `server.py` must stay runnable on its own, which is also the form a systemd unit would take.
+Which mode a laptop is in is read off `config.toml`, not passed as a flag: a `control_token` under `[keys]`, from the file or from `CONTROL_TOKEN`, means `start` runs `sender.py` and opens no funnel.
+Nothing else on a laptop uses that token, and a sender cannot run without it, so the token is already the fact that says where the audio goes, which is the same reasoning that has the capture backend rather than a `mode` setting decide which listener a server raises.
+A backend of `remote` is excluded, because that is the hosted server's own file, which holds the token too.
+
+Tailscale is assumed for the self-hosted mode, which is a narrower bet than the rest of the project makes.
+`stop` skips the funnel without comment on a machine with no `tailscale`, since a sender usually has none and no funnel can be open there.
+Nothing else may depend on either file, and `server.py` and `sender.py` must stay runnable on their own, which is also the form a systemd unit would take.
 
 A command is one `do_*` function and one `choices` entry in `main`, and the pieces they share sit in `read_config`, `server_record`, `funnel_url`, and `banner`.
 `stop` is the one command that runs without reading `config.toml`, because the point of stopping is to leave nothing running and nothing exposed, and a config that will not parse must not stand in the way of that.
-The ports it needs come out of the record instead.
+The ports it needs come out of the record instead, and so does the `role` that `status` names.
 
 Nothing raises its way out of a command.
 The stop path attempts every step even when an earlier one failed, and the start path checks each step it cares about and says what went wrong, which is worth more to a volunteer than a traceback.
-A missing `tailscale` is reported as a command that failed, because from the room's point of view there is no difference between absent and refusing.
+When starting a self-hosted room, a missing `tailscale` is reported as a command that failed, because from the room's point of view there is no difference between absent and refusing.
 
 Both ports and `public_url` are read from `config.toml` with `tomllib`, never copied into the script, since a second copy of the port is a copy that will one day disagree with the one the server binds.
 `start` warns when `public_url` differs from the address the funnel just published, which is the one setup mistake that survives a successful start and only shows up as a QR code nobody can open.
@@ -202,7 +232,8 @@ Both addresses are read back out of the log rather than built here, because each
 
 ### Finding the server to stop
 
-`server.py` writes `transept.pid` in the directory it starts in, once both ports are bound, and removes the file on the way out.
+`server.py` and `sender.py` write `transept.pid` in the directory they start in, once their ports are bound, and remove the file on the way out.
+`write_pid_file` and `remove_pid_file` are in `pipeline.py` so both write the same record, and the record says which one wrote it, since a sender binds only the operator port and `status` has different things to report for each.
 The pid file replaced a search through `pgrep`, `ps`, and `/proc/<pid>/cwd` that only Linux could answer: macOS has no `/proc`, and Windows has no per-process working directory to ask about at all.
 Writing it from the server rather than from the script keeps what that search was for, since the copy somebody started by hand out of this directory, in a terminal they have since closed, writes the same file.
 
@@ -284,7 +315,7 @@ The same silence reaches the operator page as `no_audio_for`, read off the captu
 
 The 48 kHz fallback averages groups of three samples rather than taking every third one, because plain decimation would alias everything above 8 kHz back into the speech band.
 
-`do_start` runs the server with `-u`.
+`launch` runs the server or the sender with `-u`.
 Python block buffers stdout when it is a file rather than a terminal, and both addresses with their tokens are printed once at startup, so without `-u` the log file stays empty until the server exits, which is exactly when those addresses stop being worth having.
 `start` reads them back out of that log, and `status` does too, so the buffering is not a cosmetic problem but the difference between having an address for the room and not.
 
@@ -292,9 +323,9 @@ Python block buffers stdout when it is a file rather than a terminal, and both a
 A server left from a previous meeting holds both ports, and by then there is rarely a terminal left to press Ctrl-C in, so refusing would send a volunteer hunting for a process five minutes before the meeting.
 Clearing first also means anything still holding either port afterwards is genuinely not Transept, which is the one case worth stopping for and what the `listening` check before the launch reports.
 
-`transept.log` and `transept.pid` sit beside the code rather than in `/tmp`.
+`transept.log` and `transept.pid` sit in `local/` rather than in `/tmp`.
 Windows has no `/tmp`, and two checkouts on one machine should not share a log that carries this run's tokens or a record of which process to signal.
-`transept.py` anchors both to its own directory and starts `server.py` there, and `server.py` writes the record into whatever directory it starts in.
+`transept.py` anchors both to `local/` beside `src/` and starts the program there, and the program writes the record into whatever directory it starts in.
 
 `transept stop` closes the funnel with `tailscale funnel reset` rather than naming the port.
 The per-port `tailscale funnel 8080 off` form was removed, and current versions answer it with "the CLI for serve and funnel has changed" and a nonzero exit, which when stopping means a meeting's address stays open to the internet afterwards.
@@ -354,7 +385,7 @@ Settings live in `config.toml`, resolved by the `SETTINGS` table in `pipeline.py
 Adding a setting means adding one row there, then naming it in the `add_settings_arguments` call of whichever entry points should expose it as a flag.
 `--config` is repeatable on every entry point and `load_config` merges the files left to right, key by key inside a section rather than section by section, which is how a hosted room reads the tuning its server shares and then the file naming only its own ports, tokens, and name; a room that named a port would otherwise lose the shared `[server] host` beside it.
 A missing file is skipped rather than refused, because the usual run names one file that may not exist yet.
-`SETTINGS`, `ARGUMENT_HELP`, and `config.example.toml` are in one order, section for section and key for key, because adding a setting means reading them side by side; `selftest.py` compares the first and the last and fails on drift.
+`SETTINGS`, `ARGUMENT_HELP`, and `examples/config.example.toml` are in one order, section for section and key for key, because adding a setting means reading them side by side; `selftest.py` compares the first and the last and fails on drift.
 The sections follow the path a sentence takes: `[audio]` in, `[recognition]`, `[segmentation]`, `[translation]`, then `[languages]`, the `[files]` that tune both models, `[session]`, and `[server]` out.
 `endpointing` is a Deepgram parameter rather than a property of the sound card, so it sits in `[recognition]` beside the model it is sent with.
 Every argparse default is `None` so `resolve` can distinguish an absent flag from one that happens to match the default.
@@ -389,7 +420,7 @@ One sentence per line in Markdown files, so diffs isolate the sentence that chan
 `selftest.py` is the whole suite, and it needs no keys, no audio device, and no network.
 The suite uses no test framework, only the standard library, and exits non-zero if anything fails.
 Run it after any change to the pipeline, the sinks, or the routes.
-`python3 selftest.py <section>` runs one of the six sections named under Commands.
+`python3 tests/selftest.py <section>` runs one of the six sections named under Commands.
 There is no `sender` section: what the sender decides on its own is checked in `session`, and what it and a real server have to agree on is checked in `server`, where a server is already being booted and the sender's status can be compared against a real `Session.status()` rather than against a copy of its own table.
 The `script` section needs no funnel and starts no server: what it checks is the reasoning `transept.py` does on its own, above all that a stale record is never mistaken for a running server.
 The `server` section runs `server.py` in a directory of its own, because a selftest that overwrote the pid file of a real server would leave a running meeting with nothing able to stop it.
@@ -411,7 +442,7 @@ After adding a check for a fix, revert the fix and confirm the check fails.
 
 What `selftest.py` cannot tell you is whether the subtitles are any good.
 Recognition accuracy is decided by the microphone feed and can only be judged in the actual room, and translation quality needs a native speaker and `review.py`.
-Latency claims should come from an actual run: `python3 pipeline.py --no-translate` tags each line with how far behind real time it arrived, and a full `pipeline.py` or `review.py` run prints translation median and p95 on exit.
+Latency claims should come from an actual run: `python3 ../src/pipeline.py --no-translate` from `local/` tags each line with how far behind real time it arrived, and a full `pipeline.py` or `review.py` run prints translation median and p95 on exit.
 
 ## Known limits
 
