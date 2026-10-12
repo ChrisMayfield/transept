@@ -88,6 +88,10 @@ SETTINGS = [
 
     ("asr_model", "recognition", "model", str, "nova-3"),
     ("endpointing", "recognition", "endpointing", int, 400),
+    # On by default, because a pause long enough for endpointing is rare in
+    # a room: on the second field test most fragments ended on the
+    # recognizer's own clock, four seconds or more after their first word.
+    ("early_finalize", "recognition", "early_finalize", bool, True),
 
     ("ceiling", "segmentation", "ceiling", float, 5.0),
     ("gap", "segmentation", "gap", float, 0.6),
@@ -320,6 +324,10 @@ class Segmenter:
         # the Hub and the reader page revise the opening lines of the meeting
         # instead of publishing the new ones.
         self.seq = start_seq
+
+    def held_words(self):
+        """Words in the buffer, waiting for the rest of their sentence."""
+        return sum(len(part.split()) for part in self.parts)
 
     def add(self, text, speech_final, start, audio_end, confidence=None):
         """Feed one finalized fragment. Returns a list of units to emit.
@@ -679,7 +687,10 @@ def build_asr_url(settings, keyterms, encoding="pcm"):
             ("channels", str(CHANNELS)),
         ]
     params += [
-        ("interim_results", "false"),
+        # Guesses only when they are used to finish early, since nothing
+        # else reads them.
+        ("interim_results",
+         "true" if settings.get("early_finalize") else "false"),
         ("smart_format", "true"),
         ("punctuate", "true"),
         ("endpointing", str(settings["endpointing"])),
@@ -1222,6 +1233,8 @@ ARGUMENT_HELP = {
     "encoding": "opus or pcm on the way to the recognizer",
     "asr_model": "Deepgram model name",
     "endpointing": "milliseconds of silence that ends an utterance",
+    "early_finalize": "ask the recognizer to finish as soon as its running "
+                      "guess ends a sentence",
     "ceiling": "seconds to hold fragments before forcing a sentence",
     "gap": "seconds of silence that closes the buffered sentence",
     "min_words": "fewest words in a line split out of a longer passage",
@@ -1410,9 +1423,52 @@ async def pump_audio(source, socket, stop=None):
             pass
 
 
-async def listen(socket, segmenter, translator, sink, queue):
-    """Read ASR results, segment them, and launch translations."""
+# Seconds of silence after a guess's last word before a sentence it ends
+# is believed. A Finalize closes all the audio sent so far, so asked while
+# the next word is already arriving it cuts that word in half: on a live
+# test "after" came back as "F". Real sentence ends there left 0.23 to 0.31
+# seconds, and most guesses taken mid-speech less than 0.2.
+FINALIZE_QUIET = 0.2
+
+
+def ends_sentence(guess, held, min_words, quiet=FINALIZE_QUIET):
+    """Whether a running guess is worth finishing now.
+
+    A guess ending a sentence, followed by quiet seconds of silence, with
+    enough words behind it counting what the segmenter already holds,
+    since "Right?" on its own is not a line and asking for it would only
+    cut the recognizer's context short.
+    """
+    if quiet < FINALIZE_QUIET or not TERMINAL_PUNCTUATION.search(guess):
+        return False
+    return held + len(guess.split()) >= min_words
+
+
+def trailing_quiet(payload):
+    """Seconds between a result's last word and the end of its audio."""
+    alternatives = payload.get("channel", {}).get("alternatives", [])
+    words = alternatives[0].get("words") if alternatives else None
+    if not words:
+        return 0.0
+    return (payload.get("start", 0.0) + payload.get("duration", 0.0)
+            - words[-1].get("end", 0.0))
+
+
+async def listen(socket, segmenter, translator, sink, queue,
+                 finalize=False):
+    """Read ASR results, segment them, and launch translations.
+
+    With finalize, the recognizer's running guesses decide when to ask it
+    to finish. Left alone it finalizes on a pause of endpointing or on its
+    own clock, and in a room the pause seldom comes, so a sentence's first
+    word waited four seconds or more for the rest of its fragment. A guess
+    that ends a sentence is the moment the words are all there, and a
+    Finalize hands them over then. The guesses themselves are never shown.
+    """
     context = deque(maxlen=CONTEXT_UNITS)
+    # A Finalize is sent once per stretch: the guesses keep arriving until
+    # the finished result does, and each would otherwise ask again.
+    asked = False
 
     async def emit(taken):
         seq, text, reason, audio_end, confidence = taken
@@ -1440,12 +1496,21 @@ async def listen(socket, segmenter, translator, sink, queue):
             if isinstance(message, bytes):
                 continue
             payload = json.loads(message)
-            if payload.get("type") != "Results" or not payload.get("is_final"):
+            if payload.get("type") != "Results":
                 continue
             alternatives = payload.get("channel", {}).get("alternatives", [])
+            text = (alternatives[0].get("transcript", "").strip()
+                    if alternatives else "")
+            if not payload.get("is_final"):
+                if finalize and not asked and ends_sentence(
+                        text, segmenter.held_words(), segmenter.min_words,
+                        trailing_quiet(payload)):
+                    asked = True
+                    await socket.send(json.dumps({"type": "Finalize"}))
+                continue
+            asked = False
             if not alternatives:
                 continue
-            text = alternatives[0].get("transcript", "").strip()
             # Counted before an empty one is skipped, because a recognizer
             # answering with nothing is what tells a room it cannot hear
             # from a recognizer that is not answering at all.
@@ -1455,9 +1520,16 @@ async def listen(socket, segmenter, translator, sink, queue):
 
             start = payload.get("start", 0.0)
             audio_end = start + payload.get("duration", 0.0)
-            speech_final = payload.get("speech_final", False)
+            finalized = bool(payload.get("from_finalize"))
+            # The recognizer marks every answer to a Finalize as the end of
+            # speech, which it is not: the guess that asked may have ended a
+            # sentence the finished text runs on from, and the segmenter
+            # would close the line halfway through it.
+            speech_final = (payload.get("speech_final", False)
+                            and not finalized)
             confidence = alternatives[0].get("confidence")
-            sink.fragment(text, start, audio_end, speech_final, confidence)
+            sink.fragment(text, start, audio_end, speech_final, confidence,
+                          finalized)
             for taken in segmenter.add(text, speech_final, start, audio_end,
                                        confidence):
                 await emit(taken)
@@ -1524,7 +1596,8 @@ class TerminalSink:
     def recognized(self, words):
         pass
 
-    def fragment(self, text, start, audio_end, speech_final, confidence):
+    def fragment(self, text, start, audio_end, speech_final, confidence,
+                 finalized=False):
         print(f"{self.dim}  . {text}{self.reset}")
 
     def unit(self, unit):
@@ -1634,7 +1707,8 @@ async def run(args, settings, keys):
         ) as socket:
             pump = asyncio.create_task(pump_audio(source, socket, stop))
             reader = asyncio.create_task(
-                listen(socket, segmenter, translator, sink, queue))
+                listen(socket, segmenter, translator, sink, queue,
+                       settings["early_finalize"]))
             writer = asyncio.create_task(
                 publish(queue, sink, settings["hold"]))
             await stop.wait()
@@ -1684,7 +1758,7 @@ def main():
                         help="audio input device name; see --list-devices")
     add_settings_arguments(parser, [
         "capture", "encoding",
-        "asr_model", "endpointing",
+        "asr_model", "endpointing", "early_finalize",
         "ceiling", "gap", "min_words",
         "model", "reasoning_effort", "correct_english", "max_tokens",
         "timeout", "hold",

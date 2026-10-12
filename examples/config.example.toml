@@ -61,6 +61,10 @@ model = "nova-3"
 # Milliseconds of silence that ends an utterance. Lower is snappier but
 # clips people who pause mid-sentence.
 endpointing = 400
+# Ask the recognizer to finish a piece as soon as its running guess ends a
+# sentence, rather than waiting for a pause or its own clock, which in a
+# room is usually four seconds or more. Turn off to compare.
+early_finalize = true
 
 [segmentation]
 # Seconds a half-finished sentence waits before being translated anyway.

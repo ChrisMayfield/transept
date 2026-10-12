@@ -344,7 +344,7 @@ class Session:
             int(bool(config["correct_english"])),
             json.dumps({name: config[name] for name in
                         ("ceiling", "gap", "min_words", "hold",
-                         "endpointing", "grace",
+                         "endpointing", "early_finalize", "grace",
                          "timeout", "max_tokens", "reasoning_effort")}),
             # The glossary and keyterms verbatim, not a path and not a
             # digest. Both files are gitignored and both get edited between
@@ -624,7 +624,7 @@ class Session:
                     asyncio.create_task(pump_audio(source, socket)),
                     asyncio.create_task(
                         listen(socket, segmenter, self.translator, self,
-                               queue)),
+                               queue, config["early_finalize"])),
                     asyncio.create_task(publish(queue, self, config["hold"])),
                 ]
                 try:
@@ -691,7 +691,8 @@ class Session:
         else:
             self.last_words = time.monotonic()
 
-    def fragment(self, text, start, audio_end, speech_final, confidence):
+    def fragment(self, text, start, audio_end, speech_final, confidence,
+                 finalized=False):
         """Raw fragments are half sentences. Only whole ones reach a phone.
 
         They are recorded, though, with when each arrived, because a
@@ -702,7 +703,7 @@ class Session:
             self._record("fragment", run=self.run, at=time.time(),
                          start=start, audio_end=audio_end,
                          speech_final=speech_final, confidence=confidence,
-                         text=text)
+                         finalized=finalized, text=text)
 
     def unit(self, unit):
         """Publish the English line and say which outputs are worth buying."""
@@ -1373,7 +1374,7 @@ def main():
                              "then a room's own")
     add_settings_arguments(parser, [
         "capture", "encoding",
-        "asr_model", "endpointing",
+        "asr_model", "endpointing", "early_finalize",
         "ceiling", "gap", "min_words",
         "model", "reasoning_effort", "correct_english", "max_tokens",
         "timeout", "hold",

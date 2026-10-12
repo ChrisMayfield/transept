@@ -95,15 +95,23 @@ class Checks:
 # -- fakes -------------------------------------------------------------------
 
 
-def asr_result(text, speech_final, start, duration):
-    """One finalized result, shaped the way Deepgram sends it."""
+def asr_result(text, speech_final, start, duration, is_final=True,
+               from_finalize=False, quiet=0.3):
+    """One result, shaped the way Deepgram sends it, finalized by default.
+
+    Its last word ends quiet seconds before its audio does.
+    """
+    words = [{"word": word, "end": start + duration - quiet}
+             for word in text.split()[-1:]]
     return json.dumps({
         "type": "Results",
-        "is_final": True,
+        "is_final": is_final,
         "speech_final": speech_final,
+        "from_finalize": from_finalize,
         "start": start,
         "duration": duration,
-        "channel": {"alternatives": [{"transcript": text}]},
+        "channel": {"alternatives": [{"transcript": text,
+                                      "words": words}]},
     })
 
 
@@ -146,6 +154,7 @@ class FakeSocket:
         self.stay_open = stay_open
         self.audio_chunks = 0
         self.keepalives = 0
+        self.finalizes = 0
         self.close_stream_sent = False
 
     async def __aenter__(self):
@@ -161,6 +170,8 @@ class FakeSocket:
             # Counted apart from audio, because the whole point of it is
             # that it holds the socket open without being audio.
             self.keepalives += 1
+        elif isinstance(data, str) and "Finalize" in data:
+            self.finalizes += 1
         else:
             self.audio_chunks += 1
 
@@ -274,7 +285,8 @@ def fake_config(**overrides):
         "correct_english": True, "ceiling": 4.0, "gap": 0.6, "min_words": 6,
         "hold": 8.0,
         "capture": "auto", "encoding": "pcm", "asr_model": "nova-3",
-        "endpointing": 400, "keyterms": ["Kalema"], "glossary": "",
+        "endpointing": 400, "early_finalize": True,
+        "keyterms": ["Kalema"], "glossary": "",
         "model": "fake-model", "max_tokens": 2000, "timeout": 15.0,
         "reasoning_effort": "low", "idle_stop": 0, "public_url": "",
         "reader_url": "", "max_languages": 0, "room": "",
@@ -309,6 +321,105 @@ async def drive(sink, translator, hold=5.0):
 
 
 # -- the shared loops, against both sinks ------------------------------------
+
+
+class FragmentSink:
+    """Keeps what listen hands a sink, and asks for no translations."""
+
+    def __init__(self):
+        self.results = []
+        self.fragments = []
+        self.units = []
+
+    def recognized(self, words):
+        self.results.append(words)
+
+    def fragment(self, text, start, audio_end, speech_final, confidence,
+                 finalized=False):
+        self.fragments.append((text, finalized))
+
+    def unit(self, unit):
+        self.units.append(unit.text)
+        return []
+
+
+async def listen_to(messages, finalize):
+    """Run listen alone over these messages; the sink and the socket."""
+    socket = FakeSocket(messages)
+    sink = FragmentSink()
+    await pipeline.listen(socket, pipeline.Segmenter(99, 0.6), None, sink,
+                          asyncio.Queue(), finalize)
+    return sink, socket
+
+
+async def check_early_finalize(checks):
+    """Guesses decide when to finish, and never become text themselves.
+
+    On the second field test most pieces ended on the recognizer's own
+    clock, four seconds or more after their first word, because a pause
+    long enough for endpointing is rare in a room.
+    """
+    checks.section("Asking the recognizer to finish a sentence")
+    guesses = [
+        asr_result("and so we", False, 0.0, 0.8, is_final=False),
+        asr_result("and so we came to the chapel.", False, 0.0, 2.0,
+                   is_final=False),
+        # The next guess, before the finished result answers the request,
+        # which ends a sentence too and must not ask a second time.
+        asr_result("and so we came to the chapel today.", False, 0.0, 2.3,
+                   is_final=False),
+        asr_result("and so we came to the chapel.", False, 0.0, 2.0,
+                   from_finalize=True),
+        asr_result("Right?", False, 2.4, 0.4, is_final=False),
+    ]
+    sink, socket = await listen_to(guesses, True)
+    checks.check("a guess ending a sentence asks the recognizer to finish",
+                 socket.finalizes >= 1, socket.finalizes)
+    checks.check("once, not again for every guess before the answer",
+                 socket.finalizes == 1, socket.finalizes)
+    checks.check("guesses never become fragments or lines",
+                 sink.fragments == [("and so we came to the chapel.", True)]
+                 and sink.units == ["and so we came to the chapel."],
+                 (sink.fragments, sink.units))
+    checks.check("and are not counted as results the recognizer returned",
+                 sink.results == [True], sink.results)
+    sink, socket = await listen_to([
+        asr_result("and so we came to the chapel.", False, 0.0, 2.0,
+                   is_final=False, quiet=0.05)], True)
+    checks.check("nor while the next word may already be arriving",
+                 socket.finalizes == 0, socket.finalizes)
+    checks.check("a short sentence on its own is not worth finishing",
+                 not pipeline.ends_sentence("Right?", 0, 6))
+    checks.check("but is when the segmenter holds the rest of it",
+                 pipeline.ends_sentence("Right?", 5, 6))
+    checks.check("a guess still in its sentence is not finished",
+                 not pipeline.ends_sentence(
+                     "and so we came to the chapel and", 0, 6))
+    # What Deepgram sent on a live test: a Finalize answered with
+    # speech_final set, here on a piece that stops mid-sentence.
+    halfway = [
+        asr_result("We hope you feel at home. Our opening", True, 0.0, 2.0,
+                   from_finalize=True),
+        asr_result("hymn will be number two.", False, 2.0, 1.5),
+    ]
+    sink, socket = await listen_to(halfway, True)
+    checks.check("an answer to a Finalize is not taken for a pause",
+                 sink.units == ["We hope you feel at home.",
+                                "Our opening hymn will be number two."],
+                 sink.units)
+    sink, socket = await listen_to(guesses, False)
+    checks.check("with early_finalize off nothing is asked",
+                 socket.finalizes == 0, socket.finalizes)
+    checks.check("and the guesses are still ignored",
+                 [text for text, _ in sink.fragments]
+                 == ["and so we came to the chapel."], sink.fragments)
+
+    settings = {"asr_model": "nova-3", "endpointing": 400}
+    checks.check("guesses are requested only when they are used",
+                 "interim_results=false"
+                 in pipeline.build_asr_url(settings, [], "pcm")
+                 and "interim_results=true" in pipeline.build_asr_url(
+                     dict(settings, early_finalize=True), [], "pcm"))
 
 
 async def check_stream_clock(checks):
@@ -580,6 +691,7 @@ async def check_pipeline(checks):
 
     check_sentence_splitting(checks)
     await check_stream_clock(checks)
+    await check_early_finalize(checks)
 
     checks.section("The same loops, publishing to a Hub, one French reader")
     translator = FakeTranslator()
@@ -1176,8 +1288,8 @@ async def check_session(checks):
                      "sample_rate=16000" in url, reached)
         checks.check("the Deepgram URL carries the key term",
                      "keyterm=Kalema" in url, reached)
-        checks.check("interim results are off",
-                     "interim_results=false" in url, reached)
+        checks.check("guesses are requested, to finish sentences early",
+                     "interim_results=true" in url, reached)
 
         english = [entry["text"] for entry in hub.buffers["English"]]
         french = [entry["text"] for entry in hub.buffers["French"]]
@@ -2858,6 +2970,8 @@ async def check_store(checks):
     session.translator = translator
     checks.check("the recorder opened", session.recording(), session.error)
     await drive(session, translator)
+    # One piece finished on request, as early_finalize asks for one.
+    session.fragment("Let us pray.", 8.0, 9.0, False, 0.9, True)
     # What a run's watcher writes as each window closes: the recognizer
     # answered four times, the meter heard five seconds at -6 dBFS, and the
     # clock moved on from where the last window left it.
@@ -2909,8 +3023,12 @@ async def check_store(checks):
     checks.check("every fragment the recognizer sent was kept, in order",
                  [row["text"] for row in fragments]
                  == [json.loads(message)["channel"]["alternatives"][0]
-                     ["transcript"] for message in FRAGMENTS],
+                     ["transcript"] for message in FRAGMENTS]
+                 + ["Let us pray."],
                  [row["text"] for row in fragments])
+    checks.check("noting which were finished on request",
+                 [row["finalized"] for row in fragments] == [0, 0, 0, 0, 1],
+                 [row["finalized"] for row in fragments])
     checks.check("with its timing, so the meeting can be replayed",
                  [(row["start"], row["audio_end"], row["speech_final"])
                   for row in fragments[2:3]] == [(5.0, 6.5, 1)]
@@ -2949,6 +3067,12 @@ async def check_store(checks):
                  and abs(stretches[0][1] - stretches[0][0] - 30) < 0.5,
                  [(start, end, len(rows)) for start, end, rows in stretches])
     text = report.read_text(encoding="utf-8")
+    checks.check("the report says what ended the recognizer's pieces",
+                 "5 pieces, early_finalize on" in text
+                 and "finished on request at a sentence end: 1" in text
+                 and "ended by a pause: 1" in text
+                 and "ended on the recognizer's own clock: 3" in text,
+                 text[text.find("## Recognizer"):][:400])
     checks.check("and the report says it was a quiet feed, not lost audio",
                  "## Stretches with no words" in text
                  and "30s, level -60 dBFS" in text
@@ -2995,6 +3119,14 @@ async def check_store(checks):
         " at REAL, audio_end REAL, lag REAL, confidence REAL, heard TEXT,"
         " english TEXT, reason TEXT, latency REAL, outcome TEXT,"
         " requested TEXT, UNIQUE (session_id, seq))")
+    # And fragments from before a piece could be finished on request.
+    earlier.execute(
+        "CREATE TABLE fragments (id INTEGER PRIMARY KEY,"
+        " session_id INTEGER NOT NULL, run INTEGER, at REAL, start REAL,"
+        " audio_end REAL, speech_final INTEGER, confidence REAL, text TEXT)")
+    earlier.execute(
+        "INSERT INTO fragments (session_id, start, audio_end, speech_final,"
+        " text) VALUES (1, 0.0, 4.0, 0, 'brothers and sisters')")
     # The rest of the file as it is today, which is what a database
     # recorded by an earlier version actually looks like.
     earlier.executescript(record.SCHEMA)
@@ -3007,9 +3139,12 @@ async def check_store(checks):
     old_session = record.resolve_session(handle, "last")
     checks.check("reading it back says no room rather than raising",
                  record.room_of(old_session) == "", dict(old_session))
-    record.write_report(handle, old_session,
-                        str(Path(tempfile.mkdtemp()) / "earlier.md"))
+    earlier_report = Path(tempfile.mkdtemp()) / "earlier.md"
+    record.write_report(handle, old_session, str(earlier_report))
     handle.close()
+    checks.check("and its pieces are counted as never finished on request",
+                 "finished on request at a sentence end: 0"
+                 in earlier_report.read_text(encoding="utf-8"))
 
     handle = record.connect(str(path))
     columns = [row[1] for row in handle.execute("PRAGMA table_info(sessions)")]
@@ -3019,6 +3154,10 @@ async def check_store(checks):
     checks.check("and the token columns on its lines",
                  all(column in columns for column in record.TOKEN_COLUMNS),
                  columns)
+    columns = [row[1] for row in
+               handle.execute("PRAGMA table_info(fragments)")]
+    checks.check("and the finished-on-request column on its fragments",
+                 "finalized" in columns, columns)
     kept = [row[0] for row in
             handle.execute("SELECT device FROM sessions")]
     checks.check("and the session already in the file is still there",

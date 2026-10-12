@@ -267,7 +267,11 @@ Nothing is split off shorter than `min_words`, so "Right?" stays with what follo
 The ceiling cuts at the last comma rather than wherever the buffer stopped, because a line ending on "and" or "the" is the front half of a clause, and a language that puts its verb last cannot translate that half without guessing at the rest.
 A comma with fewer than `min_words` before it is not a cut, since "you know," is not a clause.
 
-Interim recognition results are disabled, because finalized results arrive 0.2 to 0.3 seconds behind the speaker and interim hypotheses add flicker for nothing.
+Interim recognition results are requested but never shown: they decide when to send `Finalize`, and nothing else reads them.
+Left alone the recognizer finalizes on a pause of `endpointing` or on its own clock, and on the second field test most pieces ended on the clock, four seconds or more after their first word.
+`listen` sends `Finalize` once a guess ends a sentence with `FINALIZE_QUIET` seconds of silence after its last word, since `Finalize` closes all the audio sent so far, and asked while the next word is arriving it cuts that word in half.
+Its answer comes back marked `speech_final`, which `listen` clears, because the finished text can run on past the sentence the guess ended, and the segmenter would close the line there.
+`early_finalize = false` restores the old behavior, and `interim_results` follows it, so a room that turns it off gets no guesses at all.
 
 A local device is wrapped in `Stamped` before it is wrapped in the encoder, and lag is read from its `StreamClock` rather than from when the run began.
 The clock counts audio as it comes off the device, which is also what the recognizer's timestamps count, so a line's lag is how long ago its words were captured.

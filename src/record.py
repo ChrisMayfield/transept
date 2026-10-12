@@ -68,7 +68,10 @@ CREATE TABLE IF NOT EXISTS fragments (
   id INTEGER PRIMARY KEY,
   session_id INTEGER NOT NULL, run INTEGER,
   at REAL, start REAL, audio_end REAL,
-  speech_final INTEGER, confidence REAL, text TEXT);
+  speech_final INTEGER, confidence REAL, text TEXT,
+  -- 1 when a Finalize sent on a guess ending a sentence closed it, last
+  -- for the reason room is.
+  finalized INTEGER);
 
 -- One row per few seconds of a run, saying what the audio did on its way
 -- to the recognizer: seconds captured and how loud (rms and peak in dBFS,
@@ -132,6 +135,10 @@ def migrate(handle):
     for column in TOKEN_COLUMNS:
         if column not in present:
             handle.execute(f"ALTER TABLE lines ADD COLUMN {column} INTEGER")
+    present = {row[1] for row in
+               handle.execute("PRAGMA table_info(fragments)")}
+    if "finalized" not in present:
+        handle.execute("ALTER TABLE fragments ADD COLUMN finalized INTEGER")
 
 
 class Recorder:
@@ -277,11 +284,12 @@ class Recorder:
         elif kind == "fragment":
             self.handle.execute(
                 "INSERT INTO fragments (session_id, run, at, start,"
-                " audio_end, speech_final, confidence, text)"
-                " VALUES (?,?,?,?,?,?,?,?)",
+                " audio_end, speech_final, confidence, text, finalized)"
+                " VALUES (?,?,?,?,?,?,?,?,?)",
                 (self.session_id, row["run"], row["at"], row["start"],
                  row["audio_end"], int(bool(row["speech_final"])),
-                 row["confidence"], row["text"]))
+                 row["confidence"], row["text"],
+                 int(bool(row.get("finalized")))))
         elif kind == "audio":
             self.handle.execute(
                 "INSERT INTO audio (session_id, run, at, captured, received,"
@@ -454,6 +462,7 @@ def write_report(handle, session, out):
         _corrections(page, lines)
         _closings(page, lines)
         _latency(page, lines)
+        _pieces(page, handle, session)
         _silences(page, handle, session, lines)
         _tokens(page, lines)
         _fallbacks(page, grouped)
@@ -569,6 +578,45 @@ def _latency(page, lines):
             if line["latency"]:
                 page.write(f"- {line['latency']:.1f}s: {line['heard']}\n")
         page.write("\n")
+
+
+def _pieces(page, handle, session):
+    """How long the recognizer took to hand words over, and why it did.
+
+    A word waits inside the recognizer until its whole piece is finished,
+    so the length of a piece is a floor on the lag of its first word, and
+    what ended the pieces says whether early_finalize is doing its work.
+    """
+    # A database from before the column is read as it is, not migrated,
+    # and none of its pieces were asked to finish.
+    columns = {row[1] for row in
+               handle.execute("PRAGMA table_info(fragments)")}
+    finalized = "finalized" if "finalized" in columns else "0"
+    rows = handle.execute(
+        f"SELECT audio_end - start AS length, speech_final,"
+        f" {finalized} AS finalized"
+        f" FROM fragments WHERE session_id = ? AND text <> ''",
+        (session["id"],)).fetchall()
+    if not rows:
+        return
+    settings = json.loads(session["settings"] or "{}")
+    page.write("## Recognizer pieces\n\n")
+    endings = {"finished on request at a sentence end": 0,
+               "ended by a pause": 0, "ended on the recognizer's own clock": 0}
+    for row in rows:
+        if row["finalized"]:
+            endings["finished on request at a sentence end"] += 1
+        elif row["speech_final"]:
+            endings["ended by a pause"] += 1
+        else:
+            endings["ended on the recognizer's own clock"] += 1
+    page.write(f"{len(rows)} pieces, early_finalize "
+               f"{'on' if settings.get('early_finalize') else 'off'}. "
+               f"Length, which the first word of each waited out: "
+               f"{latency_summary([row['length'] for row in rows])}.\n\n")
+    for ending, count in endings.items():
+        page.write(f"- {ending}: {count}\n")
+    page.write("\n")
 
 
 # Seconds of audio each row of the audio table describes, here because both

@@ -377,6 +377,10 @@ Set it to `pcm` if a real run shows recognition getting worse, which would be a 
 `endpointing` (400 milliseconds) is how much silence ends an utterance for the speech recognizer.
 Lower is snappier but clips people who pause in the middle of a sentence.
 
+`early_finalize` (on) asks the recognizer to finish a piece as soon as its running guess ends a sentence and the speaker has paused for a fifth of a second.
+Left to itself the recognizer rarely hears a long enough pause in a room, and waits four seconds or more before handing over words.
+The report's "Recognizer pieces" section says how many pieces it finished this way; turn it off if lines start splitting in the middle of sentences.
+
 `ceiling` (5 seconds) is how long a half-finished sentence waits before being translated anyway.
 When it runs out, the sentence is cut at its last comma if there is one, and the rest waits for its own ending.
 The recognizer sends speech in pieces about four seconds long, so a ceiling at or below that cuts many sentences just before the rest of them arrives.
