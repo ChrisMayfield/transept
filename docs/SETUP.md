@@ -484,6 +484,11 @@ The microphone has stopped delivering anything at all, which is different from a
 A laptop whose screen locks or whose lid closes can mute its microphone without any error, so set the laptop never to lock or sleep during a meeting, and leave the lid open.
 The session holds its connection through the silence and carries on when the audio comes back.
 
+**The operator page says there have been no words for a while.**
+The bar under the session state is the feed's level over the last second, and the note under it says which of two things is happening.
+"The feed is quiet" means the microphone is delivering audio with nobody speaking into it, which in a class is usually somebody commenting from their seat; a hand microphone, or the teacher repeating the comment, is the fix.
+"Sound but no words" during a hymn is expected, since the recognizer does not transcribe singing; at any other time it means the feed is loud enough but the recognizer cannot make out speech in it, so check what the feed is carrying.
+
 **Phones cannot reach the address.**
 Check `./transept status`, or `tailscale funnel status`, to see whether the tunnel is actually open.
 Remember that the address only works with the token on the end, so hand out the whole line or the QR code rather than just the hostname.

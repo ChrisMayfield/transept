@@ -262,6 +262,9 @@ class Session:
         # What the recognizer finalized in the current audio window, and
         # how much of it held no words at all.
         self.heard = {"results": 0, "empty": 0}
+        # When the recognizer last returned words, which is what tells a
+        # feed that is loud and not understood from one that is working.
+        self.last_words = None
         self.stats = {"units": 0, "translated": 0, "failures": 0,
                       "timeouts": 0, "reconnects": 0, "corrections": 0,
                       "skipped": 0, "capped": 0, "latencies": []}
@@ -290,6 +293,7 @@ class Session:
         self.state = "starting"
         self.started_at = time.time()
         self.last_activity = time.monotonic()
+        self.last_words = self.last_activity
         await self._open_recorder()
         self.translator = Translator(
             self.config["llm_base"], self.config["llm_key"],
@@ -502,6 +506,10 @@ class Session:
                        if latencies else None),
             "recent": list(self.hub.buffers["English"])[-6:],
             "no_audio_for": self.no_audio_for(),
+            "level": self.level(),
+            "no_words_for": (time.monotonic() - self.last_words
+                             if self.last_words and self.state == "running"
+                             else 0),
             # What this server actually loaded, which is not always what
             # config.toml names: a path that finds no file loads nothing.
             "glossary": self.config.get("glossary_lines", 0),
@@ -522,6 +530,18 @@ class Session:
         if self.state != "running" or clock is None:
             return 0
         return clock.silent_for()
+
+    def level(self):
+        """The feed's level over the last second in dBFS, or None.
+
+        Read off this run's meter, which is filled where the microphone is
+        on this machine and from the sender's reports on a hosted server,
+        whose sender's page shows its own meter instead.
+        """
+        meter = getattr(self.run_source, "meter", None)
+        if self.state != "running" or meter is None:
+            return None
+        return meter.current()
 
     # -- the pipeline ------------------------------------------------------
 
@@ -668,6 +688,8 @@ class Session:
         self.heard["results"] += 1
         if not words:
             self.heard["empty"] += 1
+        else:
+            self.last_words = time.monotonic()
 
     def fragment(self, text, start, audio_end, speech_final, confidence):
         """Raw fragments are half sentences. Only whole ones reach a phone.

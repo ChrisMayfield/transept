@@ -92,7 +92,8 @@ def blank_status():
         "reconnects": 0, "corrections": 0, "reader_url": "", "idle_stop": 0,
         "quiet_for": 0, "skipped": 0, "capped": 0, "recording": False,
         "dropped": 0, "languages": [], "english_listeners": 0,
-        "median": None, "recent": [], "no_audio_for": 0,
+        "median": None, "recent": [], "no_audio_for": 0, "level": None,
+        "no_words_for": 0,
         # None rather than 0: nothing is known until a server says, and a
         # zero would warn of a missing glossary the server may well have.
         "glossary": None, "keyterms": None,
@@ -217,6 +218,10 @@ class Remote:
         # has gone quiet in the way a muted one does.
         clock = getattr(self.source, "clock", None)
         status["no_audio_for"] = clock.silent_for() if clock else 0
+        # The same for its level: the server's is a report from here a
+        # second or more old, and missing altogether from an older server.
+        meter = getattr(self.source, "meter", None)
+        status["level"] = meter.current() if meter else None
         return status
 
     # -- the microphone ----------------------------------------------------

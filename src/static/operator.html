@@ -62,7 +62,17 @@
 
   .note { font-size: .85rem; color: var(--quiet); margin: .5rem 0 0; }
   /* Not a quiet note. Somebody in the room has to be told about this. */
-  #recording, #noAudio, #files.missing { color: #8a5300; font-weight: 600; }
+  #recording, #noAudio, #noWords, #files.missing {
+    color: #8a5300; font-weight: 600;
+  }
+  .level { display: flex; align-items: center; gap: .6rem;
+           margin: .75rem 0 0; font-size: .85rem; color: var(--quiet); }
+  .level .bar { flex: 1; height: .5rem; background: var(--rule);
+                border-radius: 2px; overflow: hidden; }
+  .level .bar div { height: 100%; width: 0; background: var(--live); }
+  .level.quiet .bar div { background: #8a5300; }
+  #levelText { min-width: 4.5rem; text-align: right;
+               font-variant-numeric: tabular-nums; }
   .alert {
     margin: 1rem 0; padding: .8rem 1rem; border-left: 3px solid var(--halt);
     background: #fff; color: var(--halt); font-size: .9rem;
@@ -146,6 +156,12 @@
 <p class="note" id="recording" hidden></p>
 <p class="note" id="quiet"></p>
 <p class="note" id="noAudio"></p>
+<div class="level" id="level" hidden>
+  <span>Feed level</span>
+  <div class="bar"><div id="levelFill"></div></div>
+  <span id="levelText"></span>
+</div>
+<p class="note" id="noWords"></p>
 <p class="note" id="files"></p>
 
 <div style="margin-top:1.25rem">
@@ -275,6 +291,14 @@ function seconds(value) {
 // Seconds without a single sample before the page says so. Longer than a
 // blip, much shorter than the minute a room would spend wondering.
 const NO_AUDIO_WARNING = 5;
+// Below this the feed is quiet rather than carrying speech, the same line
+// record.py's QUIET_DB draws, so the page and the report agree.
+const QUIET_LEVEL = -50;
+// The bar runs from here to full scale; quieter than this is empty.
+const LEVEL_BOTTOM = -70;
+// Seconds of sound with no words before the page says so. A pause between
+// speakers is shorter, and a hymn is longer, which the wording allows for.
+const NO_WORDS_WARNING = 20;
 
 function render(status) {
   const recording = el("recording");
@@ -315,6 +339,34 @@ function render(status) {
         + ". Check that it is not muted and that this computer has not "
         + "locked or gone to sleep."
       : "";
+
+  // Only while there is a level to show: a feed that has stopped is the
+  // warning above, and a stopped session has no feed at all.
+  const running = status.state === "running";
+  const level = status.level;
+  const hasLevel = running && level != null && silent < NO_AUDIO_WARNING;
+  const wordless = hasLevel ? status.no_words_for || 0 : 0;
+  // A second's reading drops below the line in every pause for breath, so
+  // a quiet feed is only worth saying once the words have stopped too.
+  const quietFeed = wordless >= NO_WORDS_WARNING && level < QUIET_LEVEL;
+  el("level").hidden = !hasLevel;
+  el("level").className = "level" + (quietFeed ? " quiet" : "");
+  if (hasLevel) {
+    const share = (level - LEVEL_BOTTOM) / -LEVEL_BOTTOM;
+    el("levelFill").style.width =
+      Math.round(100 * Math.min(1, Math.max(0, share))) + "%";
+    el("levelText").textContent = Math.round(level) + " dB";
+  }
+
+  // Which of the two it is matters to the volunteer: a quiet feed is a
+  // speaker away from the microphone, and a loud one with no words is
+  // singing, or a feed the recognizer cannot make out.
+  el("noWords").textContent = wordless < NO_WORDS_WARNING ? ""
+    : quietFeed
+      ? "No words for " + seconds(wordless) + " and the feed is quiet. "
+        + "Is the person speaking at a microphone?"
+      : "Sound but no words for " + seconds(wordless)
+        + ". Expected during a hymn; otherwise check the feed.";
 
   // What the server loaded rather than what config.toml names, since a
   // path that finds no file loads nothing and says so nowhere else the

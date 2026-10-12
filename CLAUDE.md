@@ -276,6 +276,8 @@ It goes inside the encoder because a byte of PCM is a duration and a byte of Opu
 A remote source is wrapped in `Received`, whose clock counts audio as it reaches the server, by length for PCM and by Ogg granule positions for Opus, since the laptop's own clock cannot be read from here.
 That leaves out the hop from the laptop, and it is still what makes hosted lag a measurement: the run start it replaced was wrong after the first gap in the stream.
 The level meter rides on the same wrappers, filled from samples by `Stamped` and from the sender's `level` messages by `ControlRoom`, because past the encoder there are no samples to measure.
+The meter keeps its last second apart from the totals the recording takes every five seconds, and that second is the level on the operator page beside `no_words_for`, since a feed that is loud and not understood and one that is quiet look alike in the line count.
+A sender's page reads its own meter rather than the server's copy, for the same reason it reads its own clock for `no_audio_for`.
 
 `Hub.publish` revises an existing entry in place when the sequence number already exists.
 Revising in place is how a glossary-corrected English line replaces the raw one on phones already showing that line, and clients key on `seq`, so duplicates are replacements rather than new lines.

@@ -395,6 +395,22 @@ async def check_stream_clock(checks):
     checks.check("the capture wrapper measures what it reads",
                  stamped.meter.take()[0] == 0.1)
 
+    meter = pipeline.LevelMeter()
+    meter.add(array.array("h", [16384, -16384] * 4000).tobytes())
+    checks.check("the page has no level until a second has been heard",
+                 meter.current() is None, meter.current())
+    meter.add(array.array("h", [16384, -16384] * 4000).tobytes())
+    checks.check("and then shows that second", meter.current() == -6.0,
+                 meter.current())
+    meter.take()
+    checks.check("which the recording taking its totals leaves alone",
+                 meter.current() == -6.0, meter.current())
+    meter.merge(1.0, 0.01, 0.02)
+    checks.check("a sender's report is a second the page can show",
+                 meter.current() == -40.0, meter.current())
+    checks.check("and an old reading shows nothing rather than a level",
+                 meter.current(now=meter.live_at + 4.0) is None)
+
     checks.section("The server's own clock for a sender's audio")
     # Twenty milliseconds a page, the encoder's own page duration, after
     # the two pages that say what the stream is.
@@ -924,10 +940,34 @@ async def check_pipeline(checks):
     checks.check("the operator page is told how long the microphone has "
                  "been silent", 8.5 < session.status()["no_audio_for"] < 10,
                  session.status()["no_audio_for"])
+    session.run_source.meter = pipeline.LevelMeter()
+    session.run_source.meter.merge(1.0, 0.5, 0.5)
+    checks.check("the operator page is told the feed's level",
+                 session.status()["level"] == -6.0,
+                 session.status()["level"])
+    session.last_words = time.monotonic() - 30.0
+    checks.check("and how long since the recognizer returned words",
+                 29 < session.status()["no_words_for"] < 31,
+                 session.status()["no_words_for"])
+    session.recognized(False)
+    checks.check("which a result with no words does not reset",
+                 session.status()["no_words_for"] > 29,
+                 session.status()["no_words_for"])
+    session.recognized(True)
+    checks.check("and one with words does",
+                 session.status()["no_words_for"] < 1,
+                 session.status()["no_words_for"])
     session.state = "stopped"
     checks.check("and nothing once the session has stopped",
-                 session.status()["no_audio_for"] == 0,
-                 session.status()["no_audio_for"])
+                 session.status()["no_audio_for"] == 0
+                 and session.status()["level"] is None
+                 and session.status()["no_words_for"] == 0,
+                 session.status())
+    page = (ROOT / "src" / "static" / "operator.html").read_text()
+    found = re.search(r"const QUIET_LEVEL = (-?\d+);", page)
+    checks.check("the page calls a feed quiet where the report does",
+                 found and int(found.group(1)) == record.QUIET_DB,
+                 found and found.group(1))
 
     checks.section("What the recognizer is told it is being sent")
     settings = {"asr_model": "nova-3", "endpointing": 400}
@@ -1390,6 +1430,11 @@ async def check_sender_proxy(checks):
     checks.check("a sender reports its own microphone going silent",
                  remote.status()["no_audio_for"] > 11,
                  remote.status()["no_audio_for"])
+    remote.source.meter = pipeline.LevelMeter()
+    remote.source.meter.merge(1.0, 0.1, 0.1)
+    checks.check("and its own level rather than the server's",
+                 remote.status()["level"] == -20.0,
+                 remote.status()["level"])
     remote.source = None
     ok, message = remote.set_override("French", "on")
     checks.check("a language button with no socket is refused, not dropped",

@@ -1095,6 +1095,11 @@ class Received:
 # minus infinity and sixteen bits cannot say anything quieter anyway.
 LEVEL_FLOOR = -96.0
 FULL_SCALE = 32768.0
+# Seconds of audio in the reading the operator page shows, and how old
+# that reading may be before it says nothing. The page asks once a second,
+# so a shorter window would show whichever second it happened to land on.
+LIVE_WINDOW = 1.0
+LIVE_STALE = 3.0
 
 
 def decibels(value):
@@ -1111,6 +1116,10 @@ class LevelMeter:
     the whole time and nothing recognized, and nothing recorded could say
     whether those stretches were silent, quiet, or ordinary speech. RMS
     over a stretch says which; the peak says whether it was clipping.
+
+    The last second is kept apart for the operator page, because the
+    recording takes the running totals every five seconds and a page
+    reading those would see whatever was left since the last row.
     """
 
     def __init__(self):
@@ -1118,6 +1127,9 @@ class LevelMeter:
         self.samples = 0
         self.energy = 0.0
         self.peak = 0.0
+        self.window = [0, 0.0]
+        self.live = None
+        self.live_at = None
 
     def add(self, chunk):
         """Fold in one chunk of 16-bit PCM."""
@@ -1125,12 +1137,14 @@ class LevelMeter:
         samples.frombytes(chunk[:len(chunk) - len(chunk) % 2])
         if not samples:
             return
+        energy = sum(sample * sample for sample in samples) \
+            / (FULL_SCALE * FULL_SCALE)
         self.measured = True
         self.samples += len(samples)
-        self.energy += sum(sample * sample for sample in samples) \
-            / (FULL_SCALE * FULL_SCALE)
+        self.energy += energy
         self.peak = max(self.peak,
                         max(abs(min(samples)), max(samples)) / FULL_SCALE)
+        self._fold(len(samples), energy)
 
     def merge(self, seconds, rms, peak):
         """Fold in a stretch somebody else measured, as a sender does."""
@@ -1141,6 +1155,28 @@ class LevelMeter:
         self.samples += samples
         self.energy += rms * rms * samples
         self.peak = max(self.peak, peak)
+        self._fold(samples, rms * rms * samples)
+
+    def _fold(self, samples, energy, now=None):
+        self.window[0] += samples
+        self.window[1] += energy
+        if self.window[0] >= LIVE_WINDOW * SAMPLE_RATE:
+            self.live = math.sqrt(self.window[1] / self.window[0])
+            self.live_at = time.monotonic() if now is None else now
+            self.window = [0, 0.0]
+
+    def current(self, now=None):
+        """The last second's level in dBFS, or None if there is none.
+
+        None once it is old, since a microphone that stopped delivering
+        has no level, and the page says so separately.
+        """
+        if self.live_at is None:
+            return None
+        now = time.monotonic() if now is None else now
+        if now - self.live_at > LIVE_STALE:
+            return None
+        return decibels(self.live)
 
     def take(self):
         """(seconds, rms, peak) since the last take, then start again.
