@@ -134,8 +134,7 @@ SETTINGS = [
     ("public_url", "server", "public_url", str, ""),
     # Beside public_url because the two compose into a room's addresses
     # once several rooms share one server: the one a phone opens and the
-    # one a sender dials. Empty for a single room, which is every
-    # deployment today.
+    # one a sender dials. Empty for a room alone at its hostname.
     ("room", "server", "room", str, ""),
 ]
 
@@ -658,8 +657,8 @@ def describe_file(name, path, lines):
     return f"{name}: not found at {where}"
 
 
-def load_glossary(path):
-    terms = load_file_lines(path)
+def glossary_prompt(terms):
+    """The glossary's lines as the block appended to SYSTEM_PROMPT."""
     if not terms:
         return ""
     return ("\n\nGlossary of names and terms used in this congregation. "
@@ -740,6 +739,24 @@ OGG_HEADER_PAGES = 2
 OGG_PAGE_HEADER = 27
 
 
+def ogg_page_end(buffer, start):
+    """Where the Ogg page beginning at start ends, or None if it is not
+    all here yet.
+
+    A page is the fixed header, a segment table whose length the header
+    gives, and a payload the table adds up to. A socket or a pipe splits a
+    stream wherever it likes, so the page has to be measured, not assumed.
+    """
+    table = start + OGG_PAGE_HEADER
+    if len(buffer) < table:
+        return None
+    segments = buffer[table - 1]
+    if len(buffer) < table + segments:
+        return None
+    end = table + segments + sum(buffer[table:table + segments])
+    return end if len(buffer) >= end else None
+
+
 class OggHeaders:
     """The pages at the front of an Ogg stream, kept for a later listener.
 
@@ -774,16 +791,8 @@ class OggHeaders:
             return
         at = start
         for _ in range(OGG_HEADER_PAGES):
-            # A page is the fixed header, a segment table whose length the
-            # header gives, and a payload the table adds up to.
-            if len(self.buffer) < at + OGG_PAGE_HEADER:
-                return
-            segments = self.buffer[at + OGG_PAGE_HEADER - 1]
-            table = at + OGG_PAGE_HEADER
-            if len(self.buffer) < table + segments:
-                return
-            at = table + segments + sum(self.buffer[table:table + segments])
-            if len(self.buffer) < at:
+            at = ogg_page_end(self.buffer, at)
+            if at is None:
                 return
         self.headers = self.buffer[start:at]
         self.buffer = b""
@@ -804,12 +813,9 @@ async def open_encoder(source, encoding):
     the fallback safe: a stream that changed format halfway through would
     have no way to say so, since the format is named when the socket opens.
     """
-    if encoding != "opus":
-        return source, ""
-    if source.encoding != "pcm":
-        # Audio that arrived already encoded, which is what a sender on a
-        # constrained uplink hands a hosted server. Encoding it again would
-        # cost a second codec pass to save nothing.
+    if encoding != "opus" or source.encoding != "pcm":
+        # A source already encoded goes up as it is: a second codec pass
+        # would cost latency to save nothing.
         return source, ""
     try:
         process = await asyncio.create_subprocess_exec(
@@ -983,12 +989,10 @@ class StreamClock:
         return max(0.0, now - captured)
 
 
-class Stamped:
-    """A PCM capture source that keeps a StreamClock as it is read.
-
-    It goes directly around the device, before any encoder, because that is
-    where a sample's arrival is closest to its being spoken, and PCM is
-    where a byte count is a duration.
+class Clocked:
+    """A capture source that keeps a StreamClock and a LevelMeter as it is
+    read. Everything else a source is asked, its backend and encoding among
+    them, is the wrapped source's own answer.
     """
 
     def __init__(self, source):
@@ -997,19 +1001,31 @@ class Stamped:
         self.meter = LevelMeter()
 
     def __getattr__(self, name):
-        # Everything else a source is asked, its backend and encoding among
-        # them, is the device's own answer.
         return getattr(self.source, name)
 
     async def read(self):
         chunk = await self.source.read()
         if chunk:
-            self.clock.advance(len(chunk) / BYTES_PER_SECOND)
-            self.meter.add(chunk)
+            seconds = self.measure(chunk)
+            if seconds:
+                self.clock.advance(seconds)
         return chunk
 
     async def close(self):
         await self.source.close()
+
+
+class Stamped(Clocked):
+    """A local device, clocked and metered from its own samples.
+
+    It goes directly around the device, before any encoder, because that is
+    where a sample's arrival is closest to its being spoken, and PCM is
+    where a byte count is a duration.
+    """
+
+    def measure(self, chunk):
+        self.meter.add(chunk)
+        return len(chunk) / BYTES_PER_SECOND
 
 
 # Samples per second an Ogg Opus granule position counts, whatever rate the
@@ -1022,9 +1038,7 @@ class OggGranules:
 
     Every Ogg page ends with a granule position, the count of samples
     decoded so far, so the difference between two pages is how much audio
-    the later one carried. The pages arrive split across chunks however
-    the sender happened to read its encoder, so whole pages are found
-    here rather than assumed.
+    the later one carried.
     """
 
     def __init__(self):
@@ -1041,20 +1055,12 @@ class OggGranules:
                 # Kept short, so a stream that is not Ogg cannot grow it.
                 self.buffer = self.buffer[-3:]
                 return seconds
-            page = self.buffer[start:]
-            if len(page) < OGG_PAGE_HEADER:
-                self.buffer = page
+            end = ogg_page_end(self.buffer, start)
+            if end is None:
+                self.buffer = self.buffer[start:]
                 return seconds
-            segments = page[OGG_PAGE_HEADER - 1]
-            table = OGG_PAGE_HEADER + segments
-            if len(page) < table:
-                self.buffer = page
-                return seconds
-            end = table + sum(page[OGG_PAGE_HEADER:table])
-            if len(page) < end:
-                self.buffer = page
-                return seconds
-            granule = int.from_bytes(page[6:14], "little", signed=True)
+            granule = int.from_bytes(self.buffer[start + 6:start + 14],
+                                     "little", signed=True)
             # Zero is a header page, and -1 a page that finishes no
             # packet; neither says anything about how much was heard.
             if granule > 0:
@@ -1063,43 +1069,29 @@ class OggGranules:
                 # A smaller one is a new encoder starting again from zero,
                 # which counts from here rather than backwards.
                 self.last = granule
-            self.buffer = page[end:]
+            self.buffer = self.buffer[end:]
 
 
-class Received:
-    """A remote source that keeps a StreamClock as it is read.
+class Received(Clocked):
+    """A sender's audio, clocked as it reaches this server.
 
     The audio was captured on a laptop whose clock this machine cannot
     read, but the moment it reaches this server is still a mark the
     recognizer's timestamps can be measured against, and it is the only
     one that tells a gap in what arrived from a gap in what was said.
-    Measured instead from when the run began, as every hosted line was on
-    the second field test, the first silence made every later line wrong.
 
     The level meter is filled by the room from what the sender reports,
     since the samples it was measured on never left the laptop.
     """
 
     def __init__(self, source):
-        self.source = source
-        self.clock = StreamClock()
-        self.meter = LevelMeter()
+        super().__init__(source)
         self.pages = OggGranules() if source.encoding == "opus" else None
 
-    def __getattr__(self, name):
-        return getattr(self.source, name)
-
-    async def read(self):
-        chunk = await self.source.read()
-        if chunk:
-            seconds = (self.pages.feed(chunk) if self.pages
-                       else len(chunk) / BYTES_PER_SECOND)
-            if seconds:
-                self.clock.advance(seconds)
-        return chunk
-
-    async def close(self):
-        await self.source.close()
+    def measure(self, chunk):
+        if self.pages:
+            return self.pages.feed(chunk)
+        return len(chunk) / BYTES_PER_SECOND
 
 
 # Quieter than this is reported as this, since the log of silence is
@@ -1107,8 +1099,8 @@ class Received:
 LEVEL_FLOOR = -96.0
 FULL_SCALE = 32768.0
 # Seconds of audio in the reading the operator page shows, and how old
-# that reading may be before it says nothing. The page asks once a second,
-# so a shorter window would show whichever second it happened to land on.
+# that reading may be before it says nothing. The page asks every two
+# seconds, so a shorter window would show whichever moment it landed on.
 LIVE_WINDOW = 1.0
 LIVE_STALE = 3.0
 
@@ -1209,23 +1201,15 @@ class LevelMeter:
         return result
 
 
-def stream_lag(source, started, audio_end):
+def stream_lag(source, audio_end):
     """Seconds between words being spoken and this moment, or None.
 
-    Measured from the capture clock where the source keeps one, which a
-    remote source does too, counted as its audio reaches this server. A
-    source with no clock at all falls back to the time its run began,
-    which is right until the stream has a gap in it.
+    Read off the capture clock every source is wrapped in, which on a
+    hosted server counts the audio as it reaches this machine. None between
+    runs, when there is no source to ask.
     """
     clock = getattr(source, "clock", None)
-    if clock is not None:
-        return clock.lag(audio_end)
-    if started is None:
-        return None
-    lag = (time.monotonic() - started) - audio_end
-    # Negative means the two clocks disagree, which measures nothing a
-    # reader experienced.
-    return lag if lag >= 0 else None
+    return None if clock is None else clock.lag(audio_end)
 
 
 ARGUMENT_HELP = {
@@ -1326,6 +1310,27 @@ def remove_pid_file():
         pass
 
 
+def add_config_argument(parser):
+    """--config, repeatable and merged left to right by load_config, so a
+    hosted room passes the tuning its server shares and then its own file.
+    """
+    parser.add_argument("--config", action="append", metavar="FILE",
+                        help="config file; repeat for a shared file and "
+                             "then a room's own")
+
+
+def room_base(base, room):
+    """public_url with the room's path segment on the end.
+
+    Rooms sharing one hostname are told apart by a prefix the proxy in
+    front strips before it forwards, so the address on the card and the one
+    a sender dials both start here. One value then names the working
+    directory, the proxy's route, the recorded column, and both addresses.
+    """
+    room = room.strip("/")
+    return base.rstrip("/") + (f"/{room}" if room else "")
+
+
 def add_settings_arguments(parser, names):
     """Add the named settings as command line flags.
 
@@ -1351,10 +1356,6 @@ def add_settings_arguments(parser, names):
 
 
 # -- the pipeline ------------------------------------------------------------
-
-# Seconds a read from the device may take before the recognizer is sent a
-# KeepAlive. Well inside the ten seconds after which it closes the socket.
-STALL_KEEPALIVE = 3.0
 #
 # server.py and pipeline.py both run these three tasks over one websocket: a
 # pump feeding audio in, a listener segmenting results, and a publisher
@@ -1366,14 +1367,19 @@ STALL_KEEPALIVE = 3.0
 # A sink provides:
 #     recognized(words)       the recognizer finalized a stretch of audio,
 #                             and words says whether it heard any in it
-#     fragment(text, start, audio_end, speech_final, confidence)
-#                             a raw recognition result arrived
+#     fragment(text, start, audio_end, speech_final, confidence, finalized)
+#                             a raw recognition result arrived, finalized
+#                             when a Finalize this side sent closed it
 #     unit(unit) -> outputs   a sentence closed; returns the output names
 #                             worth requesting, where an empty list means do
 #                             not call the model for this sentence at all
 #     translated(unit, languages, translations, elapsed)
 #     timed_out(unit, languages)
 #     failed(unit, languages, error)
+
+# Seconds a read from the device may take before the recognizer is sent a
+# KeepAlive. Well inside the ten seconds after which it closes the socket.
+STALL_KEEPALIVE = 3.0
 
 
 async def pump_audio(source, socket, stop=None):
@@ -1583,9 +1589,8 @@ def latency_summary(values):
 class TerminalSink:
     """Prints the transcript as it forms, in the format __doc__ describes."""
 
-    def __init__(self, outputs, started, color, source=None):
+    def __init__(self, outputs, color, source=None):
         self.outputs = list(outputs)
-        self.started = started
         self.source = source
         self.dim, self.reset = (DIM, RESET) if color else ("", "")
         self.latencies = []
@@ -1601,7 +1606,7 @@ class TerminalSink:
         print(f"{self.dim}  . {text}{self.reset}")
 
     def unit(self, unit):
-        lag = stream_lag(self.source, self.started, unit.audio_end)
+        lag = stream_lag(self.source, unit.audio_end)
         behind = "?" if lag is None else f"{lag:.1f}s"
         print(f"\n[{unit.seq}] en ({behind}, {unit.reason}): {unit.text}")
         return self.outputs
@@ -1661,13 +1666,13 @@ async def run(args, settings, keys):
         if not settings["model"]:
             sys.exit("No translation model. Set translation.model in "
                      "config.toml or pass --model.")
+        glossary = load_file_lines(settings["glossary"])
         translator = Translator(
             llm_base, llm_key, settings["model"], settings["languages"],
-            load_glossary(settings["glossary"]), settings["max_tokens"],
+            glossary_prompt(glossary), settings["max_tokens"],
             settings["timeout"], settings["reasoning_effort"],
             settings["correct_english"])
-        print(describe_file("Glossary", settings["glossary"],
-                            load_file_lines(settings["glossary"])))
+        print(describe_file("Glossary", settings["glossary"], glossary))
 
     keyterms = load_file_lines(settings["keyterms"])
     print(describe_file("Keyterms", settings["keyterms"], keyterms))
@@ -1694,8 +1699,7 @@ async def run(args, settings, keys):
                 else "transcription only")
     print(f"Listening on {device}. {describe}. Ctrl-C to stop.",
           file=sys.stderr)
-    started = time.monotonic()
-    sink = TerminalSink(translator.outputs if translator else [], started,
+    sink = TerminalSink(translator.outputs if translator else [],
                         not args.no_color, source)
 
     try:
@@ -1747,11 +1751,7 @@ def main():
     parser.add_argument("--no-translate", action="store_true",
                         help="transcribe only, no translation model needed")
     parser.add_argument("--no-color", action="store_true")
-    # Repeatable, and merged left to right, so a hosted room passes the
-    # tuning its server shares and then the file naming only itself.
-    parser.add_argument("--config", action="append", metavar="FILE",
-                        help="config file; repeat for a shared file and "
-                             "then a room's own")
+    add_config_argument(parser)
     # Not a setting: the source changes with every reboot, so a name kept
     # in config.toml would be stale more often than it was right.
     parser.add_argument("--device",
