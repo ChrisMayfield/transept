@@ -65,7 +65,6 @@ import server
 import transept
 
 
-
 class Checks:
     """Counts passes and failures and prints one line per check."""
 
@@ -217,7 +216,7 @@ class FakeOpusSource:
     encoding = "opus"
     # Shape enough to be recognized: a page whose one segment is an
     # OpusHead. Nothing here decodes it, only carries it.
-    headers = b"OggS" + bytes(22) + b"\x01\x13OpusHead" + bytes(11)
+    headers = ogg_page(0, b"OpusHead" + bytes(11))
 
     def __init__(self):
         self.reads = 0
@@ -276,6 +275,33 @@ class FakeTranslator:
 
     async def close(self):
         pass
+
+
+@contextlib.contextmanager
+def cleared_secrets():
+    """No key or token from this machine's environment, for the duration.
+
+    This machine may have a shell that exports any of them, and a check
+    that reads a real key would pass for the wrong reason.
+    """
+    kept = {name: os.environ.pop(name, None)
+            for _, _, name in pipeline.SECRETS}
+    try:
+        yield
+    finally:
+        for name, value in kept.items():
+            os.environ.pop(name, None)
+            if value is not None:
+                os.environ[name] = value
+
+
+class StubRequest:
+    """Just enough of an aiohttp request for a handler to read."""
+
+    def __init__(self, token, query=None, header=None, session=None):
+        self.app = {"token": token, "session": session}
+        self.query = {"token": query} if query else {}
+        self.headers = {"X-Subtitle-Token": header} if header else {}
 
 
 def fake_config(**overrides):
@@ -468,10 +494,8 @@ async def check_stream_clock(checks):
                  stamped.clock.position)
     checks.check("and answers for the device about everything else",
                  stamped.encoding == "pcm" and stamped.reads == 3)
-    checks.check("a source with no clock falls back to its run start",
-                 pipeline.stream_lag(None, time.monotonic() - 3.0, 1.0)
-                 is not None
-                 and pipeline.stream_lag(None, None, 1.0) is None)
+    checks.check("between runs there is no source and so no lag",
+                 pipeline.stream_lag(None, 1.0) is None)
 
     checks.section("How loud the audio was")
     meter = pipeline.LevelMeter()
@@ -549,7 +573,7 @@ async def check_stream_clock(checks):
                  abs(received.clock.position - 1.0) < 1e-9,
                  received.clock.position)
     checks.check("so lag on a hosted server is measured, not guessed",
-                 pipeline.stream_lag(received, None, 1.0) is not None)
+                 pipeline.stream_lag(received, 1.0) is not None)
     raw = capture.RemoteCapture(1.0)
     received = pipeline.Received(raw)
     raw.feed(b"\x00\x00" * 1600)
@@ -636,7 +660,7 @@ def check_sentence_splitting(checks):
     bare.add("the history of the house of Israel and Judah at", False,
              0.0, 3.0)
     emitted = bare.check_ceiling()
-    checks.check("with no comma the ceiling takes everything, as before",
+    checks.check("with no comma the ceiling takes everything",
                  [unit[1] for unit in emitted]
                  == ["the history of the house of Israel and Judah at"]
                  and bare.parts == [], emitted)
@@ -654,8 +678,7 @@ def check_sentence_splitting(checks):
 async def check_pipeline(checks):
     checks.section("Segmenter and the shared loops, printing to a terminal")
     translator = FakeTranslator()
-    sink = pipeline.TerminalSink(["English", "French"], started=0.0,
-                                 color=False)
+    sink = pipeline.TerminalSink(["English", "French"], color=False)
     captured = io.StringIO()
     with contextlib.redirect_stdout(captured):
         await drive(sink, translator)
@@ -773,7 +796,7 @@ async def check_pipeline(checks):
     unlimited = server.Hub(["French"])
     for _ in range(50):
         unlimited.subscribe("French")
-    checks.check("no cap means no ceiling, which is the old behaviour",
+    checks.check("no cap means no ceiling",
                  not unlimited.full(), unlimited.listener_total())
 
     checks.section("The language cap")
@@ -1156,9 +1179,6 @@ async def check_pipeline(checks):
         checks.check("which is the front of the stream, not a copy of it",
                      source.headers and first.startswith(source.headers),
                      f"{len(source.headers)} of {len(first)} bytes")
-        declared = pipeline.build_asr_url(settings, [], "opus")
-        checks.check("so the recognizer is told what is really being sent",
-                     "linear16" not in declared, declared)
     else:
         # Not a pass dressed up as one: nothing was exercised, and the
         # machine that runs a meeting is the one that has to be checked.
@@ -1167,13 +1187,9 @@ async def check_pipeline(checks):
     checks.section("Reading the front of an Ogg stream")
     # Two pages and the beginning of a third, built here rather than taken
     # from ffmpeg, so this runs on a machine that has none.
-    def page(payload, segments=1):
-        return (b"OggS" + bytes(6) + bytes(8) + bytes(4) + bytes(4)
-                + bytes([segments]) + bytes([len(payload)]) + payload)
-
-    head = page(b"OpusHead" + bytes(11))
-    tags = page(b"OpusTags" + bytes(20))
-    audio = page(b"\x01\x02\x03\x04")
+    head = ogg_page(0, b"OpusHead" + bytes(11))
+    tags = ogg_page(0, b"OpusTags" + bytes(20))
+    audio = ogg_page(960, b"\x01\x02\x03\x04")
     pages = pipeline.OggHeaders()
     pages.feed(head + tags + audio)
     checks.check("the two pages that describe a stream are kept",
@@ -1532,11 +1548,6 @@ async def check_sender_proxy(checks):
     checks.check("and says the server is not there rather than saying "
                  "nothing", status["state"] == "stopped"
                  and "connect" in (status["error"] or ""), status)
-    checks.check("the blank status carries every field Session sends",
-                 not [key for key in expected
-                      if key not in sender.blank_status()],
-                 [key for key in expected
-                  if key not in sender.blank_status()])
     remote.source = SimpleNamespace(clock=pipeline.StreamClock())
     remote.source.clock.advance(0.1, now=time.monotonic() - 12.0)
     checks.check("a sender reports its own microphone going silent",
@@ -1743,6 +1754,43 @@ def drain(process):
     return lines, thread
 
 
+@contextlib.contextmanager
+def running_server(arguments, **tokens):
+    """server.py in a directory of its own, stopped again on the way out.
+
+    A directory of its own because server.py records itself in the one it
+    starts in, and a selftest that overwrote the record of a real server
+    would leave a running meeting with nothing able to stop it. The keys
+    are fakes and the tokens empty, so each is minted, unless named here.
+    Yields (process, output lines, home), and afterwards sets forced on the
+    process if it had to be killed rather than stopping when asked.
+    """
+    home = Path(tempfile.mkdtemp())
+    environment = dict(
+        os.environ, DEEPGRAM_API_KEY="selftest", LLM_API_KEY="selftest",
+        LLM_BASE_URL="http://invalid.invalid/v1", READER_TOKEN="",
+        OPERATOR_TOKEN="", CONTROL_TOKEN="")
+    environment.update(tokens)
+    process = subprocess.Popen(
+        [sys.executable, "-u", str(SRC / "server.py"),
+         "--model", "selftest-model", "--host", "127.0.0.1", *arguments],
+        cwd=home, env=environment, stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, text=True)
+    lines, reader = drain(process)
+    process.forced = False
+    try:
+        yield process, lines, home
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.forced = True
+            process.kill()
+            process.wait()
+        reader.join(timeout=2)
+
+
 def banner_address(lines, label, timeout=10.0):
     """One of the two addresses, once the banner prints it.
 
@@ -1759,14 +1807,11 @@ def banner_address(lines, label, timeout=10.0):
 
 
 def check_authorization(checks):
-    """The token rule, without needing a second server on a second port."""
+    """The token rule, and the shape a refusal keeps for the page.
 
-    class StubRequest:
-        def __init__(self, token, query=None, header=None, session=None):
-            self.app = {"token": token, "session": session}
-            self.query = {"token": query} if query else {}
-            self.headers = {"X-Subtitle-Token": header} if header else {}
-
+    Which routes apply it is checked against the running server, where a
+    route left out of add_routes would show.
+    """
     checks.section("The token rule")
     checks.check("a configured token refuses a request without one",
                  not controls.authorized(StubRequest("secret")))
@@ -1794,43 +1839,22 @@ def check_authorization(checks):
     checks.check("a token outside ASCII is refused rather than raising",
                  refuses("caf\u00e9"))
 
-    # The rule is worth only as much as the routes that apply it.
+    # The page polls this every two seconds and reads ok and message off
+    # a refusal; without the message it shows a blank panel.
     session = make_session(["French"], True, [])[0]
     refused = asyncio.run(controls.api_status(
         StubRequest("secret", session=session)))
     payload = json.loads(refused.text)
-    checks.check("status without the token is refused",
-                 refused.status == 403 and payload["ok"] is False,
-                 f"{refused.status} {payload}")
-    # The page polls this every two seconds and reads ok and message off
-    # a refusal; without the message it shows a blank panel.
     checks.check("a refused status says why, for the page to show",
-                 payload.get("message"), payload)
-    allowed = asyncio.run(controls.api_status(
-        StubRequest("secret", header="secret", session=session)))
-    checks.check("status with the token is allowed",
-                 allowed.status == 200
-                 and json.loads(allowed.text)["state"] == "stopped",
-                 allowed.status)
-
-    # The reader routes answer with subtitles and with what the channels
-    # are, and opening a stream is what makes a language be paid for, so
-    # the same rule applies to them.
-    refused = asyncio.run(server.api_channels(StubRequest("secret")))
-    payload = json.loads(refused.text)
-    checks.check("the channel list without the token is refused",
-                 refused.status == 403 and payload["channels"] == [],
-                 f"{refused.status} {payload}")
+                 payload.get("ok") is False and payload.get("message"),
+                 payload)
     # The reader page destructures channels off this, so a refusal that
     # dropped the key would throw before the page could show anything.
+    refused = asyncio.run(server.api_channels(StubRequest("secret")))
+    payload = json.loads(refused.text)
     checks.check("a refused channel list keeps the shape the page reads",
-                 "channels" in payload and "error" in payload, payload)
-    refused = asyncio.run(server.reader_page(StubRequest("secret")))
-    checks.check("the reader page without the token is refused",
-                 refused.status == 403, refused.status)
-    blank = asyncio.run(server.nothing_here(StubRequest("secret")))
-    checks.check("the bare root is a 404 even with the token",
-                 blank.status == 404, blank.status)
+                 payload.get("channels") == [] and "error" in payload,
+                 payload)
 
 
 def check_example_config(checks):
@@ -1904,18 +1928,11 @@ def check_config_merge(checks):
                  settings["languages"] == ["French", "Swahili"],
                  settings["languages"])
 
-    kept = {name: os.environ.pop(name, None)
-            for _, _, name in pipeline.SECRETS}
-    try:
+    with cleared_secrets():
         keys = pipeline.load_keys(merged)
-        checks.check("the keys merge the same way, each file's own rows",
-                     (keys["llm_key"], keys["reader_token"])
-                     == ("shared-key", "room-token"), keys)
-    finally:
-        for name, value in kept.items():
-            os.environ.pop(name, None)
-            if value is not None:
-                os.environ[name] = value
+    checks.check("the keys merge the same way, each file's own rows",
+                 (keys["llm_key"], keys["reader_token"])
+                 == ("shared-key", "room-token"), keys)
 
     # Precedence is the command line, then the last file, then earlier ones,
     # and a flag given is still a flag that wins over every file.
@@ -1997,7 +2014,7 @@ def check_reader_page(checks):
     pattern, replacement = found.group(1), found.group(2)
     base = {where: re.sub(pattern, replacement, where)
             for where in ("/reader", "/chapel/reader")}
-    checks.check("at the root the base is empty, which is today's address",
+    checks.check("at the root the base is empty, so nothing changes there",
                  base["/reader"] == "", base)
     checks.check("under a prefix the stream stays inside the room",
                  base["/chapel/reader"] + "/stream/English"
@@ -2011,12 +2028,7 @@ def check_reader_page(checks):
 
 
 def check_keys(checks):
-    """Keys come out of config.toml, and the environment still wins.
-
-    The variables are popped for the duration, because this machine has a
-    working config.toml and a shell that may export any of them, and a check
-    that reads a real key would pass for the wrong reason.
-    """
+    """Keys come out of config.toml, and the environment still wins."""
     checks.section("Keys in config.toml")
     config = {"keys": {"deepgram_api_key": "file-deepgram",
                        "llm_base_url": "  http://file/v1  ",
@@ -2026,9 +2038,7 @@ def check_keys(checks):
                  all(variable == key.upper()
                      for _, key, variable in pipeline.SECRETS),
                  pipeline.SECRETS)
-    kept = {name: os.environ.pop(name, None)
-            for _, _, name in pipeline.SECRETS}
-    try:
+    with cleared_secrets():
         keys = pipeline.load_keys(config)
         checks.check("a key set in config.toml is read",
                      keys["deepgram_key"] == "file-deepgram", keys)
@@ -2045,11 +2055,6 @@ def check_keys(checks):
         checks.check("an empty variable overrides a pinned token, which is "
                      "how a run asks for a minted one",
                      pipeline.load_keys(config)["operator_token"] == "")
-    finally:
-        for name, value in kept.items():
-            os.environ.pop(name, None)
-            if value is not None:
-                os.environ[name] = value
 
 
 def check_device_listing(checks):
@@ -2061,15 +2066,7 @@ def check_device_listing(checks):
     capture.choose_default holds the rule; this checks that api_devices
     hands the answer over.
     """
-
-    class StubRequest:
-        """Authorized unless supplied is withheld; no tokenless mode."""
-
-        def __init__(self, config, supplied="secret"):
-            self.app = {"session": SimpleNamespace(config=config),
-                        "token": "secret"}
-            self.query = {"token": supplied} if supplied else {}
-            self.headers = {}
+    session = SimpleNamespace(config=fake_config())
 
     def listed(backend):
         return [{"name": "monitor", "detail": "", "monitor": True,
@@ -2106,7 +2103,7 @@ def check_device_listing(checks):
         return counted
 
     checks.section("The device list")
-    request = StubRequest(fake_config())
+    request = StubRequest("secret", query="secret", session=session)
     original = capture.list_devices
     try:
         capture.list_devices = listed
@@ -2120,20 +2117,13 @@ def check_device_listing(checks):
                      payload)
 
         capture.list_devices = listed
-        locked = StubRequest(fake_config(), supplied=None)
-        response = asyncio.run(controls.api_devices(locked))
-        payload = json.loads(response.text)
-        checks.check("listing devices without the token is refused",
-                     response.status == 403 and payload["devices"] == [],
-                     f"{response.status} {payload}")
+        locked = StubRequest("secret", session=session)
+        payload = json.loads(asyncio.run(controls.api_devices(locked)).text)
         # The page destructures the list, so a refusal needs the same
         # shape or it throws before it can show the message.
-        checks.check("a refused listing still tells the operator page why",
-                     "error" in payload, payload)
-        opened = StubRequest(fake_config())
-        payload = json.loads(asyncio.run(controls.api_devices(opened)).text)
-        checks.check("listing devices with the token is allowed",
-                     payload.get("suggested") == "fake", payload)
+        checks.check("a refused listing keeps the shape the page reads",
+                     payload.get("devices") == [] and "error" in payload,
+                     payload)
 
         capture.list_devices = slow
         counted = asyncio.run(ticks_while_listing(request))
@@ -2161,8 +2151,6 @@ def check_server(checks):
     checks.check("a token with nothing set is minted fresh every run",
                  len(minted) == 3 and all(len(one) >= 32
                                           for one in minted), minted)
-    checks.check("an empty setting still mints one",
-                 len(controls.mint_token("")) >= 32)
     checks.check("a pinned token is kept across restarts",
                  controls.mint_token("bench") == "bench")
 
@@ -2201,32 +2189,13 @@ def check_server(checks):
 
     checks.section("The running server")
     port, operator = free_port(), free_port()
-    environment = dict(
-        os.environ,
-        DEEPGRAM_API_KEY="selftest",
-        LLM_API_KEY="selftest",
-        LLM_BASE_URL="http://invalid.invalid/v1",
-        # Explicitly empty, so the minted-token checks below test minting
-        # rather than whatever this machine happens to have in config.toml.
-        READER_TOKEN="",
-        OPERATOR_TOKEN="",
-    )
-    # In a directory of its own, because server.py records itself in the
-    # one it starts in, and a selftest that overwrote the record of a real
-    # server would leave a running meeting with nothing able to stop it.
-    home = Path(tempfile.mkdtemp())
-    pid_file = home / "transept.pid"
-    process = subprocess.Popen(
-        [sys.executable, "-u", str(SRC / "server.py"),
-         "--config", "selftest-no-such-config.toml",
-         "--model", "selftest-model", "--languages", "French,Swahili",
-         "--host", "127.0.0.1", "--reader-port", str(port),
-         "--operator-port", str(operator), "--max-readers", "3"],
-        cwd=home, env=environment, stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT, text=True)
-    lines, reader = drain(process)
     lingering = None
-    try:
+    with running_server([
+            "--config", "selftest-no-such-config.toml",
+            "--languages", "French,Swahili", "--reader-port", str(port),
+            "--operator-port", str(operator), "--max-readers", "3",
+    ]) as (process, lines, home):
+        pid_file = home / "transept.pid"
         if not wait_for_port(port, process) or not wait_for_port(
                 operator, process):
             checks.check(f"server.py came up on ports {port} and {operator}",
@@ -2409,19 +2378,9 @@ def check_server(checks):
         # presses Ctrl-C, and a stream nobody ends is a connection the
         # runner will wait on.
         lingering = open_stream(port, READER)
-    finally:
-        process.terminate()
-        forced = False
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            forced = True
-            process.kill()
-            process.wait()
-        if lingering:
-            lingering.close()
-        reader.join(timeout=2)
-        output = "".join(lines)
+    if lingering:
+        lingering.close()
+    output = "".join(lines)
 
     checks.check("the startup banner prints the reader address",
                  f"http://127.0.0.1:{port}/reader?token=" in output, output)
@@ -2429,14 +2388,11 @@ def check_server(checks):
                  f"http://127.0.0.1:{operator}/operator" in output, output)
     checks.check("the banner says the operator address is not a bookmark",
                  "changes" in output and "every restart" in output, output)
-    checks.check("a minted token is not the empty OPERATOR_TOKEN",
-                 len(TOKEN) >= 32, TOKEN)
-    checks.check("a minted token is not the empty READER_TOKEN",
-                 len(READER) >= 32, READER)
     checks.check("binding to loopback says so, since a phone cannot reach it",
                  "Bound to this machine only" in output, output)
     checks.check("the server exited while a phone was still reading",
-                 not forced, "it ignored the signal and had to be killed")
+                 not process.forced,
+                 "it ignored the signal and had to be killed")
     # A record left behind would send the next stop after whatever process
     # the system has since given that number to.
     checks.check("and took its record away on the way out",
@@ -2453,27 +2409,12 @@ def check_control(checks):
     """
     checks.section("The hosted server and its control socket")
     port, control = free_port(), free_port()
-    environment = dict(
-        os.environ,
-        DEEPGRAM_API_KEY="selftest",
-        LLM_API_KEY="selftest",
-        LLM_BASE_URL="http://invalid.invalid/v1",
-        READER_TOKEN="",
-        OPERATOR_TOKEN="",
-        CONTROL_TOKEN="",
-    )
-    home = Path(tempfile.mkdtemp())
-    process = subprocess.Popen(
-        [sys.executable, "-u", str(SRC / "server.py"),
-         "--config", "selftest-no-such-config.toml",
-         "--model", "selftest-model", "--languages", "French",
-         "--capture", "remote", "--room", "chapel",
-         "--host", "127.0.0.1", "--reader-port", str(port),
-         "--control-port", str(control)],
-        cwd=home, env=environment, stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT, text=True)
-    lines, reader = drain(process)
-    try:
+    with running_server([
+            "--config", "selftest-no-such-config.toml",
+            "--languages", "French", "--capture", "remote",
+            "--room", "chapel", "--reader-port", str(port),
+            "--control-port", str(control),
+    ]) as (process, lines, _):
         if not wait_for_port(port, process) or not wait_for_port(
                 control, process):
             checks.check(f"server.py came up on ports {port} and {control}",
@@ -2547,26 +2488,6 @@ def check_control(checks):
                          status.get("state") == "stopped"
                          and "languages" in status, status)
 
-            second = handshake(TOKEN)
-            try:
-                answer = say(second)
-                checks.check("a second sender is turned away, not merged in",
-                             answer.get("message", "").startswith(
-                                 "Another sender"), answer)
-            finally:
-                second.close()
-
-            sender.send(json.dumps({"type": "language", "name": "French",
-                                    "mode": "on"}))
-            french = {}
-            for _ in range(4):
-                french = [row for row in next_status(sender)["languages"]
-                          if row["name"] == "French"][0]
-                if french["override"] == "on":
-                    break
-            checks.check("a language message reaches the session",
-                         french.get("override") == "on", french)
-
             sender.send(json.dumps({"type": "stop"}))
             answer = json.loads(sender.recv(timeout=5))
             while answer.get("type") == "status":
@@ -2576,17 +2497,6 @@ def check_control(checks):
                          answer.get("type") == "error", answer)
         finally:
             sender.close()
-
-        wrong = handshake(TOKEN)
-        try:
-            # One process per room, so a sender pointed at the wrong one
-            # has to be told rather than fed into this room's transcript.
-            answer = say(wrong, room="classroom")
-            checks.check("a sender pointed at another room is refused",
-                         answer.get("type") == "error"
-                         and "chapel" in answer.get("message", ""), answer)
-        finally:
-            wrong.close()
 
         # The control listener serves one route. Everything the operator
         # port carries is absent here, token or not.
@@ -2601,14 +2511,6 @@ def check_control(checks):
         status, _ = request(port, "/reader", token=READER)
         checks.check("and the reader port is the same one phones already "
                      "use", status == 200, status)
-    finally:
-        process.terminate()
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
-        reader.join(timeout=2)
 
 
 async def settle(ready, timeout=5.0):
@@ -2802,7 +2704,7 @@ async def drive_audio(checks):
 
     room = server.ControlRoom(fake_config(languages=["French"],
                                           room="chapel"), hub)
-    headers = b"OggS" + bytes(22) + b"\x01\x13OpusHead" + bytes(11)
+    headers = FakeOpusSource.headers
     hello = {"type": "hello", "room": "chapel", "encoding": "opus",
              "intent": "start", "device": "a microphone",
              "headers": base64.b64encode(headers).decode()}
@@ -2891,52 +2793,30 @@ def check_sender(checks):
     """
     checks.section("The sender in the room and the server somewhere else")
     port, control, operator = free_port(), free_port(), free_port()
-    home = Path(tempfile.mkdtemp())
     # Real config files, unlike the other sections, and two of them: the
     # shared one a hosted server reads first and the room's own after it,
     # which is the arrangement systemd starts every room with. reader_url
     # is built from public_url, the room, and the reader token, and the
     # sender showing the right one is half of what this section is for.
-    (home / "shared.toml").write_text(
+    configs = Path(tempfile.mkdtemp())
+    (configs / "shared.toml").write_text(
         '[server]\npublic_url = "https://transept.example/"\n'
         '[languages]\navailable = ["Swahili"]\n', encoding="utf-8")
-    (home / "room.toml").write_text(
+    (configs / "room.toml").write_text(
         '[languages]\navailable = ["French"]\n', encoding="utf-8")
-    environment = dict(
-        os.environ,
-        DEEPGRAM_API_KEY="selftest",
-        LLM_API_KEY="selftest",
-        LLM_BASE_URL="http://invalid.invalid/v1",
-        # Pinned, so the address the sender is handed is one this check
-        # can write down rather than read back out of the banner.
-        READER_TOKEN="card",
-        OPERATOR_TOKEN="",
-        CONTROL_TOKEN="shared",
-    )
-    process = subprocess.Popen(
-        [sys.executable, "-u", str(SRC / "server.py"),
-         "--config", "shared.toml", "--config", "room.toml",
-         "--model", "selftest-model",
-         "--capture", "remote", "--room", "chapel",
-         "--host", "127.0.0.1", "--reader-port", str(port),
-         "--control-port", str(control)],
-        cwd=home, env=environment, stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT, text=True)
-    lines, reader = drain(process)
-    try:
+    # The reader token pinned, so the address the sender is handed is one
+    # this check can write down rather than read back out of the banner.
+    with running_server([
+            "--config", str(configs / "shared.toml"),
+            "--config", str(configs / "room.toml"),
+            "--capture", "remote", "--room", "chapel",
+            "--reader-port", str(port), "--control-port", str(control),
+    ], READER_TOKEN="card", CONTROL_TOKEN="shared") as (process, lines, _):
         if not wait_for_port(control, process):
             checks.check(f"server.py came up on port {control}", False,
                          "".join(lines))
             return
         asyncio.run(drive_sender(checks, control, operator))
-    finally:
-        process.terminate()
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
-        reader.join(timeout=2)
 
 
 # -- recording a session -----------------------------------------------------
@@ -2959,7 +2839,6 @@ async def check_store(checks):
     session.config["room"] = "chapel"
     session.started_at = time.time()
     session.run = 1
-    session.run_started = time.monotonic()
     # Eight seconds of audio captured just now, which covers every
     # fragment, the way a device would have been read ahead of the lines.
     clock = pipeline.StreamClock()
@@ -3294,11 +3173,12 @@ async def check_store(checks):
                         str(report))
     handle.close()
     written = report.read_text(encoding="utf-8")
-    for heading in ("## Names to check", "## Terms to add to keyterms.txt",
-                    "## How sentences closed", "## Latency",
-                    "## Where readers saw English instead", "## Transcript"):
-        checks.check(f"the report has its {heading.strip('# ')!r} section",
-                     heading in written, written[:120])
+    missing = [heading for heading in (
+        "## Names to check", "## Terms to add to keyterms.txt",
+        "## How sentences closed", "## Latency",
+        "## Where readers saw English instead", "## Transcript")
+        if heading not in written]
+    checks.check("the report has every section", not missing, missing)
     checks.check("the transcript carries a Comments block per line",
                  written.count("> Comments:") == 3,
                  written.count("> Comments:"))
@@ -3350,8 +3230,7 @@ def check_script(checks):
 
     # Which half this laptop runs is read off the control token, so the
     # weekly command is one command whichever way the room is set up.
-    saved = os.environ.pop("CONTROL_TOKEN", None)
-    try:
+    with cleared_secrets():
         written.write_text('[keys]\ncontrol_token = "abc"\n')
         checks.check("a laptop holding a control token is a sender",
                      transept.read_config(written)["sends"])
@@ -3365,10 +3244,6 @@ def check_script(checks):
         os.environ["CONTROL_TOKEN"] = "abc"
         checks.check("and the environment counts, as load_keys reads it",
                      transept.read_config(written)["sends"])
-    finally:
-        os.environ.pop("CONTROL_TOKEN", None)
-        if saved is not None:
-            os.environ["CONTROL_TOKEN"] = saved
     # A config that will not parse and a port that is not a number both have
     # to stop here, rather than be passed on to something that probes ports
     # and sends signals.

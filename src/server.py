@@ -63,12 +63,12 @@ import record
 from controls import (OPERATOR_HOST, authorized, build_operator_app,
                       mint_token, page)
 from pipeline import (SYSTEM_PROMPT, Received, Segmenter, Stamped,
-                      Translator, add_settings_arguments, decibels,
-                      build_asr_url, describe_file, install_stop_handler,
-                      listen, load_config, load_file_lines, load_glossary,
-                      load_keys, open_encoder, publish, pump_audio,
-                      remove_pid_file, resolve, stream_lag,
-                      write_pid_file)
+                      Translator, add_config_argument,
+                      add_settings_arguments, build_asr_url, decibels,
+                      describe_file, glossary_prompt, install_stop_handler,
+                      listen, load_config, load_file_lines, load_keys,
+                      open_encoder, publish, pump_audio, remove_pid_file,
+                      resolve, room_base, stream_lag, write_pid_file)
 
 HISTORY = 60
 # How long a reader's stream waits for a line before it looks at the session
@@ -98,6 +98,13 @@ STATUS_INTERVAL = 1.0
 # moved on. A sentinel object rather than None, which json.dumps would
 # happily turn into a subtitle reading "null".
 LEAVING = object()
+
+
+def fresh_stats():
+    """The counters a session keeps, all zero, as each start begins."""
+    return {"units": 0, "translated": 0, "failures": 0, "timeouts": 0,
+            "reconnects": 0, "corrections": 0, "skipped": 0, "capped": 0,
+            "latencies": []}
 
 
 class Hub:
@@ -251,11 +258,10 @@ class Session:
         # numbering has to run on across the whole meeting.
         self.last_seq = 0
         self.recorder = None
-        # Which stream a line came from, and when that stream began.
-        # audio_end is relative to the websocket, so both restart on every
-        # reconnect and the timeline only reassembles with the run beside it.
+        # Which stream a line came from. audio_end is relative to the
+        # websocket, so it restarts on every reconnect and the timeline
+        # only reassembles with the run beside it.
         self.run = 0
-        self.run_started = None
         # The source of the current run, whose capture clock lag is read
         # from. None between runs.
         self.run_source = None
@@ -265,9 +271,7 @@ class Session:
         # When the recognizer last returned words, which is what tells a
         # feed that is loud and not understood from one that is working.
         self.last_words = None
-        self.stats = {"units": 0, "translated": 0, "failures": 0,
-                      "timeouts": 0, "reconnects": 0, "corrections": 0,
-                      "skipped": 0, "capped": 0, "latencies": []}
+        self.stats = fresh_stats()
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -284,9 +288,7 @@ class Session:
         if not self.device:
             return False, "Choose an audio source first."
         self.error = None
-        self.stats = {"units": 0, "translated": 0, "failures": 0,
-                      "timeouts": 0, "reconnects": 0, "corrections": 0,
-                      "skipped": 0, "capped": 0, "latencies": []}
+        self.stats = fresh_stats()
         self.hub.clear()
         self.last_seq = 0
         self.run = 0
@@ -548,37 +550,32 @@ class Session:
     async def _supervise(self):
         """Keep the capture running across dropped connections."""
         attempt = 0
-        try:
-            while True:
-                began = time.monotonic()
-                try:
-                    await self._run_once()
-                    # A clean return means the far end closed the stream.
-                    self.error = "Audio stream ended."
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    self.error = f"{type(exc).__name__}: {exc}"
+        while True:
+            began = time.monotonic()
+            try:
+                await self._run_once()
+                # A clean return means the far end closed the stream.
+                self.error = "Audio stream ended."
+            except Exception as exc:
+                self.error = f"{type(exc).__name__}: {exc}"
 
-                if self.state == "stopped":
-                    return
-                if time.monotonic() - began >= HEALTHY_RUN:
-                    attempt = 0
-                delay = RECONNECT_BACKOFF[min(attempt,
-                                              len(RECONNECT_BACKOFF) - 1)]
-                attempt += 1
-                self.stats["reconnects"] += 1
-                self.state = "reconnecting"
-                await asyncio.sleep(delay)
-        except asyncio.CancelledError:
-            raise
+            if self.state == "stopped":
+                return
+            if time.monotonic() - began >= HEALTHY_RUN:
+                attempt = 0
+            delay = RECONNECT_BACKOFF[min(attempt,
+                                          len(RECONNECT_BACKOFF) - 1)]
+            attempt += 1
+            self.stats["reconnects"] += 1
+            self.state = "reconnecting"
+            await asyncio.sleep(delay)
 
     async def _open_source(self):
         """The audio for one run: a local device, or the room's sender."""
         if self.source is not None:
             return await self.source()
-        # Stamped before it is encoded, so the clock lag is measured
-        # from counts the audio as it comes off the device.
+        # Stamped before it is encoded, so the clock lag is read from
+        # counts the audio as it comes off the device.
         source = Stamped(await capture.open_capture(self.device,
                                                     self.config["capture"]))
         # Compressed on the way out, because the leg that fails in a real
@@ -615,7 +612,6 @@ class Session:
                 self.state = "running"
                 self.error = None
                 self.run += 1
-                self.run_started = time.monotonic()
                 self.heard = {"results": 0, "empty": 0}
                 # Beside the three legs rather than among them: it never
                 # finishes, and nothing it does should be able to end a run.
@@ -731,8 +727,7 @@ class Session:
         if self.recorder:
             # What a reader actually waited: from the words coming off the
             # microphone to the English line going out.
-            lag = stream_lag(self.run_source, self.run_started,
-                             unit.audio_end)
+            lag = stream_lag(self.run_source, unit.audio_end)
             self._record(
                 "line",
                 seq=unit.seq, run=self.run, at=time.time(),
@@ -1068,7 +1063,7 @@ async def stream(request):
             except TimeoutError:
                 # Phones and proxies drop idle connections; this keeps the
                 # socket warm through long silences. Counted rather than
-                # timed out on directly, because the wait above is now short
+                # timed out on directly, because the wait above is kept short
                 # enough to notice a session starting.
                 quiet += STATE_POLL
                 if quiet >= KEEPALIVE:
@@ -1143,9 +1138,9 @@ async def send_error(socket, message):
 async def push_status(socket, session):
     """Keep the sender's copy of the operator page fed.
 
-    Session.status() unchanged rather than a shape of its own: the page
-    the sender serves is the page this server serves today, and it has to
-    go on rendering what it renders now.
+    Session.status() unchanged rather than a shape of its own, because the
+    page the sender serves is the same operator page and renders exactly
+    what Session produces.
     """
     try:
         while True:
@@ -1266,8 +1261,6 @@ def build_control_app(room, token):
     """
     app = web.Application()
     app["room"] = room
-    app["hub"] = room.hub
-    app["session"] = room.session
     app["token"] = token
     app.add_routes([web.get("/control", control)])
     return app
@@ -1279,18 +1272,11 @@ def reader_address(base, room, token):
     Built here rather than typed into config.toml, because the token half
     of it changes every run unless reader_token pins one. An empty base
     means no public address is configured yet, and stays empty rather than
-    becoming a link to nowhere.
-
-    A named room is a path segment, because rooms sharing one hostname are
-    told apart by the prefix the proxy in front strips before it forwards.
-    One value then names the working directory, the proxy's route, the
-    recorded column, and the address, rather than four that can disagree.
-    Which rooms are named here is card_room, just below.
+    becoming a link to nowhere. Which rooms are named in it is card_room.
     """
     if not base:
         return ""
-    prefix = "/" + room.strip("/") if room.strip("/") else ""
-    return f"{base.rstrip('/')}{prefix}/reader?token={token}"
+    return f"{room_base(base, room)}/reader?token={token}"
 
 
 def card_room(settings):
@@ -1367,11 +1353,7 @@ def main():
                "point: a weekly run should be just `./transept start`.")
     parser.add_argument("--list-devices", action="store_true",
                         help="list audio input devices and exit")
-    # Repeatable, and merged left to right, so a hosted room passes the
-    # tuning its server shares and then the file naming only itself.
-    parser.add_argument("--config", action="append", metavar="FILE",
-                        help="config file; repeat for a shared file and "
-                             "then a room's own")
+    add_config_argument(parser)
     add_settings_arguments(parser, [
         "capture", "encoding",
         "asr_model", "endpointing", "early_finalize",
@@ -1403,10 +1385,10 @@ def main():
 
     config = dict(settings)
     config["keyterms"] = load_file_lines(settings["keyterms"])
-    config["glossary"] = load_glossary(settings["glossary"])
+    glossary = load_file_lines(settings["glossary"])
+    config["glossary"] = glossary_prompt(glossary)
     # Counted for the operator page as well as printed here, because on a
     # hosted server nobody in the room reads the journal.
-    glossary = load_file_lines(settings["glossary"])
     config["glossary_lines"] = len(glossary)
     print(describe_file("Glossary", settings["glossary"], glossary))
     print(describe_file("Keyterms", settings["keyterms"], config["keyterms"]))

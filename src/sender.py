@@ -20,7 +20,7 @@ holds a control_token:
     python3 ../src/sender.py                  the whole thing
     python3 ../src/sender.py --list-devices   find an audio source
 
-Three settings and one key, in the same config.toml as everything else:
+A few settings and one key, in the same config.toml as everything else:
 
     [audio]   backend, encoding
     [server]  public_url, room, operator_port
@@ -47,9 +47,9 @@ except ImportError:
 import capture
 import controls
 from controls import OPERATOR_HOST, mint_token
-from pipeline import (Stamped, add_settings_arguments,
+from pipeline import (Stamped, add_config_argument, add_settings_arguments,
                       install_stop_handler, load_config, load_keys,
-                      open_encoder, remove_pid_file, resolve,
+                      open_encoder, remove_pid_file, resolve, room_base,
                       write_pid_file)
 
 # Seconds between attempts to reach the server, and how long a connection
@@ -448,11 +448,6 @@ async def deliver(remote, socket):
         await socket.send(json.dumps(message))
 
 
-async def restart(remote):
-    """Wait for a start, which needs a hello and so a new connection."""
-    await remote.redial.wait()
-
-
 def parse(raw):
     """One text frame as a dict, or an empty one. Never a raised error."""
     try:
@@ -483,7 +478,7 @@ async def link(remote, url):
         remote.attach(socket)
         tasks = [asyncio.create_task(receive(remote, socket)),
                  asyncio.create_task(deliver(remote, socket)),
-                 asyncio.create_task(restart(remote))]
+                 asyncio.create_task(remote.redial.wait())]
         try:
             # Whichever finishes first ends this connection: the socket
             # closed, or a start is waiting on a hello only a new one can
@@ -508,8 +503,6 @@ async def supervise(remote, url):
         began = time.monotonic()
         try:
             await link(remote, url)
-        except asyncio.CancelledError:
-            raise
         except Exception as exc:
             remote.error = f"{type(exc).__name__}: {exc}"
         finally:
@@ -535,26 +528,19 @@ async def supervise(remote, url):
 def control_address(base, room):
     """The whole address this sender dials, built the way the card is.
 
-    public_url and room are the two values a hosted room already has, and
-    they compose the same way here as in server.reader_address: the room
-    is a path segment because the proxy in front strips that prefix to
-    tell rooms sharing one hostname apart. A setting holding the address
-    outright would be a third copy of the hostname and a second copy of
-    the room, and a copy is what disagrees the week a room is renamed or a
-    hostname moves.
-
-    https becomes wss and http becomes ws, because the scheme a phone
-    opens the page with is the scheme the proxy terminates.
+    A setting holding the address outright would be a second copy of the
+    hostname and of the room, and a copy is what disagrees the week a room
+    is renamed. https becomes wss and http becomes ws, because the scheme a
+    phone opens the page with is the scheme the proxy terminates.
     """
     if not base:
         return ""
-    base = base.rstrip("/")
+    url = room_base(base, room)
     for web, socket in (("https://", "wss://"), ("http://", "ws://")):
-        if base.startswith(web):
-            base = socket + base[len(web):]
+        if url.startswith(web):
+            url = socket + url[len(web):]
             break
-    prefix = "/" + room.strip("/") if room.strip("/") else ""
-    return f"{base}{prefix}/control"
+    return f"{url}/control"
 
 
 def dial(url, token):
@@ -605,11 +591,7 @@ def main():
                "point: a weekly run should be just `./transept start`.")
     parser.add_argument("--list-devices", action="store_true",
                         help="list audio input devices and exit")
-    # Repeatable, and merged left to right, so a hosted room passes the
-    # tuning its server shares and then the file naming only itself.
-    parser.add_argument("--config", action="append", metavar="FILE",
-                        help="config file; repeat for a shared file and "
-                             "then a room's own")
+    add_config_argument(parser)
     add_settings_arguments(parser, [
         "capture", "encoding",
         "public_url", "room",

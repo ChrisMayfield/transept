@@ -118,7 +118,7 @@ The fragments are there so a change to the segmenter can be replayed against a r
 ### One pipeline, two sinks
 
 Both entry points run the same three tasks over one websocket and differ only in where finished text goes, so that difference sits behind a sink.
-A sink provides `recognized(words)` for every finalized result, empty or not, `fragment(text, start, audio_end, speech_final, confidence)`, `unit(unit)` returning the output names worth requesting, `translated`, `timed_out`, and `failed`.
+A sink provides `recognized(words)` for every finalized result, empty or not, `fragment(text, start, audio_end, speech_final, confidence, finalized)`, `unit(unit)` returning the output names worth requesting, `translated`, `timed_out`, and `failed`.
 `TerminalSink` prints; `Session` is its own sink, publishing to the `Hub` and keeping the counters the operator page shows.
 An empty list from `unit` means do not call the model for that sentence at all.
 
@@ -357,7 +357,7 @@ Platform assumptions belong in `capture.py` and that function, nowhere else.
 
 `open_encoder` hands back a source it did not wrap, rather than raising or returning `None`.
 A machine with no `ffmpeg` is an ordinary machine, and the caller's next line is the same either way, because the source says what it yields and `build_asr_url` reads that.
-It also hands back an already-encoded source untouched, which is what a hosted server gets from a sender: a second codec pass there would add latency to save nothing, since nothing between capture and the recognizer looks at the bytes.
+A hosted server never calls it: a sender's audio arrives already encoded and goes to the recognizer as it came, since nothing between capture and the recognizer looks at the bytes.
 
 `Remote.start` opens the microphone before it tells the server anything.
 What the encoder falls back to is what the hello has to declare, and the server builds its recognizer URL from that and cannot be told a different format later.
@@ -442,6 +442,7 @@ The `lint` section shells out to `ruff check .` and reports its output as one ch
 
 Adding a check means adding one `checks.check(label, condition, detail)` line.
 `FakeSocket`, `FakeSource`, and `FakeTranslator` are already there, and `FakeTranslator` takes `mode="fail"`, `mode="empty"`, and a `delay`, so the failure, dropped language, and timeout paths cost nothing to exercise.
+`running_server` boots `server.py` with fake keys and stops it again, `StubRequest` stands in for a request when a handler is called directly, and `cleared_secrets` keeps this machine's own keys out of a check.
 
 The `store` section includes a `Recorder` that raises on every method, asserted against the `Hub` buffers.
 An isolation wrapper with no test that exercises the raising path is a wrapper nobody knows works; this one was written before the guard existed and failed until it did.

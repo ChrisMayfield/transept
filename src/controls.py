@@ -175,7 +175,7 @@ async def qr_code(request):
     sender holds neither, so it renders the address the server sent it when
     the control socket opened.
 
-    Behind the operator token like the rest of this listener, now that the
+    Behind the operator token like the rest of this listener, because the
     image encodes the reader token: a page in another tab of the operator's
     browser can point an <img> at a loopback port without asking anybody.
     """

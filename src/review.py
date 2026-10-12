@@ -30,9 +30,11 @@ import asyncio
 import re
 import sys
 
-from pipeline import (CONTEXT_UNITS, Translator, add_settings_arguments,
-                      latency_summary, load_config, load_glossary, load_keys,
-                      resolve)
+from pipeline import (CONTEXT_UNITS, Translator, add_config_argument,
+                      add_settings_arguments, glossary_prompt,
+                      latency_summary, load_config, load_file_lines,
+                      load_keys, resolve)
+from record import REVIEW_INSTRUCTIONS
 
 ANSI_RE = re.compile(r"\033\[[0-9;]*m")
 # pipeline.py prints a finished sentence as "[12] en (0.4s, endpoint): text".
@@ -70,11 +72,7 @@ def write_review(path, model, outputs, rows):
         out.write("# Translation review\n\n")
         out.write(f"Model: `{model}`\n\n")
         out.write(f"Lines: {len(rows)}\n\n")
-        out.write("Please mark anything that is wrong, unnatural, or would "
-                  "confuse someone reading it on a phone during a meeting.\n")
-        out.write("Wrong meaning matters most.\n")
-        out.write("Note awkward phrasing separately, since the two need "
-                  "different fixes.\n\n")
+        out.write(REVIEW_INSTRUCTIONS)
         for index, row in enumerate(rows, start=1):
             out.write(f"## {index}\n\n")
             out.write(f"**Heard.** {row['source']}\n\n")
@@ -100,9 +98,9 @@ async def run(args, settings, keys):
 
     translator = Translator(
         base_url, api_key, settings["model"], settings["languages"],
-        load_glossary(settings["glossary"]), settings["max_tokens"],
-        settings["timeout"], settings["reasoning_effort"],
-        settings["correct_english"],
+        glossary_prompt(load_file_lines(settings["glossary"])),
+        settings["max_tokens"], settings["timeout"],
+        settings["reasoning_effort"], settings["correct_english"],
         max_attempts=args.attempts, retry_delay=0.5)
 
     context, rows, latencies, failures = [], [], [], 0
@@ -147,15 +145,11 @@ def main():
     parser.add_argument("--review", help="write side-by-side Markdown here")
     parser.add_argument("--limit", type=int, help="only the first N lines")
     parser.add_argument("--attempts", type=int, default=4,
-                        help="retries per line; higher than the live pipeline "
-                             "because nothing is waiting on the answer")
+                        help="attempts per line; more than the live pipeline "
+                             "makes, because nothing is waiting on the answer")
     parser.add_argument("--keep-prefix", action="store_true",
                         help="take every input line verbatim")
-    # Repeatable, and merged left to right, so a hosted room passes the
-    # tuning its server shares and then the file naming only itself.
-    parser.add_argument("--config", action="append", metavar="FILE",
-                        help="config file; repeat for a shared file and "
-                             "then a room's own")
+    add_config_argument(parser)
     add_settings_arguments(parser, [
         "model", "reasoning_effort", "correct_english", "max_tokens",
         "timeout",

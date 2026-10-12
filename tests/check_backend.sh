@@ -1,8 +1,8 @@
 #!/bin/bash
 #
-# This script checks the backend server for various rooms and endpoints,
-# simulating different scenarios such as missing tokens and valid requests.
-# It uses curl to make HTTP requests and outputs the results for each room.
+# Probes one room on a hosted server from outside, with curl: what the
+# reader port answers with no token and with the right one, and that the
+# control socket refuses a browser's Origin. Each line says what to expect.
 
 if [ "$#" -ne 4 ]; then
     echo "Usage: $0 public_url reader_token control_token room" >&2

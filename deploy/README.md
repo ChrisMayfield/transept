@@ -28,7 +28,7 @@ A hostname that does not yet resolve costs a failed validation and a wait.
 ## Server setup
 
 Debian or Ubuntu, with a `transept` user account, the checkout owned by root, and only each room's directory writable.
-(See [The room](#the-room) below, which is where those permissions are set).
+(See [Room config](#room-config) below, which is where those permissions are set.)
 
 ```sh
 sudo git clone https://github.com/ChrisMayfield/transept.git /srv/transept
@@ -39,7 +39,7 @@ sudo /srv/transept/.venv/bin/pip install -r /srv/transept/requirements.txt
 
 No `ffmpeg` is needed on this machine.
 Audio that arrives is passed through untouched whatever `[audio] encoding` says, and the laptop is where the Opus encoder belongs.
-A laptop with no `ffmpeg` sends raw audio, and this server, having none either, forwards that untouched too and says so in the journal.
+A laptop with no `ffmpeg` sends raw audio, and this server forwards that untouched too.
 
 ## Firewall
 
@@ -108,7 +108,7 @@ _Sticky_, because write permission on a directory is otherwise permission to del
 Anything else the room reads rather than writes, a `glossary.txt` or a `keyterms.txt`, belongs to root the same way.
 Those two usually sit beside the shared `config.toml` in `/srv/transept/local/`, since a path under `[files]` is read beside the file that names it, and the server prints how many lines of each it loaded when it starts, which the operator page shows too.
 
-Four values have to be filled in: `reader_token`, `control_token`, `room`, and the two ports, which have to differ from every other room's.
+Five values have to be filled in: `reader_token`, `control_token`, `room`, and the two ports, which have to differ from every other room's.
 You can generate the tokens rather than inventing them:
 
 ```sh
@@ -152,7 +152,7 @@ sudo systemctl reload caddy
 ```
 
 Change `transept.example.org` to the real hostname in two files: here and in `public_url`.
-Delete the `classroom` block until there is a second room (see [A second room](#a-second-room) below).
+Delete the `classroom` block until there is a second room (see [Second room](#second-room) below).
 The prefix and the two ports in a room's block have to match that room's `config.toml`.
 
 ## Systemd
@@ -229,7 +229,8 @@ The address to hand the room appears on the operator page once the sender has re
 
 ## Troubleshooting
 
-If `systemctl status transept@chapel` says **failed** rather than activating, because the unit gives up after five tries in a minute.
+**`systemctl status transept@chapel` says failed.**
+The unit gives up after five tries in a minute rather than activating forever.
 That is nearly always a config that will not load, and `journalctl -u transept@chapel -n 30` says which line.
 
 **The operator page shows a meeting running with no audio.**

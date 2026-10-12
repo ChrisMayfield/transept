@@ -102,6 +102,29 @@ QUEUE_DEPTH = 256
 TOKEN_COLUMNS = ("prompt_tokens", "output_tokens", "reasoning_tokens",
                  "cached_tokens")
 
+# Columns added since the first release, each at the end of its table where
+# ALTER TABLE puts it, as (table, column, type).
+ADDED_COLUMNS = (
+    ("sessions", "room", "TEXT"),
+    *(("lines", column, "INTEGER") for column in TOKEN_COLUMNS),
+    ("fragments", "finalized", "INTEGER"),
+)
+
+# Seconds of audio each row of the audio table describes, here because both
+# the server writing them and the report reading them need it. Short enough
+# that a thirty second dropout is six rows rather than a blur, long enough
+# that an hour is seven hundred rows rather than one per fragment.
+AUDIO_WINDOW = 5.0
+
+# What a reviewer is asked, at the top of every side-by-side document this
+# and review.py write.
+REVIEW_INSTRUCTIONS = (
+    "Please mark anything that is wrong, unnatural, or would confuse "
+    "someone reading it on a phone during a meeting.\n"
+    "Wrong meaning matters most.\n"
+    "Note awkward phrasing separately, since the two need different "
+    "fixes.\n\n")
+
 
 def connect(path):
     """Open the database, ready to be written to from one task.
@@ -127,18 +150,14 @@ def migrate(handle):
     keeps the columns it was made with and gains nothing on its own. Adding
     one to the end is something sqlite does without rewriting the table.
     """
-    present = {row[1] for row in
-               handle.execute("PRAGMA table_info(sessions)")}
-    if "room" not in present:
-        handle.execute("ALTER TABLE sessions ADD COLUMN room TEXT")
-    present = {row[1] for row in handle.execute("PRAGMA table_info(lines)")}
-    for column in TOKEN_COLUMNS:
-        if column not in present:
-            handle.execute(f"ALTER TABLE lines ADD COLUMN {column} INTEGER")
-    present = {row[1] for row in
-               handle.execute("PRAGMA table_info(fragments)")}
-    if "finalized" not in present:
-        handle.execute("ALTER TABLE fragments ADD COLUMN finalized INTEGER")
+    for table, column, kind in ADDED_COLUMNS:
+        if column not in columns(handle, table):
+            handle.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
+
+
+def columns(handle, table):
+    """The names of a table's columns, empty if there is no such table."""
+    return {row[1] for row in handle.execute(f"PRAGMA table_info({table})")}
 
 
 class Recorder:
@@ -322,10 +341,7 @@ def open_read_only(path):
                  f"config.toml to keep one.")
     handle = sqlite3.connect(path, timeout=0)
     handle.row_factory = sqlite3.Row
-    present = handle.execute(
-        "SELECT name FROM sqlite_master WHERE type = 'table'"
-        " AND name = 'sessions'").fetchone()
-    if not present:
+    if not columns(handle, "sessions"):
         sys.exit(f"{path} holds no sessions.")
     return handle
 
@@ -589,9 +605,8 @@ def _pieces(page, handle, session):
     """
     # A database from before the column is read as it is, not migrated,
     # and none of its pieces were asked to finish.
-    columns = {row[1] for row in
-               handle.execute("PRAGMA table_info(fragments)")}
-    finalized = "finalized" if "finalized" in columns else "0"
+    finalized = ("finalized" if "finalized" in columns(handle, "fragments")
+                 else "0")
     rows = handle.execute(
         f"SELECT audio_end - start AS length, speech_final,"
         f" {finalized} AS finalized"
@@ -619,11 +634,6 @@ def _pieces(page, handle, session):
     page.write("\n")
 
 
-# Seconds of audio each row of the audio table describes, here because both
-# the server writing them and the report reading them need it. Short enough
-# that a thirty second dropout is six rows rather than a blur, long enough
-# that an hour is seven hundred rows rather than one per fragment.
-AUDIO_WINDOW = 5.0
 # Seconds without a word before a stretch is worth a line in the report.
 # A pause between speakers is a few seconds; what the second field test
 # lost was half a minute at a time.
@@ -637,21 +647,14 @@ QUIET_DB = -50
 DELIVERED = 0.5
 
 
-def has_table(handle, name):
-    """Whether a table exists, which in a recording read back it may not.
+def audio_rows(handle, session_id):
+    """The audio windows of one session, or none for an older recording.
 
     Reading a session back must not write to the file it is reading, so an
     older recording is never migrated and has only the tables it was made
     with.
     """
-    return handle.execute(
-        "SELECT name FROM sqlite_master WHERE type = 'table'"
-        " AND name = ?", (name,)).fetchone() is not None
-
-
-def audio_rows(handle, session_id):
-    """The audio windows of one session, or none for an older recording."""
-    if not has_table(handle, "audio"):
+    if not columns(handle, "audio"):
         return []
     return handle.execute(
         "SELECT * FROM audio WHERE session_id = ? ORDER BY id",
@@ -802,11 +805,7 @@ def _fallbacks(page, grouped):
 def _transcript(page, lines, grouped):
     """Side by side, in the shape review.py already writes."""
     page.write("## Transcript\n\n")
-    page.write("Please mark anything that is wrong, unnatural, or would "
-               "confuse someone reading it on a phone during a meeting.\n")
-    page.write("Wrong meaning matters most.\n")
-    page.write("Note awkward phrasing separately, since the two need "
-               "different fixes.\n\n")
+    page.write(REVIEW_INSTRUCTIONS)
     for line in lines:
         page.write(f"### {line['seq']}\n\n")
         page.write(f"**Heard.** {line['heard']}\n\n")
@@ -838,7 +837,7 @@ def purge(handle, older_than_days):
                        (session_id,))
         handle.execute("DELETE FROM fragments WHERE session_id = ?",
                        (session_id,))
-        if has_table(handle, "audio"):
+        if columns(handle, "audio"):
             handle.execute("DELETE FROM audio WHERE session_id = ?",
                            (session_id,))
         handle.execute("DELETE FROM sessions WHERE id = ?", (session_id,))

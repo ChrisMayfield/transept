@@ -22,7 +22,7 @@ Tailscale Funnel routes each phone out to a Tailscale ingress node and back to t
 
 The informative failure was that latency was bad even when demonstrating the reader on `localhost`, where no network sat between the server and the browser.
 That puts the delay entirely in the two legs that leave the laptop: audio up to Deepgram, and translation round trips.
-`pump_audio` pushes 256 kbps of raw PCM upstream continuously, which on a throttled or congested uplink keeps the queue full, and every translation request then waits behind the operator's own audio.
+`pump_audio` pushed 256 kbps of raw PCM upstream continuously, which on a throttled or congested uplink keeps the queue full, and every translation request then waits behind the operator's own audio.
 
 Running the same setup over a phone hotspot confirmed it.
 English appeared within a second and translations a couple of seconds behind, which is what every other test has produced.
@@ -76,7 +76,7 @@ It is the laptop's `local/` folder with one more level in it, a folder per room 
 ```
 
 The alternative considered was one process with a room registry and the room in the request path.
-That wants a per-request lookup at all nine `request.app[...]` sites, a token check that selects on both room and listener, and tests proving one room's token opens nothing in another.
+That wants a per-request lookup at every `request.app[...]` site, a token check that selects on both room and listener, and tests proving one room's token opens nothing in another.
 Separate processes get the same isolation from the operating system, for free, and add the ability to restart one room mid-week without dropping the others.
 It also keeps the blast radius of a blocking handler to one room, which matters because `CLAUDE.md` already warns that anything blocking in a handler stalls the subtitle fan-out to every phone.
 
@@ -200,13 +200,12 @@ The cost is that a status saying stopped in the first few seconds after Start is
 
 ### Where the shared operator code lives
 
-`authorized`, `mint_token`, `read_body`, `operator_page`, `api_status`, `api_devices`, `api_start`, `api_stop`, `api_language`, `qr_code`, and `build_operator_app` all live in `server.py` today, and `sender.py` needs every one of them.
-They move to a new `controls.py`, which both entry points import and which imports neither.
-`server.py` still uses `authorized` and `page` for the reader application, so the shared helpers move too rather than being reached back for, along with `STATIC` and `OPERATOR_HOST`.
+The operator page's handlers, the token helpers, `STATIC`, and `OPERATOR_HOST` live in `controls.py`, which both entry points import and which imports neither.
+`server.py` uses `authorized` and `page` from it for the reader application too.
 
 The file is `controls.py` and not `operator.py` because `operator` is a standard library module, and a file of that name beside the code shadows it for everything started from this directory.
 Not a subtle failure: `collections` imports `operator`, so `import collections` fails, and with it aiohttp, websockets, and httpx.
-`build_operator_app` also lost its `hub` argument, because no route on that listener ever read one, and a sender has no Hub to pass.
+`build_operator_app` takes no `hub`, because no route on that listener reads one, and a sender has no Hub to pass.
 
 Copying them instead is the mistake this project has already made once, when the pipeline loops were duplicated and the copies drifted until a session start raised `NameError`.
 Importing `server.py` from `sender.py` would work, since `server.py` defines only constants, classes, and functions, but it reads backwards and drags `Hub` and `Session` into a program that has neither.
@@ -229,7 +228,7 @@ So a page that somehow learned the control token, from a pasted address or a sha
 Sender to server:
 
 ```
-hello     room, encoding ("pcm" or "opus"), device, intent ("start" or "attach")
+hello     room, encoding ("pcm" or "opus"), headers, device, intent ("start" or "attach")
 stop      end the session
 language  name, mode ("on", "off", or "auto")
 level     seconds, rms, peak, once a second, measured before encoding
@@ -244,6 +243,7 @@ error     text, for a start that failed
 ```
 
 `hello` carries the encoding because the server has to build the Deepgram URL to match, and carries the intent because a page reload opens a new socket for a room that may already be running.
+It carries the Opus stream's first pages as `headers`, because nothing after them decodes without them and every recognizer run joins the stream partway through; an Opus sender that starts a session without them is refused.
 `status` is the existing snapshot rather than a new shape, so the operator page keeps rendering what it renders now.
 `level` is measured on the laptop because the samples are there and the server has only Opus, and it is sent only when `ready` says `levels`, so a sender newer than its server does not draw an error a second.
 The server records it beside how much audio reached the recognizer, counted from the Ogg pages as they arrive, and how many results the recognizer sent back empty, which is what tells a quiet room from audio that never arrived.
@@ -346,8 +346,7 @@ The difference between sensible US regions is tens of milliseconds, against the 
 
 `sessions.db` needs a volume that survives redeploys if recording is on.
 
-`transept.py` and `transept.log` are not deleted.
-They are the weekly command in both modes: on a laptop whose `config.toml` holds a `control_token`, `./transept start` runs `sender.py` in place of the server and the funnel, so a room that moves to a hosted server keeps the same three commands.
+`./transept` stays the weekly command in both modes: on a laptop whose `config.toml` holds a `control_token`, `./transept start` runs `sender.py` in place of the server and the funnel, so a room that moves to a hosted server keeps the same three commands.
 On the rented server a systemd unit takes their place, which is the form `CLAUDE.md` already says `server.py` must stay runnable in.
 
 ## Bandwidth and compression

@@ -5,9 +5,9 @@ It covers the self-hosted mode, where one laptop in the room runs everything.
 Plan on about 30–60 minutes.
 Do the setup at a desk rather than in the meeting room, because only the audio check near the end needs the real microphones.
 
-[`README.md`](README.md) covers what Transept is, what it costs, and what it sends where.
+[`README.md`](../README.md) covers what Transept is, what it costs, and what it sends where.
 Read that file first if you have not already.
-If somebody is already hosting a server for your congregation, the laptop in your room needs a room name and one token instead of most of this page, and the last section of [`deploy/README.md`](deploy/README.md) is what to follow.
+If somebody is already hosting a server for your congregation, the laptop in your room needs a room name and one token instead of most of this page, and the last section of [`deploy/README.md`](../deploy/README.md) is what to follow.
 
 Transept is written in Python, but you don't need to know Python.
 Everything below is typed at a command line, one line at a time.
@@ -58,7 +58,7 @@ If you already use git and would rather clone:
 git clone https://github.com/ChrisMayfield/transept.git
 ```
 
-Either way, go to folder in your terminal, and stay there for everything that follows:
+Either way, go to that folder in your terminal, and stay there for everything that follows:
 
 ```sh
 cd transept-main     # or cd transept, if you cloned
