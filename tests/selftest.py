@@ -2952,6 +2952,54 @@ def check_spoken(checks):
                  text[text.find("## Recognizer"):][:600])
 
 
+def check_names(checks):
+    """Where each name a correction introduced could have come from.
+
+    On the third field test a name the model borrowed from the line before
+    was reported as invented, because nothing said the line before had it.
+    """
+    checks.section("Where an introduced name came from")
+    path = Path(tempfile.mkdtemp()) / "names.db"
+    handle = record.connect(str(path))
+    handle.execute("INSERT INTO sessions (started_at, languages, glossary)"
+                   " VALUES (1000, '[]', 'Leaders: President Eyring')")
+    for seq, heard, english in (
+            (1, "we sustain brother kalema as clerk",
+             "we sustain Brother Kalema as clerk"),
+            (2, "join me in sustaining t bone in his calling",
+             "join me in sustaining Kalema in his calling"),
+            (3, "from president eyrie", "from President Eyring"),
+            (4, "meet on mount prophet", "meet on Mount Crawford"),
+            (5, "of us can do this.", "Each of us can do this.")):
+        handle.execute(
+            "INSERT INTO lines (session_id, seq, run, heard, english, reason)"
+            " VALUES (1, ?, 1, ?, ?, 'punctuation')", (seq, heard, english))
+    handle.close()
+    handle = record.open_read_only(str(path))
+    lines = record.lines_of(handle, 1)
+    found = {line["seq"]: record.name_sources(
+                 line, [other["heard"] for other in lines[:index]],
+                 {"leaders", "president", "eyring"})
+             for index, line in enumerate(lines)}
+    checks.check("a name in the lines before is marked as borrowed",
+                 found[2] == {"Kalema": "context"}, found[2])
+    checks.check("a name in the glossary is marked as the glossary's",
+                 found[3] == {"Eyring": "glossary"}, found[3])
+    checks.check("a name in neither is marked as the model's own",
+                 found[4] == {"Crawford": "neither"}, found[4])
+    checks.check("a capital that only opens the sentence is not a name",
+                 found[5] == {}, found[5])
+    report = Path(tempfile.mkdtemp()) / "names.md"
+    record.write_report(handle, record.resolve_session(handle, "last"),
+                        str(report))
+    handle.close()
+    text = report.read_text(encoding="utf-8")
+    section = text[text.find("## Names"):text.find("## Terms")]
+    checks.check("the report lists the model's own names first",
+                 0 <= section.find("Crawford") < section.find("Kalema")
+                 < section.find("Eyring"), section)
+
+
 def check_levels(checks):
     """A stretch with no words, judged against the speech around it.
 
@@ -3169,6 +3217,7 @@ async def check_store(checks):
     handle.close()
 
     check_spoken(checks)
+    check_names(checks)
     check_levels(checks)
 
     checks.section("A recording made before the room column existed")

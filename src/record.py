@@ -30,7 +30,7 @@ import sys
 import time
 from pathlib import Path
 
-from pipeline import latency_summary
+from pipeline import CONTEXT_UNITS, latency_summary
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
@@ -417,6 +417,10 @@ COMMON_WORDS = {
     "they", "me", "him", "her", "us", "them", "my", "your", "his", "our",
     "their", "right", "yes", "yeah", "okay", "oh", "well", "like", "kind",
     "look", "not", "no", "do", "did", "have", "has", "had",
+    # Contractions mended and scripture's pronouns, which on the third field
+    # test sat among the names to check as "I've", "Thee", and "O".
+    "i'm", "i've", "i'll", "i'd", "we're", "we'll", "we've", "you're",
+    "they're", "o", "thee", "thou", "thy", "thine", "ye", "pm",
 }
 
 
@@ -501,7 +505,7 @@ def write_report(handle, session, out):
                    f"`{session['model']}`.\n\n")
         page.write(f"Languages offered: {', '.join(languages) or 'none'}.\n\n")
 
-        _fabrications(page, lines)
+        _fabrications(page, lines, session)
         _corrections(page, lines)
         _closings(page, lines)
         _latency(page, handle, session, lines)
@@ -512,40 +516,103 @@ def write_report(handle, session, out):
         _transcript(page, lines, grouped)
 
 
-def _fabrications(page, lines):
+# Where a name a correction introduced could have come from, in the order
+# the report lists them: the one to check first is the one from nowhere.
+SOURCES = (
+    ("neither",
+     "From neither the glossary nor the preceding lines, so from the "
+     "model's own knowledge, which the prompt forbids. Check these first."),
+    ("context",
+     "From the preceding lines, which the model may borrow a name from. "
+     "Such a name is only as right as the recognizer's spelling of it "
+     "there."),
+    ("glossary", "From the glossary, which is the glossary doing its job."),
+)
+
+
+def sentence_starts(text):
+    """Lowercased words that open a sentence of this text.
+
+    A capital there is grammar, not a name, which is how "Each" and "If",
+    restored where the recognizer lost them, would otherwise read.
+    """
+    starts = set()
+    for sentence in re.split(r"(?<=[.!?])\s+", text or ""):
+        found = WORD.search(sentence)
+        if found:
+            starts.add(found.group().lower())
+    return starts
+
+
+def name_sources(line, earlier, glossary):
+    """The names a correction introduced, each with where it could be from.
+
+    Earlier is the lines the model was given as context, and glossary the
+    words of the glossary the session loaded.
+    """
+    # fold=True: a name that was merely recapitalized is the glossary doing
+    # its job. What belongs here is a word with no counterpart in the audio.
+    added, _ = changed_words(line["heard"], line["english"], fold=True)
+    introduced = set(added)
+    opening = sentence_starts(line["english"])
+    middle = {word.lower() for sentence in re.split(
+                  r"(?<=[.!?])\s+", line["english"])
+              for word in WORD.findall(sentence)[1:]}
+    context = {word.lower() for text in earlier
+               for word in WORD.findall(text or "")}
+    found = {}
+    for word in WORD.findall(line["english"]):
+        lowered = word.lower()
+        if (not PROPER.match(word) or lowered not in introduced
+                or lowered in COMMON_WORDS
+                or (lowered in opening and lowered not in middle)):
+            continue
+        found[word] = ("glossary" if lowered in glossary
+                       else "context" if lowered in context else "neither")
+    return found
+
+
+def _fabrications(page, lines, session):
     """Proper nouns the correction introduced that were not in the audio.
 
     First, because it is the only mechanical check there is on the rule that
     the model must never invent a name, and a reader of a translated channel
-    has no way to catch one.
+    has no way to catch one. A name taken from the glossary or from the
+    lines before is allowed; one from neither is the model's own, and on
+    the third field test a name the model borrowed from the line before
+    was taken for one of those until somebody read that line.
     """
     page.write("## Names to check\n\n")
-    suspects = []
-    for line in lines:
+    glossary = {word.lower()
+                for word in WORD.findall(session["glossary"] or "")}
+    grouped = {source: [] for source, _ in SOURCES}
+    for index, line in enumerate(lines):
         if not line["english"]:
             continue
-        # fold=True: a name that was merely recapitalized is the glossary
-        # doing its job. What belongs here is a word with no counterpart in
-        # the audio at all.
-        added, _ = changed_words(line["heard"], line["english"], fold=True)
-        introduced = set(added)
-        names = sorted({word for word in WORD.findall(line["english"])
-                        if PROPER.match(word)
-                        and word.lower() in introduced})
-        if names:
-            suspects.append((line, names))
-    if not suspects:
+        # The context the model was given: the lines just before, in this
+        # run, since a reconnect starts the context over.
+        earlier = [other["heard"] for other in lines[:index]
+                   if other["run"] == line["run"]][-CONTEXT_UNITS:]
+        by_source = {}
+        for word, source in name_sources(line, earlier, glossary).items():
+            by_source.setdefault(source, []).append(word)
+        for source, words in by_source.items():
+            grouped[source].append((line, sorted(words)))
+    if not any(grouped.values()):
         page.write("Nothing introduced a capitalized word that was not in "
                    "the audio.\n\n")
         return
     page.write("A capitalized word appears in the corrected line that was "
-               "not in what the recognizer heard. Usually the glossary "
-               "repairing a name, occasionally the model inventing one.\n\n")
-    for line, names in suspects:
-        page.write(f"- **{', '.join(names)}** (line {line['seq']})\n")
-        page.write(f"  - heard: {line['heard']}\n")
-        page.write(f"  - shown: {line['english']}\n")
-    page.write("\n")
+               "not in what the recognizer heard.\n\n")
+    for source, heading in SOURCES:
+        if not grouped[source]:
+            continue
+        page.write(f"**{heading}**\n\n")
+        for line, names in grouped[source]:
+            page.write(f"- **{', '.join(names)}** (line {line['seq']})\n")
+            page.write(f"  - heard: {line['heard']}\n")
+            page.write(f"  - shown: {line['english']}\n")
+        page.write("\n")
 
 
 def _corrections(page, lines):
