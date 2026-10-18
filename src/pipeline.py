@@ -686,10 +686,10 @@ def build_asr_url(settings, keyterms, encoding="pcm"):
             ("channels", str(CHANNELS)),
         ]
     params += [
-        # Guesses only when they are used to finish early, since nothing
-        # else reads them.
-        ("interim_results",
-         "true" if settings.get("early_finalize") else "false"),
+        # Guesses even with early_finalize off, which records what each
+        # finish would have cut without sending one. They change nothing
+        # the recognizer finalizes, and the audio is what is billed.
+        ("interim_results", "true"),
         ("smart_format", "true"),
         ("punctuate", "true"),
         ("endpointing", str(settings["endpointing"])),
@@ -1367,9 +1367,13 @@ def add_settings_arguments(parser, names):
 # A sink provides:
 #     recognized(words)       the recognizer finalized a stretch of audio,
 #                             and words says whether it heard any in it
-#     fragment(text, start, audio_end, speech_final, confidence, finalized)
-#                             a raw recognition result arrived, finalized
-#                             when a Finalize this side sent closed it
+#     fragment(text, start, audio_end, speech_final, confidence, finalized,
+#              words)         a raw recognition result arrived, finalized
+#                             when a Finalize this side sent closed it, and
+#                             words as [word, start, end] for each word
+#     guess(audio_end, quiet, unseen, decision)
+#                             a guess ended a sentence; decision is sent,
+#                             stale (too much audio after it), or off
 #     unit(unit) -> outputs   a sentence closed; returns the output names
 #                             worth requesting, where an empty list means do
 #                             not call the model for this sentence at all
@@ -1435,6 +1439,13 @@ async def pump_audio(source, socket, stop=None):
 # test "after" came back as "F". Real sentence ends there left 0.23 to 0.31
 # seconds, and most guesses taken mid-speech less than 0.2.
 FINALIZE_QUIET = 0.2
+# Seconds of audio sent after a guess's window ended, past which that
+# guess is too old to finish on. The quiet above is measured inside the
+# window, and the Finalize cuts at everything sent, so on the third field
+# test a speaker already into the next sentence lost "Each", "If", and
+# "Through" to the cut. Set loosely until the guesses table says how
+# stale guesses usually are.
+FINALIZE_UNSEEN = 0.5
 
 
 def ends_sentence(guess, held, min_words, quiet=FINALIZE_QUIET):
@@ -1460,8 +1471,34 @@ def trailing_quiet(payload):
             - words[-1].get("end", 0.0))
 
 
+def word_times(payload):
+    """Each word of a result with its start and end, as [word, start, end].
+
+    The result's own start and duration cover the audio the recognizer was
+    sent, silence included, so only these say when the words were spoken.
+    """
+    alternatives = payload.get("channel", {}).get("alternatives", [])
+    words = alternatives[0].get("words") if alternatives else None
+    return [[word.get("punctuated_word", word.get("word", "")),
+             round(word.get("start", 0.0), 3), round(word.get("end", 0.0), 3)]
+            for word in words or []]
+
+
+def finalize_decision(finalize, unseen):
+    """What becomes of a guess worth finishing: sent, stale, or off.
+
+    Off still reaches the sink, so a meeting run without early finishing
+    records how many of its finishes would have cut a word.
+    """
+    if not finalize:
+        return "off"
+    if unseen is not None and unseen > FINALIZE_UNSEEN:
+        return "stale"
+    return "sent"
+
+
 async def listen(socket, segmenter, translator, sink, queue,
-                 finalize=False):
+                 finalize=False, clock=None):
     """Read ASR results, segment them, and launch translations.
 
     With finalize, the recognizer's running guesses decide when to ask it
@@ -1470,6 +1507,9 @@ async def listen(socket, segmenter, translator, sink, queue,
     word waited four seconds or more for the rest of its fragment. A guess
     that ends a sentence is the moment the words are all there, and a
     Finalize hands them over then. The guesses themselves are never shown.
+
+    The clock is the source's, and says how much audio has gone up since
+    a guess's window ended, which is audio the guess never heard.
     """
     context = deque(maxlen=CONTEXT_UNITS)
     # A Finalize is sent once per stretch: the guesses keep arriving until
@@ -1508,11 +1548,22 @@ async def listen(socket, segmenter, translator, sink, queue,
             text = (alternatives[0].get("transcript", "").strip()
                     if alternatives else "")
             if not payload.get("is_final"):
-                if finalize and not asked and ends_sentence(
+                quiet = trailing_quiet(payload)
+                if asked or not ends_sentence(
                         text, segmenter.held_words(), segmenter.min_words,
-                        trailing_quiet(payload)):
-                    asked = True
+                        quiet):
+                    continue
+                guess_end = (payload.get("start", 0.0)
+                             + payload.get("duration", 0.0))
+                unseen = (None if clock is None
+                          else clock.position - guess_end)
+                decision = finalize_decision(finalize, unseen)
+                sink.guess(guess_end, quiet, unseen, decision)
+                if decision == "sent":
                     await socket.send(json.dumps({"type": "Finalize"}))
+                # A stale guess is passed over for the next one, which
+                # has heard more of the audio the Finalize would close.
+                asked = decision != "stale"
                 continue
             asked = False
             if not alternatives:
@@ -1535,7 +1586,7 @@ async def listen(socket, segmenter, translator, sink, queue,
                             and not finalized)
             confidence = alternatives[0].get("confidence")
             sink.fragment(text, start, audio_end, speech_final, confidence,
-                          finalized)
+                          finalized, word_times(payload))
             for taken in segmenter.add(text, speech_final, start, audio_end,
                                        confidence):
                 await emit(taken)
@@ -1602,8 +1653,11 @@ class TerminalSink:
         pass
 
     def fragment(self, text, start, audio_end, speech_final, confidence,
-                 finalized=False):
+                 finalized=False, words=None):
         print(f"{self.dim}  . {text}{self.reset}")
+
+    def guess(self, audio_end, quiet, unseen, decision):
+        pass
 
     def unit(self, unit):
         lag = stream_lag(self.source, unit.audio_end)
@@ -1712,7 +1766,8 @@ async def run(args, settings, keys):
             pump = asyncio.create_task(pump_audio(source, socket, stop))
             reader = asyncio.create_task(
                 listen(socket, segmenter, translator, sink, queue,
-                       settings["early_finalize"]))
+                       settings["early_finalize"],
+                       getattr(source, "clock", None)))
             writer = asyncio.create_task(
                 publish(queue, sink, settings["hold"]))
             await stop.wait()

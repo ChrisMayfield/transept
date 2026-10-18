@@ -71,7 +71,20 @@ CREATE TABLE IF NOT EXISTS fragments (
   speech_final INTEGER, confidence REAL, text TEXT,
   -- 1 when a Finalize sent on a guess ending a sentence closed it, last
   -- for the reason room is.
-  finalized INTEGER);
+  finalized INTEGER,
+  -- Each word as [word, start, end] in JSON, in the same seconds as start,
+  -- and the lag of audio_end as it arrived, which together say on the
+  -- wall clock when each word was spoken.
+  words TEXT, lag REAL);
+
+-- Every guess that ended a sentence and could have asked the recognizer
+-- to finish: where its window ended, the quiet after its last word, the
+-- audio sent after its window (unseen), and whether a Finalize was sent,
+-- passed up as stale, or not sent because early_finalize was off.
+CREATE TABLE IF NOT EXISTS guesses (
+  id INTEGER PRIMARY KEY,
+  session_id INTEGER NOT NULL, run INTEGER, at REAL,
+  audio_end REAL, quiet REAL, unseen REAL, decision TEXT);
 
 -- One row per few seconds of a run, saying what the audio did on its way
 -- to the recognizer: seconds captured and how loud (rms and peak in dBFS,
@@ -90,6 +103,7 @@ CREATE INDEX IF NOT EXISTS fragments_by_session
 CREATE INDEX IF NOT EXISTS translations_by_session
   ON translations (session_id, seq);
 CREATE INDEX IF NOT EXISTS audio_by_session ON audio (session_id, id);
+CREATE INDEX IF NOT EXISTS guesses_by_session ON guesses (session_id, id);
 """
 
 # Queue depth. A meeting produces ten to twenty lines a minute and about as
@@ -108,6 +122,8 @@ ADDED_COLUMNS = (
     ("sessions", "room", "TEXT"),
     *(("lines", column, "INTEGER") for column in TOKEN_COLUMNS),
     ("fragments", "finalized", "INTEGER"),
+    ("fragments", "words", "TEXT"),
+    ("fragments", "lag", "REAL"),
 )
 
 # Seconds of audio each row of the audio table describes, here because both
@@ -241,6 +257,9 @@ class Recorder:
     def audio(self, **row):
         self._put(("audio", row))
 
+    def guess(self, **row):
+        self._put(("guess", row))
+
     def _put(self, item):
         if self.task is None:
             return
@@ -303,12 +322,20 @@ class Recorder:
         elif kind == "fragment":
             self.handle.execute(
                 "INSERT INTO fragments (session_id, run, at, start,"
-                " audio_end, speech_final, confidence, text, finalized)"
-                " VALUES (?,?,?,?,?,?,?,?,?)",
+                " audio_end, speech_final, confidence, text, finalized,"
+                " words, lag) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (self.session_id, row["run"], row["at"], row["start"],
                  row["audio_end"], int(bool(row["speech_final"])),
                  row["confidence"], row["text"],
-                 int(bool(row.get("finalized")))))
+                 int(bool(row.get("finalized"))),
+                 json.dumps(row["words"]) if row.get("words") else None,
+                 row.get("lag")))
+        elif kind == "guess":
+            self.handle.execute(
+                "INSERT INTO guesses (session_id, run, at, audio_end, quiet,"
+                " unseen, decision) VALUES (?,?,?,?,?,?,?)",
+                (self.session_id, row["run"], row["at"], row["audio_end"],
+                 row["quiet"], row["unseen"], row["decision"]))
         elif kind == "audio":
             self.handle.execute(
                 "INSERT INTO audio (session_id, run, at, captured, received,"
@@ -477,7 +504,7 @@ def write_report(handle, session, out):
         _fabrications(page, lines)
         _corrections(page, lines)
         _closings(page, lines)
-        _latency(page, lines)
+        _latency(page, handle, session, lines)
         _pieces(page, handle, session)
         _silences(page, handle, session, lines)
         _tokens(page, lines)
@@ -532,19 +559,31 @@ def _corrections(page, lines):
                    "here. Set `correct_english` and record again.\n\n")
         return
 
-    counts = {}
+    counts, recapitalized = {}, {}
     for line in available:
         added, removed = changed_words(line["heard"], line["english"])
         heard = WORD.findall(line["heard"] or "")
+        spelled = {token.lower() for token in heard}
         for word in added:
             if not worth_a_keyterm(word, heard):
                 continue
             key = word.lower()
+            if key in spelled:
+                # Heard with every letter right. On the third field test
+                # these were half the table, "savior" and "brother" above
+                # the words the recognizer actually missed.
+                entry = recapitalized.setdefault(key, {"word": word, "n": 0})
+                entry["n"] += 1
+                continue
             entry = counts.setdefault(key, {"word": word, "n": 0, "was": []})
             entry["n"] += 1
             entry["was"].extend(removed)
-    if not counts:
+    if not counts and not recapitalized:
         page.write("Every corrected line came back unchanged.\n\n")
+        return
+    if not counts:
+        page.write("Nothing was misheard and repaired.\n\n")
+        _recapitalized(page, recapitalized)
         return
     page.write("The recognizer missed these and the glossary repaired them "
                "afterwards. Putting them in keyterms.txt gets them right at "
@@ -557,6 +596,23 @@ def _corrections(page, lines):
         was = ", ".join(sorted(set(entry["was"]))[:4]) or "-"
         page.write(f"| {entry['word']} | {entry['n']} | {was} |\n")
     page.write("\n")
+    _recapitalized(page, recapitalized)
+
+
+def _recapitalized(page, entries):
+    """Words heard right and only given a capital, apart from the table.
+
+    Mostly titles like "Brother" and "Savior", which need no key term, but
+    a name the recognizer spelled right without knowing it was a name
+    lands here too, and is worth one.
+    """
+    if not entries:
+        return
+    listed = ", ".join(
+        f"{entry['word']} ({entry['n']})"
+        for entry in sorted(entries.values(), key=lambda e: -e["n"]))
+    page.write(f"Heard with the right letters and only capitalized, so a "
+               f"key term is needed only for a name: {listed}.\n\n")
 
 
 def _closings(page, lines):
@@ -577,14 +633,90 @@ def _closings(page, lines):
     page.write("\n")
 
 
-def _latency(page, lines):
+def spoken_times(handle, session_id, lines):
+    """For each line's seq, the wall clock its first and last words were
+    spoken, or nothing for a recording without word times.
+
+    The words of a run's fragments, in order, are the words of its lines,
+    since the segmenter regroups them and drops none, so each line takes
+    the next as many words as it has. A run whose counts disagree is left
+    out rather than misaligned.
+    """
+    if "words" not in columns(handle, "fragments"):
+        return {}
+    spoken = {}
+    by_run = {}
+    for row in handle.execute(
+            "SELECT run, at, start, audio_end, text, words, lag"
+            " FROM fragments WHERE session_id = ? AND text <> ''"
+            " ORDER BY id", (session_id,)):
+        by_run.setdefault(row["run"], []).append(row)
+    for run, fragments in by_run.items():
+        times = []
+        for fragment in fragments:
+            if fragment["lag"] is None:
+                times = None
+                break
+            count = len(fragment["text"].split())
+            words = [(start, finish) for _, start, finish
+                     in json.loads(fragment["words"] or "[]")]
+            if len(words) != count:
+                # smart_format can write "5PM" for the words "5" and
+                # "PM", so the transcript's words are spread over the
+                # span its words were spoken in instead.
+                begin, close = ((words[0][0], words[-1][1]) if words
+                                else (fragment["start"],
+                                      fragment["audio_end"]))
+                step = (close - begin) / count
+                words = [(begin + index * step, begin + (index + 1) * step)
+                         for index in range(count)]
+            # Where audio_end sat on the wall clock, from its lag as it
+            # arrived, and every word back from there.
+            end = fragment["at"] - fragment["lag"]
+            times.extend((end - (fragment["audio_end"] - start),
+                          end - (fragment["audio_end"] - finish))
+                         for start, finish in words)
+        ours = [line for line in lines if line["run"] == run]
+        if times is None or len(times) != sum(
+                len(line["heard"].split()) for line in ours):
+            continue
+        position = 0
+        for line in ours:
+            count = len(line["heard"].split())
+            if not count:
+                continue
+            spoken[line["seq"]] = (times[position][0],
+                                   times[position + count - 1][1])
+            position += count
+    return spoken
+
+
+def _latency(page, handle, session, lines):
     page.write("## Latency\n\n")
     lags = [line["lag"] for line in lines if line["lag"] is not None]
     waits = [line["latency"] for line in lines
              if line["latency"] is not None]
+    spoken = spoken_times(handle, session["id"], lines)
+    timed = [line for line in lines
+             if line["seq"] in spoken and line["at"] is not None]
+    if timed:
+        first = [line["at"] - spoken[line["seq"]][0] for line in timed]
+        last = [line["at"] - spoken[line["seq"]][1] for line in timed]
+        page.write(f"From a line's first word being spoken to the English "
+                   f"line appearing: {latency_summary(first)}.\n\n")
+        page.write(f"From its last word: {latency_summary(last)}.\n\n")
+        translated = [line["at"] + line["latency"] - spoken[line["seq"]][0]
+                      for line in timed if line["latency"] is not None]
+        if translated:
+            page.write(f"From its first word to the translation appearing: "
+                       f"{latency_summary(translated)}.\n\n")
     if lags:
-        page.write(f"Subtitle lag, from the words being spoken to the "
-                   f"English line appearing: {latency_summary(lags)}.\n\n")
+        # Not the reader's wait: the end of a piece is where the recognizer
+        # stopped listening, which after a Finalize is the moment it was
+        # sent, so this is mostly the recognizer's round trip.
+        page.write(f"From the end of the audio the recognizer closed a "
+                   f"line's last piece on, to the English line: "
+                   f"{latency_summary(lags)}.\n\n")
     if waits:
         page.write(f"Translation, on top of that: "
                    f"{latency_summary(waits)}.\n\n")
@@ -632,6 +764,55 @@ def _pieces(page, handle, session):
     for ending, count in endings.items():
         page.write(f"- {ending}: {count}\n")
     page.write("\n")
+    _guesses(page, handle, session)
+
+
+# What became of a guess that ended a sentence, as the report says it.
+DECISIONS = {"sent": "finished on request", "stale": "passed up as stale",
+             "off": "not asked, early_finalize off"}
+
+
+def _guesses(page, handle, session):
+    """How often a finish was asked for after speech had already resumed.
+
+    A Finalize closes all the audio sent, which runs past what the guess
+    asking for it heard. A word that began in between is cut in half or
+    lost, as "Each" and "If" were on the third field test. With
+    early_finalize off nothing is cut, and the words recorded afterwards
+    say how many would have been.
+    """
+    if not columns(handle, "guesses"):
+        return
+    rows = handle.execute(
+        "SELECT * FROM guesses WHERE session_id = ? ORDER BY id",
+        (session["id"],)).fetchall()
+    if not rows:
+        return
+    starts = {}
+    for fragment in handle.execute(
+            "SELECT run, words FROM fragments WHERE session_id = ?"
+            " AND words IS NOT NULL ORDER BY id", (session["id"],)):
+        starts.setdefault(fragment["run"], []).extend(
+            start for _, start, _ in json.loads(fragment["words"]))
+    page.write("Guesses that ended a sentence, by what became of them, "
+               "with the audio sent after each guess's window and how "
+               "often a word had already begun in it, which is a word a "
+               "Finalize then would cut. Where one was sent, a word it "
+               "cut away entirely is not counted.\n\n")
+    for decision, label in DECISIONS.items():
+        chosen = [row for row in rows if row["decision"] == decision]
+        if not chosen:
+            continue
+        unseen = [row["unseen"] for row in chosen
+                  if row["unseen"] is not None]
+        cut = sum(1 for row in chosen if row["unseen"] is not None
+                  and any(row["audio_end"] < start
+                          < row["audio_end"] + row["unseen"]
+                          for start in starts.get(row["run"], [])))
+        after = (f", unseen audio {latency_summary(unseen)}, a word begun "
+                 f"in it {cut} times" if unseen else "")
+        page.write(f"- {label}: {len(chosen)}{after}\n")
+    page.write("\n")
 
 
 # Seconds without a word before a stretch is worth a line in the report.
@@ -645,6 +826,14 @@ QUIET_DB = -50
 # What share of a stretch has to have been measured, or to have reached the
 # recognizer, before the next explanation down the list is the right one.
 DELIVERED = 0.5
+# Decibels a stretch has to sit from the session's own speech before it
+# reads as louder or quieter than somebody talking. On the third field test
+# the hymns were 8 to 15 above the talks and the opening prayer 7 below,
+# and all of them were reported alike as speaking level.
+LEVEL_MARGIN = 6
+# A change this large from one window to the next splits a stretch, since
+# one median over a hymn and the prayer after it describes neither.
+LEVEL_SPLIT = 10
 
 
 def audio_rows(handle, session_id):
@@ -686,15 +875,51 @@ def silent_stretches(rows):
     for start, windows in stretches:
         if start is None:
             start = windows[0]["at"] - AUDIO_WINDOW
-        result.append((start, windows[-1]["at"], windows))
+        result.extend(split_by_level(start, windows))
     return result
 
 
-def explain_silence(seconds, windows):
+def split_by_level(start, windows):
+    """One stretch as (start, end, windows) parts, cut where the level jumps.
+
+    Each window is compared with the last few of the part it would join,
+    and a part ends only where this window and the next both differ, so
+    a single loud bang inside a hymn does not split it.
+    """
+    parts, current = [], []
+    for index, row in enumerate(windows):
+        recent = sorted(window["rms_db"] for window in current[-3:]
+                        if window["rms_db"] is not None)
+        ahead = [window["rms_db"] for window in windows[index:index + 2]]
+        if (recent and len(ahead) == 2 and None not in ahead
+                and all(abs(level - recent[len(recent) // 2]) > LEVEL_SPLIT
+                        for level in ahead)):
+            parts.append((start, current[-1]["at"], current))
+            start, current = current[-1]["at"], []
+        current.append(row)
+    parts.append((start, current[-1]["at"], current))
+    return parts
+
+
+def speech_level(rows):
+    """The median level of the windows the recognizer found words in.
+
+    The yardstick for a stretch with none, since a feed's speaking level
+    depends on the room, the microphone, and the gain, and a fixed number
+    cannot know any of them.
+    """
+    levels = sorted(row["rms_db"] for row in rows
+                    if row["rms_db"] is not None
+                    and (row["results"] or 0) > (row["empty"] or 0))
+    return levels[len(levels) // 2] if levels else None
+
+
+def explain_silence(seconds, windows, speech=None):
     """Which link in the chain a stretch with no words points at.
 
     Walked in the order the audio travels, so the first link that lost it
-    is the one named.
+    is the one named. Speech is the session's own speaking level, and
+    without it a level above QUIET_DB can only be called speaking level.
     """
     measured = [row for row in windows if row["captured"] is not None]
     if measured and sum(row["captured"] for row in measured) \
@@ -713,6 +938,17 @@ def explain_silence(seconds, windows):
         return "the feed was quiet, so nobody was speaking into it"
     if sum(row["results"] or 0 for row in windows) == 0:
         return "audio at speaking level, and the recognizer sent nothing back"
+    if speech is not None and levels:
+        level = levels[len(levels) // 2]
+        if level > speech + LEVEL_MARGIN:
+            return ("louder than the speech in this session, with no words "
+                    "in it: singing or music")
+        if level < speech - LEVEL_MARGIN:
+            return ("quieter than the speech in this session, with no words "
+                    "in it: someone away from the microphone, or a quiet "
+                    "room")
+        return ("at the level of the speech in this session, and the "
+                "recognizer heard no words in it")
     return "audio at speaking level, and the recognizer heard no words in it"
 
 
@@ -733,9 +969,14 @@ def _silences(page, handle, session, lines):
     if not stretches:
         page.write(f"None as long as {SILENCE_REPORTED} seconds.\n\n")
         return
+    speech = speech_level(rows)
+    against = (f" Speech in this session sat at {speech:.0f} dBFS, which "
+               f"is what each stretch is compared with." if speech is not None
+               else "")
     page.write(f"Every stretch of {SILENCE_REPORTED} seconds or more in "
                f"which the recognizer returned no words, with the median "
-               f"level of the feed and the loudest moment in it.\n\n")
+               f"level of the feed and the loudest moment in it, split "
+               f"where the level changes.{against}\n\n")
     began = session["started_at"]
     for start, end, windows in stretches:
         seconds = end - start
@@ -747,7 +988,7 @@ def _silences(page, handle, session, lines):
                  f"peak {max(peaks):.0f} dBFS" if levels else "no levels")
         page.write(f"- **{(start - began) / 60:.1f} min**, "
                    f"{seconds:.0f}s, {level}: "
-                   f"{explain_silence(seconds, windows)}.\n")
+                   f"{explain_silence(seconds, windows, speech)}.\n")
         before = [line for line in lines if (line["at"] or 0) <= start]
         after = [line for line in lines if (line["at"] or 0) >= end]
         if before:
@@ -837,9 +1078,10 @@ def purge(handle, older_than_days):
                        (session_id,))
         handle.execute("DELETE FROM fragments WHERE session_id = ?",
                        (session_id,))
-        if columns(handle, "audio"):
-            handle.execute("DELETE FROM audio WHERE session_id = ?",
-                           (session_id,))
+        for table in ("audio", "guesses"):
+            if columns(handle, table):
+                handle.execute(f"DELETE FROM {table} WHERE session_id = ?",
+                               (session_id,))
         handle.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
     handle.commit()
     return len(doomed)

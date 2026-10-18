@@ -98,10 +98,15 @@ def asr_result(text, speech_final, start, duration, is_final=True,
                from_finalize=False, quiet=0.3):
     """One result, shaped the way Deepgram sends it, finalized by default.
 
-    Its last word ends quiet seconds before its audio does.
+    Its words share the audio evenly and the last ends quiet seconds
+    before its audio does.
     """
-    words = [{"word": word, "end": start + duration - quiet}
-             for word in text.split()[-1:]]
+    spoken = text.split()
+    step = (duration - quiet) / max(1, len(spoken))
+    words = [{"word": word.lower().strip(".,?!"), "punctuated_word": word,
+              "start": start + index * step,
+              "end": start + (index + 1) * step}
+             for index, word in enumerate(spoken)]
     return json.dumps({
         "type": "Results",
         "is_final": is_final,
@@ -355,26 +360,39 @@ class FragmentSink:
     def __init__(self):
         self.results = []
         self.fragments = []
+        self.words = []
+        self.guesses = []
         self.units = []
 
     def recognized(self, words):
         self.results.append(words)
 
     def fragment(self, text, start, audio_end, speech_final, confidence,
-                 finalized=False):
+                 finalized=False, words=None):
         self.fragments.append((text, finalized))
+        self.words.append(words)
+
+    def guess(self, audio_end, quiet, unseen, decision):
+        self.guesses.append((audio_end, unseen, decision))
 
     def unit(self, unit):
         self.units.append(unit.text)
         return []
 
 
-async def listen_to(messages, finalize):
+class SentClock:
+    """A source's clock, with this much audio already gone up."""
+
+    def __init__(self, position):
+        self.position = position
+
+
+async def listen_to(messages, finalize, clock=None):
     """Run listen alone over these messages; the sink and the socket."""
     socket = FakeSocket(messages)
     sink = FragmentSink()
     await pipeline.listen(socket, pipeline.Segmenter(99, 0.6), None, sink,
-                          asyncio.Queue(), finalize)
+                          asyncio.Queue(), finalize, clock)
     return sink, socket
 
 
@@ -439,10 +457,40 @@ async def check_early_finalize(checks):
     checks.check("and the guesses are still ignored",
                  [text for text, _ in sink.fragments]
                  == ["and so we came to the chapel."], sink.fragments)
+    checks.check("but the finish it would have asked for is kept, once",
+                 [decision for _, _, decision in sink.guesses] == ["off"],
+                 sink.guesses)
+
+    # On the third field test a speaker already into the next sentence
+    # lost its first word to a Finalize asked on a guess that had not
+    # heard it begin. The first guess here has 0.8 seconds of audio after
+    # it, the second 0.2.
+    stale = [
+        asr_result("and so we came to the chapel.", False, 0.0, 2.0,
+                   is_final=False),
+        asr_result("and so we came to the chapel.", False, 0.0, 2.6,
+                   is_final=False),
+    ]
+    sink, socket = await listen_to(stale, True, SentClock(2.8))
+    checks.check("a guess with too much audio after it is not finished on",
+                 [decision for _, _, decision in sink.guesses]
+                 == ["stale", "sent"], sink.guesses)
+    checks.check("and the next guess, which heard more of it, is",
+                 socket.finalizes == 1, socket.finalizes)
+    checks.check("what each guess had not heard is measured off the clock",
+                 [round(unseen, 2) for _, unseen, _ in sink.guesses]
+                 == [0.8, 0.2], sink.guesses)
+
+    sink, socket = await listen_to(FRAGMENTS[:1], False)
+    timed = sink.words[0] or []
+    checks.check("each word reaches the sink with its start and end",
+                 [word for word, _, _ in timed]
+                 == ["the", "meeting", "will", "start"]
+                 and all(start < end for _, start, end in timed), timed)
 
     settings = {"asr_model": "nova-3", "endpointing": 400}
-    checks.check("guesses are requested only when they are used",
-                 "interim_results=false"
+    checks.check("guesses are requested with early_finalize off as well",
+                 "interim_results=true"
                  in pipeline.build_asr_url(settings, [], "pcm")
                  and "interim_results=true" in pipeline.build_asr_url(
                      dict(settings, early_finalize=True), [], "pcm"))
@@ -1117,7 +1165,7 @@ async def check_pipeline(checks):
                  "linear16" not in opus and "sample_rate" not in opus, opus)
     checks.check("everything else about the URL is the same either way",
                  "endpointing=400" in opus and "keyterm=Kalema" in opus
-                 and "interim_results=false" in opus, opus)
+                 and "interim_results=true" in opus, opus)
     declared = (capture.ParecCapture.encoding,
                 capture.SoundDeviceCapture.encoding,
                 capture.RemoteCapture(1.0).encoding,
@@ -2822,6 +2870,129 @@ def check_sender(checks):
 # -- recording a session -----------------------------------------------------
 
 
+def check_spoken(checks):
+    """Lag from the words themselves, and finishes that would cut one.
+
+    The lag a line records runs from the end of the recognizer's window,
+    which after a Finalize is the moment it was sent, so on the third field
+    test it read 0.10 seconds at the median while readers waited about
+    five for a line's first word.
+    """
+    checks.section("When a line's words were spoken")
+    path = Path(tempfile.mkdtemp()) / "spoken.db"
+    handle = record.connect(str(path))
+    handle.execute("INSERT INTO sessions (started_at, languages, settings)"
+                   " VALUES (1000, '[]', '{\"early_finalize\": false}')")
+    # Each piece's audio ended lag seconds before it arrived, so its
+    # words sit that far back from its arrival, less their own distance
+    # from the end of the piece.
+    for at, start, end, text, words, lag in (
+            (1010.0, 0.0, 4.0, "we came to the",
+             [["we", 0.5, 0.8], ["came", 0.9, 1.2], ["to", 1.3, 1.5],
+              ["the", 1.6, 1.8]], 0.5),
+            (1012.0, 4.0, 6.0, "chapel. Each of",
+             [["chapel.", 4.0, 4.4], ["Each", 5.6, 5.8], ["of", 5.85, 5.95]],
+             0.25)):
+        handle.execute(
+            "INSERT INTO fragments (session_id, run, at, start, audio_end,"
+            " speech_final, text, finalized, words, lag)"
+            " VALUES (1, 1, ?, ?, ?, 0, ?, 0, ?, ?)",
+            (at, start, end, text, json.dumps(words), lag))
+    # A second run, whose one piece smart_format wrote as two words while
+    # the recognizer's own list has three.
+    handle.execute(
+        "INSERT INTO fragments (session_id, run, at, start, audio_end,"
+        " speech_final, text, finalized, words, lag)"
+        " VALUES (1, 2, 1020.0, 0.0, 2.0, 0, '5PM tonight.', 0, ?, 0.5)",
+        (json.dumps([["5", 0.2, 0.4], ["PM", 0.4, 0.6],
+                     ["tonight.", 0.7, 1.2]]),))
+    for seq, run, heard, at in ((1, 1, "we came to the chapel.", 1012.1),
+                                (2, 1, "Each of", 1013.0),
+                                (3, 2, "5PM tonight.", 1021.0)):
+        handle.execute(
+            "INSERT INTO lines (session_id, seq, run, at, heard, reason,"
+            " latency) VALUES (1, ?, ?, ?, ?, 'punctuation', 1.5)",
+            (seq, run, at, heard))
+    # The first guess had 1.1 seconds after it, in which "Each" began at
+    # 5.6; the second had 0.02, and nothing began in that.
+    for end, unseen in ((4.6, 1.1), (1.85, 0.02)):
+        handle.execute("INSERT INTO guesses (session_id, run, at, audio_end,"
+                       " quiet, unseen, decision)"
+                       " VALUES (1, 1, 0, ?, 0.3, ?, 'off')", (end, unseen))
+    handle.close()
+
+    handle = record.open_read_only(str(path))
+    lines = record.lines_of(handle, 1)
+    spoken = record.spoken_times(handle, 1, lines)
+    rounded = {seq: tuple(round(value, 2) for value in pair)
+               for seq, pair in spoken.items()}
+    checks.check("each line's first and last words are placed on the clock",
+                 rounded.get(1) == (1006.0, 1010.15)
+                 and rounded.get(2) == (1011.35, 1011.7), rounded)
+    checks.check("a piece written with fewer words than it was spoken in "
+                 "spreads them over its span, and keeps its run",
+                 rounded.get(3) == (1017.7, 1018.7), rounded)
+    extra = [*map(dict, lines),
+             {"seq": 4, "run": 1, "heard": "and more", "at": 1014.0}]
+    left = record.spoken_times(handle, 1, extra)
+    checks.check("a run whose words do not add up is left out, not guessed",
+                 set(left) == {3}, left)
+    report = Path(tempfile.mkdtemp()) / "spoken.md"
+    record.write_report(handle, record.resolve_session(handle, "last"),
+                        str(report))
+    handle.close()
+    text = report.read_text(encoding="utf-8")
+    checks.check("the report measures lag from a line's first word",
+                 "From a line's first word being spoken to the English line "
+                 "appearing: median 3.30s" in text,
+                 text[text.find("## Latency"):][:300])
+    checks.check("and says how often a finish would have cut a word",
+                 "not asked, early_finalize off: 2" in text
+                 and "a word begun in it 1 times" in text,
+                 text[text.find("## Recognizer"):][:600])
+
+
+def check_levels(checks):
+    """A stretch with no words, judged against the speech around it.
+
+    On the third field test the opening hymn and the prayer after it made
+    one stretch with one median, and the hymns, the sacrament being passed,
+    and the prayer were all reported alike as speaking level.
+    """
+    checks.section("Telling music from a speaker away from the microphone")
+
+    def window(index, level, words):
+        return {"run": 1, "at": 5.0 * index, "captured": 5.0,
+                "received": 5.0, "rms_db": level, "peak_db": level + 10,
+                "results": 2 if words else 1, "empty": 0 if words else 1}
+
+    levels = ([(-25, True)] * 4 + [(-10, False)] * 6 + [(-32, False)] * 6
+              + [(-25, True)] * 2)
+    rows = [window(index, level, words)
+            for index, (level, words) in enumerate(levels, 1)]
+    speech = record.speech_level(rows)
+    checks.check("speech is the level of the windows with words in them",
+                 speech == -25, speech)
+    parts = record.silent_stretches(rows)
+    checks.check("a hymn and the prayer after it are two stretches",
+                 [len(windows) for _, _, windows in parts] == [6, 6],
+                 [len(windows) for _, _, windows in parts])
+    # Read from the parts there are, so one stretch fails the checks below
+    # rather than ending the section.
+    hymn, prayer = ([record.explain_silence(30.0, windows, speech)
+                     for _, _, windows in parts] + ["", ""])[:2]
+    checks.check("louder than the speech is music",
+                 "singing or music" in hymn, hymn)
+    checks.check("quieter than it is someone away from the microphone",
+                 "away from the microphone" in prayer, prayer)
+    bang = [(-10, False)] * 3 + [(-40, False)] + [(-10, False)] * 3
+    rows = [window(index, level, words)
+            for index, (level, words) in enumerate(bang, 1)]
+    checks.check("one odd window does not split a stretch",
+                 len(record.silent_stretches(rows)) == 1,
+                 len(record.silent_stretches(rows)))
+
+
 async def check_store(checks):
     """Record a session to a real file, then read it back.
 
@@ -2851,6 +3022,7 @@ async def check_store(checks):
     await drive(session, translator)
     # One piece finished on request, as early_finalize asks for one.
     session.fragment("Let us pray.", 8.0, 9.0, False, 0.9, True)
+    session.guess(9.0, 0.3, 0.1, "sent")
     # What a run's watcher writes as each window closes: the recognizer
     # answered four times, the meter heard five seconds at -6 dBFS, and the
     # clock moved on from where the last window left it.
@@ -2913,6 +3085,19 @@ async def check_store(checks):
                   for row in fragments[2:3]] == [(5.0, 6.5, 1)]
                  and all(row["run"] == 1 and row["at"] for row in fragments),
                  [dict(row) for row in fragments])
+    words = json.loads(fragments[2]["words"] or "[]")
+    checks.check("and each word's own start and end",
+                 [word for word, _, _ in words]
+                 == ["Brother", "Kalema", "will", "pray."]
+                 and words[0][1] == 5.0, words)
+    checks.check("and how far behind its audio's end was as it arrived",
+                 all(row["lag"] is not None for row in fragments),
+                 [row["lag"] for row in fragments])
+    guessed = handle.execute("SELECT * FROM guesses").fetchall()
+    checks.check("a guess that asked for a finish is kept, with its unseen "
+                 "audio", [(row["audio_end"], row["unseen"], row["decision"])
+                           for row in guessed] == [(9.0, 0.1, "sent")],
+                 [dict(row) for row in guessed])
     grouped = record.translations_of(handle, 1)
     checks.check("the translation was stored against its language",
                  grouped[1][0]["language"] == "French"
@@ -2978,10 +3163,13 @@ async def check_store(checks):
     record.purge(handle, -1)
     left = [handle.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
             for table in ("sessions", "lines", "translations", "fragments",
-                          "audio")]
-    checks.check("a purge takes the fragments and audio with the lines",
-                 left == [0, 0, 0, 0, 0], left)
+                          "audio", "guesses")]
+    checks.check("a purge takes the fragments, audio, and guesses with the "
+                 "lines", left == [0, 0, 0, 0, 0, 0], left)
     handle.close()
+
+    check_spoken(checks)
+    check_levels(checks)
 
     checks.section("A recording made before the room column existed")
     path = Path(tempfile.mkdtemp()) / "earlier.db"
@@ -3152,20 +3340,26 @@ async def check_store(checks):
                    "(?, '[]')", (time.time(),))
     handle.execute(
         "INSERT INTO lines (session_id, seq, heard, english, reason) VALUES"
-        " (1, 1, 'read chapter two. the words of brother kalema',"
-        " 'Read chapter 2. The words of Brother Kalema', 'endpoint')")
+        " (1, 1, 'read chapter two. the words of brother kalema on"
+        " emmanuel', 'Read chapter 2. The words of Brother Kalema on"
+        " Immanuel', 'endpoint')")
     handle.close()
     handle = record.open_read_only(str(worklist))
     listed = Path(tempfile.mkdtemp()) / "worklist.md"
     record.write_report(handle, record.resolve_session(handle, "last"),
                         str(listed))
     handle.close()
-    table = [row.split("|")[1].strip()
-             for row in listed.read_text(encoding="utf-8").splitlines()
+    written = listed.read_text(encoding="utf-8")
+    table = [row.split("|")[1].strip() for row in written.splitlines()
              if row.startswith("| ") and not row.startswith("| term")]
-    checks.check("the worklist in the report keeps the name and drops the "
-                 "rest", "Kalema" in table and "The" not in table
-                 and "2" not in table, table)
+    checks.check("the worklist in the report keeps the misheard name and "
+                 "drops the rest", table == ["Immanuel"], table)
+    # Half the third field test's table was words like "savior" heard right
+    # and only capitalized, above the terms the recognizer missed.
+    checks.check("a name heard right and only capitalized is listed apart",
+                 "only capitalized, so a key term is needed only for a "
+                 "name: Brother (1), Kalema (1)" in written,
+                 written[written.find("## Terms"):][:900])
 
     report = Path(tempfile.mkdtemp()) / "review.md"
     handle = record.open_read_only(str(path))

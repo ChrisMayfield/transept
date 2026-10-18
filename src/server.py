@@ -620,7 +620,8 @@ class Session:
                     asyncio.create_task(pump_audio(source, socket)),
                     asyncio.create_task(
                         listen(socket, segmenter, self.translator, self,
-                               queue, config["early_finalize"])),
+                               queue, config["early_finalize"],
+                               getattr(source, "clock", None))),
                     asyncio.create_task(publish(queue, self, config["hold"])),
                 ]
                 try:
@@ -688,18 +689,32 @@ class Session:
             self.last_words = time.monotonic()
 
     def fragment(self, text, start, audio_end, speech_final, confidence,
-                 finalized=False):
+                 finalized=False, words=None):
         """Raw fragments are half sentences. Only whole ones reach a phone.
 
         They are recorded, though, with when each arrived, because a
         segmenter change can then be replayed against a real meeting
-        instead of argued from the lines it happened to produce.
+        instead of argued from the lines it happened to produce. The lag
+        of their audio's end is what places each word's own times on the
+        wall clock, and so measures a line from its words being spoken.
         """
         if self.recorder:
             self._record("fragment", run=self.run, at=time.time(),
                          start=start, audio_end=audio_end,
                          speech_final=speech_final, confidence=confidence,
-                         finalized=finalized, text=text)
+                         finalized=finalized, text=text, words=words,
+                         lag=stream_lag(self.run_source, audio_end))
+
+    def guess(self, audio_end, quiet, unseen, decision):
+        """A guess ended a sentence, which is a finish asked or passed up.
+
+        Kept with early_finalize off too, since the words recorded after
+        it say whether a Finalize sent then would have cut one.
+        """
+        if self.recorder:
+            self._record("guess", run=self.run, at=time.time(),
+                         audio_end=audio_end, quiet=quiet, unseen=unseen,
+                         decision=decision)
 
     def unit(self, unit):
         """Publish the English line and say which outputs are worth buying."""

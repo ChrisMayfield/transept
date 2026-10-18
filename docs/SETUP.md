@@ -379,7 +379,9 @@ Lower is snappier but clips people who pause in the middle of a sentence.
 
 `early_finalize` (on) asks the recognizer to finish a piece as soon as its running guess ends a sentence and the speaker has paused for a fifth of a second.
 Left to itself the recognizer rarely hears a long enough pause in a room, and waits four seconds or more before handing over words.
-The report's "Recognizer pieces" section says how many pieces it finished this way; turn it off if lines start splitting in the middle of sentences.
+A guess that arrives after more audio than it heard is passed over, because the request cuts at all the audio sent, and a word begun since would be cut in half.
+The report's "Recognizer pieces" section says how many pieces it finished this way, and how often a word had already begun in the audio a guess never heard.
+That second count is kept with `early_finalize` off too, so a Sunday without it says how many words it would have cut; turn it off if lines start splitting in the middle of sentences.
 
 `ceiling` (5 seconds) is how long a half-finished sentence waits before being translated anyway.
 When it runs out, the sentence is cut at its last comma if there is one, and the rest waits for its own ending.

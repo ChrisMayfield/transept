@@ -109,16 +109,19 @@ A setting holding that address outright would be a second copy of the hostname a
 
 `record.py` is both halves of persistence: the `Recorder` a `Session` writes through, and the command that reads a session back as a Markdown document.
 Recording is off unless `[session] record` is set, and nothing is ever deleted without `--purge`.
-A recorded session keeps every fragment the recognizer finalized, with its timing and when it arrived, and the tokens each translation call reported.
+A recorded session keeps every fragment the recognizer finalized, with its timing, each word's own start and end, when it arrived and how far behind its audio was, and the tokens each translation call reported.
+The word times are what measure a line from its words being spoken: a fragment's `audio_end` is where the recognizer stopped listening, which after a `Finalize` is the moment it was sent, so a lag read from it measured 0.10 seconds at the median on a Sunday when readers waited about five for a line's first word.
+It keeps every guess that could have asked for a finish in `guesses`, with how much audio had gone up after it and what became of it.
 It also keeps a row in `audio` every `AUDIO_WINDOW` seconds: how much audio was captured and how loud, how much reached the recognizer, and how many results came back and how many of those were empty.
 A field test lost half minutes at a time with nothing recorded to say whether the room was silent, the feed quiet, the audio missing, or heard and not understood, and the report's "Stretches with no words" walks those three points in the order the audio travels to say which.
+A stretch's level is judged against the session's own speech, the median of the windows with words in them, and a stretch is split where the level jumps, because on the third field test one median over the opening hymn and the prayer after it called both speaking level.
 The fragments are there so a change to the segmenter can be replayed against a real meeting rather than judged from the lines the old one happened to produce, and the tokens so that a change making lines shorter can be weighed against what the extra calls cost.
 `Translator.translate` returns its answer as a `Translations`, which is a dict with a `usage` attribute, so every caller that reads a language by name is unchanged and the counts ride with the call that paid for them.
 
 ### One pipeline, two sinks
 
 Both entry points run the same three tasks over one websocket and differ only in where finished text goes, so that difference sits behind a sink.
-A sink provides `recognized(words)` for every finalized result, empty or not, `fragment(text, start, audio_end, speech_final, confidence, finalized)`, `unit(unit)` returning the output names worth requesting, `translated`, `timed_out`, and `failed`.
+A sink provides `recognized(words)` for every finalized result, empty or not, `fragment(text, start, audio_end, speech_final, confidence, finalized, words)`, `guess(audio_end, quiet, unseen, decision)` for every guess that could have asked for a finish, `unit(unit)` returning the output names worth requesting, `translated`, `timed_out`, and `failed`.
 `TerminalSink` prints; `Session` is its own sink, publishing to the `Hub` and keeping the counters the operator page shows.
 An empty list from `unit` means do not call the model for that sentence at all.
 
@@ -271,7 +274,10 @@ Interim recognition results are requested but never shown: they decide when to s
 Left alone the recognizer finalizes on a pause of `endpointing` or on its own clock, and on the second field test most pieces ended on the clock, four seconds or more after their first word.
 `listen` sends `Finalize` once a guess ends a sentence with `FINALIZE_QUIET` seconds of silence after its last word, since `Finalize` closes all the audio sent so far, and asked while the next word is arriving it cuts that word in half.
 Its answer comes back marked `speech_final`, which `listen` clears, because the finished text can run on past the sentence the guess ended, and the segmenter would close the line there.
-`early_finalize = false` restores the old behavior, and `interim_results` follows it, so a room that turns it off gets no guesses at all.
+That quiet is measured inside the guess's own window, though, and by the time the guess arrives more audio has gone up that it never heard, so on the third field test a speaker already into the next sentence lost "Each", "If", and "Through" to the cut.
+`listen` therefore reads the source's clock and passes up a guess with more than `FINALIZE_UNSEEN` seconds of audio after its window, for the next guess, which has heard more of it.
+`early_finalize = false` sends no `Finalize`, but guesses are requested either way and each one that would have asked is still handed to the sink as `off`, because the words recorded after it say whether that finish would have cut one.
+Interim results change nothing the recognizer finalizes, and the audio is what is billed.
 
 A local device is wrapped in `Stamped` before it is wrapped in the encoder, and lag is read from its `StreamClock` rather than from when the run began.
 The clock counts audio as it comes off the device, which is also what the recognizer's timestamps count, so a line's lag is how long ago its words were captured.
@@ -454,7 +460,7 @@ After adding a check for a fix, revert the fix and confirm the check fails.
 
 What `selftest.py` cannot tell you is whether the subtitles are any good.
 Recognition accuracy is decided by the microphone feed and can only be judged in the actual room, and translation quality needs a native speaker and `review.py`.
-Latency claims should come from an actual run: `python3 ../src/pipeline.py --no-translate` from `local/` tags each line with how far behind real time it arrived, and a full `pipeline.py` or `review.py` run prints translation median and p95 on exit.
+Latency claims should come from an actual run: `python3 ../src/pipeline.py --no-translate` from `local/` tags each line with how long after the end of its last piece's audio it arrived, which is the recognizer's delay and not the reader's, a recorded session's report measures from the words being spoken, and a full `pipeline.py` or `review.py` run prints translation median and p95 on exit.
 
 ## Known limits
 
