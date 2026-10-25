@@ -687,6 +687,45 @@ def check_sentence_splitting(checks):
     checks.check("an abbreviation is not the end of a sentence",
                  emitted == [], emitted)
 
+    initial = segmenter()
+    emitted = initial.add("In a talk from this last general conference by "
+                          "sister Tamara W.", False, 0.0, 3.0)
+    checks.check("a middle initial is not the end of a sentence",
+                 emitted == [], emitted)
+    emitted = initial.add("Runia, it's called The Sculpting of Our Souls.",
+                          False, 3.0, 2.0)
+    checks.check("so the surname stays on the line with the rest of the "
+                 "name", [unit[1] for unit in emitted]
+                 == ["In a talk from this last general conference by sister "
+                     "Tamara W. Runia, it's called The Sculpting of Our "
+                     "Souls."], emitted)
+    inside = segmenter()
+    emitted = inside.add("A talk by sister Tamara W. Runia. It's called the",
+                         False, 0.0, 3.0)
+    checks.check("nor is one inside a fragment",
+                 [unit[1] for unit in emitted]
+                 == ["A talk by sister Tamara W. Runia."], emitted)
+
+    paused = segmenter()
+    emitted = paused.add("you can go to that teacher council meeting the",
+                         True, 0.0, 3.0)
+    checks.check("an endpoint after a word no clause ends on holds the line",
+                 emitted == [] and paused.parts, emitted)
+    emitted = paused.add("half hour that you don't teach.", False, 3.0, 2.0)
+    checks.check("until the rest of it arrives",
+                 [unit[1] for unit in emitted]
+                 == ["you can go to that teacher council meeting the half "
+                     "hour that you don't teach."], emitted)
+    brief = segmenter()
+    emitted = brief.add("So right", True, 0.0, 1.0)
+    checks.check("so does an endpoint after too few words to translate",
+                 emitted == [], emitted)
+    whole = segmenter()
+    emitted = whole.add("we'll sing our closing hymn number one zero six",
+                        True, 0.0, 3.0)
+    checks.check("an endpoint after what could be a whole clause closes it",
+                 [unit[2] for unit in emitted] == ["endpoint"], emitted)
+
     lowered = segmenter()
     emitted = lowered.add("we read about it in verse 16 of chapter one. and "
                           "then", False, 0.0, 3.0)
@@ -2914,11 +2953,15 @@ def check_spoken(checks):
             " latency) VALUES (1, ?, ?, ?, ?, 'punctuation', 1.5)",
             (seq, run, at, heard))
     # The first guess had 1.1 seconds after it, in which "Each" began at
-    # 5.6; the second had 0.02, and nothing began in that.
-    for end, unseen in ((4.6, 1.1), (1.85, 0.02)):
+    # 5.6. The second reported 0.3 seconds of quiet after "to", in which
+    # "the" had already begun. The third ended on "came" with "to" still
+    # to come after its cut.
+    for end, quiet, unseen in ((4.6, 0.2, 1.1), (1.85, 0.3, 0.02),
+                               (1.25, 0.03, 0.02)):
         handle.execute("INSERT INTO guesses (session_id, run, at, audio_end,"
                        " quiet, unseen, decision)"
-                       " VALUES (1, 1, 0, ?, 0.3, ?, 'off')", (end, unseen))
+                       " VALUES (1, 1, 0, ?, ?, ?, 'off')",
+                       (end, quiet, unseen))
     handle.close()
 
     handle = record.open_read_only(str(path))
@@ -2947,8 +2990,9 @@ def check_spoken(checks):
                  "appearing: median 3.30s" in text,
                  text[text.find("## Latency"):][:300])
     checks.check("and says how often a finish would have cut a word",
-                 "not asked, early_finalize off: 2" in text
-                 and "a word begun in it 1 times" in text,
+                 "not asked, early_finalize off: 3" in text
+                 and "a word already begun at the cut 2 times, 1 of them "
+                 "inside the guess's own quiet" in text,
                  text[text.find("## Recognizer"):][:600])
 
 
@@ -2970,7 +3014,13 @@ def check_names(checks):
              "join me in sustaining Kalema in his calling"),
             (3, "from president eyrie", "from President Eyring"),
             (4, "meet on mount prophet", "meet on Mount Crawford"),
-            (5, "of us can do this.", "Each of us can do this.")):
+            (5, "of us can do this.", "Each of us can do this."),
+            (6, "rina, it's called the sculpting",
+             "Runia, it's called the sculpting"),
+            (7, "so my name is elders stockett",
+             "So my name is Elder Stockett."),
+            (8, "in the young women's presidency",
+             "in the Young Women presidency")):
         handle.execute(
             "INSERT INTO lines (session_id, seq, run, heard, english, reason)"
             " VALUES (1, ?, 1, ?, ?, 'punctuation')", (seq, heard, english))
@@ -2987,8 +3037,12 @@ def check_names(checks):
                  found[3] == {"Eyring": "glossary"}, found[3])
     checks.check("a name in neither is marked as the model's own",
                  found[4] == {"Crawford": "neither"}, found[4])
-    checks.check("a capital that only opens the sentence is not a name",
-                 found[5] == {}, found[5])
+    checks.check("a capital that only opens the sentence is set apart",
+                 found[5] == {"Each": "opening"}, found[5])
+    checks.check("which is where a name opening the line now shows",
+                 found[6] == {"Runia": "opening"}, found[6])
+    checks.check("a plural or possessive dropped is not a new name",
+                 found[7] == {} and found[8] == {}, (found[7], found[8]))
     report = Path(tempfile.mkdtemp()) / "names.md"
     record.write_report(handle, record.resolve_session(handle, "last"),
                         str(report))

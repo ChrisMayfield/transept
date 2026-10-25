@@ -522,6 +522,11 @@ SOURCES = (
     ("neither",
      "From neither the glossary nor the preceding lines, so from the "
      "model's own knowledge, which the prompt forbids. Check these first."),
+    ("opening",
+     "From neither, but opening a sentence, where a capital is usually "
+     "grammar, such as a first word the recognizer lost and the model "
+     "restored. A name the model supplied lands here too when it opens "
+     "the line."),
     ("context",
      "From the preceding lines, which the model may borrow a name from. "
      "Such a name is only as right as the recognizer's spelling of it "
@@ -560,16 +565,32 @@ def name_sources(line, earlier, glossary):
               for word in WORD.findall(sentence)[1:]}
     context = {word.lower() for text in earlier
                for word in WORD.findall(text or "")}
+    heard = {word.lower() for word in WORD.findall(line["heard"] or "")}
     found = {}
     for word in WORD.findall(line["english"]):
         lowered = word.lower()
         if (not PROPER.match(word) or lowered not in introduced
-                or lowered in COMMON_WORDS
-                or (lowered in opening and lowered not in middle)):
+                or lowered in COMMON_WORDS or inflected(lowered, heard)):
             continue
+        # Dropping a capital that opens a sentence hid "Runia", supplied
+        # for "Rina" at the start of a line on the fourth field test.
         found[word] = ("glossary" if lowered in glossary
-                       else "context" if lowered in context else "neither")
+                       else "context" if lowered in context
+                       else "opening" if (lowered in opening
+                                          and lowered not in middle)
+                       else "neither")
     return found
+
+
+def inflected(word, heard):
+    """Whether the word was heard with or without a plural or possessive.
+
+    "Young Women's" corrected to "Young Women" and "Elders" to "Elder" are
+    the same word heard, not a name the model brought in.
+    """
+    forms = {word + "s", word + "'s", word.removesuffix("'s"),
+             word.removesuffix("s")} - {word}
+    return bool(forms & heard)
 
 
 def _fabrications(page, lines, session):
@@ -839,6 +860,34 @@ DECISIONS = {"sent": "finished on request", "stale": "passed up as stale",
              "off": "not asked, early_finalize off"}
 
 
+# Seconds before its end that a word is taken to have begun, at the
+# earliest. The recognizer pads a final word's start back to the end of
+# the word before, so on the fourth field test the raw starts put 75
+# guesses of 248 inside a word, where the onsets this allows put 55.
+PADDED_ONSET = 0.3
+# Seconds after a guess's last word before a word counts as the next one,
+# since the guess and the final result place the same word slightly apart.
+SAME_WORD = 0.03
+
+
+def cut_into(guess, spoken):
+    """Where the word after a guess had begun by the cut: quiet, unseen.
+
+    The cut is all the audio sent when the guess arrived. Empty when the
+    next word began after it, which is a finish that would cut nothing.
+    """
+    last = guess["audio_end"] - guess["quiet"]
+    cut = guess["audio_end"] + guess["unseen"]
+    for start, end in spoken:
+        if start <= last + SAME_WORD:
+            continue
+        onset = max(start, end - PADDED_ONSET)
+        if onset >= cut:
+            return ""
+        return "quiet" if onset < guess["audio_end"] else "unseen"
+    return ""
+
+
 def _guesses(page, handle, session):
     """How often a finish was asked for after speech had already resumed.
 
@@ -855,29 +904,34 @@ def _guesses(page, handle, session):
         (session["id"],)).fetchall()
     if not rows:
         return
-    starts = {}
+    words = {}
     for fragment in handle.execute(
             "SELECT run, words FROM fragments WHERE session_id = ?"
             " AND words IS NOT NULL ORDER BY id", (session["id"],)):
-        starts.setdefault(fragment["run"], []).extend(
-            start for _, start, _ in json.loads(fragment["words"]))
+        words.setdefault(fragment["run"], []).extend(
+            (start, end) for _, start, end in json.loads(fragment["words"]))
+    for spoken in words.values():
+        spoken.sort()
     page.write("Guesses that ended a sentence, by what became of them, "
                "with the audio sent after each guess's window and how "
-               "often a word had already begun in it, which is a word a "
-               "Finalize then would cut. Where one was sent, a word it "
-               "cut away entirely is not counted.\n\n")
+               "often the next word had already begun where a Finalize "
+               "would cut, which is a word it then would cut. Most of "
+               "those began inside the quiet the guess itself reported, "
+               "too little of the word yet to transcribe. Where one was "
+               "sent, a word it cut away entirely is not counted.\n\n")
     for decision, label in DECISIONS.items():
         chosen = [row for row in rows if row["decision"] == decision]
         if not chosen:
             continue
         unseen = [row["unseen"] for row in chosen
                   if row["unseen"] is not None]
-        cut = sum(1 for row in chosen if row["unseen"] is not None
-                  and any(row["audio_end"] < start
-                          < row["audio_end"] + row["unseen"]
-                          for start in starts.get(row["run"], [])))
-        after = (f", unseen audio {latency_summary(unseen)}, a word begun "
-                 f"in it {cut} times" if unseen else "")
+        begun = [cut_into(row, words.get(row["run"], []))
+                 for row in chosen if row["unseen"] is not None]
+        cut = sum(1 for where in begun if where)
+        inside = sum(1 for where in begun if where == "quiet")
+        after = (f", unseen audio {latency_summary(unseen)}, a word already "
+                 f"begun at the cut {cut} times, {inside} of them inside "
+                 f"the guess's own quiet" if unseen else "")
         page.write(f"- {label}: {len(chosen)}{after}\n")
     page.write("\n")
 

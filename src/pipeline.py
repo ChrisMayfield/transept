@@ -228,6 +228,22 @@ SENTENCE_BREAK = re.compile(
     r"(?:(?<=[.!?])|(?<=[.!?]['\"]))\s+(?=['\"]?[A-Z0-9])")
 ABBREVIATIONS = {"Mr.", "Mrs.", "Ms.", "Dr.", "St.", "Jr.", "Sr.", "vs.",
                  "Bro.", "Sis.", "e.g.", "i.e."}
+# A middle initial, as in "Tamara W. Runia", which on the fourth field test
+# closed a line between the initial and the surname. "I." is left out,
+# since a sentence can end on "I".
+INITIAL = re.compile(r"^[A-HJ-Z]\.$")
+# Words a clause does not end on. A recognizer endpoint after one of these
+# is a speaker pausing mid-sentence, and closing the line there sends "the
+# meeting the" to a language that has to guess the rest.
+FUNCTION_WORDS = {
+    "a", "an", "the", "and", "or", "but", "so", "because", "to", "of", "in",
+    "on", "at", "for", "with", "by", "from", "into", "about", "as", "if",
+    "when", "than", "that", "which", "who", "whose", "where", "while", "is",
+    "are", "was", "were", "be", "been", "am", "will", "would", "can",
+    "could", "shall", "should", "may", "might", "must", "do", "does", "did",
+    "have", "has", "had", "my", "your", "our", "their", "his", "her", "its",
+    "thy", "thine", "this", "these", "those", "i", "we", "they", "he", "she",
+}
 
 DIM = "\033[2m"
 RESET = "\033[0m"
@@ -299,10 +315,10 @@ class Segmenter:
     Deepgram finalizes text before the speaker finishes a sentence, so
     translating each result in isolation produces fragments like "on the
     heater" with no subject. Fragments are held until a silent gap opens,
-    the recognizer reports an endpoint, the text ends in terminal
-    punctuation, or the ceiling expires. A sentence that finishes inside
-    the buffer goes out as soon as it arrives, and the unfinished rest
-    stays.
+    the recognizer reports an endpoint after what could be a whole clause,
+    the text ends in terminal punctuation, or the ceiling expires. A
+    sentence that finishes inside the buffer goes out as soon as it
+    arrives, and the unfinished rest stays.
 
     The gap check is what stops an abandoned half-sentence from capturing
     whatever the next person says. Without it, "you all can see if it" waits
@@ -349,9 +365,11 @@ class Segmenter:
                                else min(self.confidence, confidence))
 
         joined = " ".join(self.parts).strip()
-        if speech_final or TERMINAL_PUNCTUATION.search(joined):
+        if finished(joined):
             emits.extend(
                 self._take("endpoint" if speech_final else "punctuation"))
+        elif speech_final and self._complete(joined):
+            emits.extend(self._take("endpoint"))
         else:
             # The fragment ended mid-sentence, but a sentence may have
             # finished inside it. Held until the rest arrived, that
@@ -377,6 +395,18 @@ class Segmenter:
 
     def drain(self):
         return self._take("drain")
+
+    def _complete(self, text):
+        """Whether an endpoint on unpunctuated text may close the line.
+
+        A pause is not a sentence end, and the shorter the endpointing the
+        more pauses come mid-clause: replayed at 0.25 seconds, the fourth
+        field test's lines ending on a function word went from 16 to 57.
+        Text held here waits for the next piece, under the same ceiling.
+        """
+        words = text.split()
+        last = words[-1].strip(",;:'\"").lower() if words else ""
+        return len(words) >= self.min_words and last not in FUNCTION_WORDS
 
     def _split(self):
         """Emit the finished sentences in the buffer, keep the unfinished.
@@ -457,11 +487,23 @@ def sentences(text):
         return []
     pieces = []
     for piece in SENTENCE_BREAK.split(text):
-        if pieces and pieces[-1].split()[-1] in ABBREVIATIONS:
+        if pieces and abbreviated(pieces[-1].split()[-1]):
             pieces[-1] += " " + piece
         else:
             pieces.append(piece)
     return pieces
+
+
+def abbreviated(word):
+    """Whether a word's full stop is an abbreviation's, not a sentence's."""
+    return word in ABBREVIATIONS or bool(INITIAL.match(word))
+
+
+def finished(text):
+    """Whether text ends a sentence, rather than an abbreviation."""
+    words = text.split()
+    return bool(TERMINAL_PUNCTUATION.search(text)) and not (
+        words and abbreviated(words[-1]))
 
 
 def group(pieces, min_words):
@@ -1456,7 +1498,7 @@ def ends_sentence(guess, held, min_words, quiet=FINALIZE_QUIET):
     since "Right?" on its own is not a line and asking for it would only
     cut the recognizer's context short.
     """
-    if quiet < FINALIZE_QUIET or not TERMINAL_PUNCTUATION.search(guess):
+    if quiet < FINALIZE_QUIET or not finished(guess):
         return False
     return held + len(guess.split()) >= min_words
 

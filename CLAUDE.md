@@ -113,6 +113,7 @@ A recorded session keeps every fragment the recognizer finalized, with its timin
 The word times are what measure a line from its words being spoken: a fragment's `audio_end` is where the recognizer stopped listening, which after a `Finalize` is the moment it was sent, so a lag read from it measured 0.10 seconds at the median on a Sunday when readers waited about five for a line's first word.
 It keeps every guess that could have asked for a finish in `guesses`, with how much audio had gone up after it and what became of it.
 The report's "Names to check" marks each name a correction introduced as from the glossary, from the preceding lines, or from neither, because only the last is the model's own, and on the third field test a name borrowed from the line before was taken for an invention until somebody read that line.
+A name from neither that opens a sentence goes in a group of its own rather than being dropped, since a capital there is usually grammar, but "Runia" supplied for "Rina" at the start of a line went unreported on the fourth field test.
 It also keeps a row in `audio` every `AUDIO_WINDOW` seconds: how much audio was captured and how loud, how much reached the recognizer, and how many results came back and how many of those were empty.
 A field test lost half minutes at a time with nothing recorded to say whether the room was silent, the feed quiet, the audio missing, or heard and not understood, and the report's "Stretches with no words" walks those three points in the order the audio travels to say which.
 A stretch's level is judged against the session's own speech, the median of the windows with words in them, and a stretch is split where the level jumps, because on the third field test one median over the opening hymn and the prayer after it called both speaking level.
@@ -271,6 +272,10 @@ Nothing is split off shorter than `min_words`, so "Right?" stays with what follo
 The ceiling cuts at the last comma rather than wherever the buffer stopped, because a line ending on "and" or "the" is the front half of a clause, and a language that puts its verb last cannot translate that half without guessing at the rest.
 A comma with fewer than `min_words` before it is not a cut, since "you know," is not a clause.
 
+A recognizer endpoint is a pause, not a sentence end, so it closes a line only when the text could be a whole clause: terminal punctuation, or at least `min_words` and not ending on one of `FUNCTION_WORDS`.
+Anything else waits for the next piece under the same ceiling, because replayed at an `endpointing` of 0.25 seconds the fourth field test's lines ending on a function word went from 16 to 57.
+A middle initial such as "W." is not terminal punctuation either, since on that test "Tamara W." closed a line and left the surname for the next one.
+
 Interim recognition results are requested but never shown: they decide when to send `Finalize`, and nothing else reads them.
 Left alone the recognizer finalizes on a pause of `endpointing` or on its own clock, and on the second field test most pieces ended on the clock, four seconds or more after their first word.
 `listen` sends `Finalize` once a guess ends a sentence with `FINALIZE_QUIET` seconds of silence after its last word, since `Finalize` closes all the audio sent so far, and asked while the next word is arriving it cuts that word in half.
@@ -278,6 +283,7 @@ Its answer comes back marked `speech_final`, which `listen` clears, because the 
 That quiet is measured inside the guess's own window, though, and by the time the guess arrives more audio has gone up that it never heard, so on the third field test a speaker already into the next sentence lost "Each", "If", and "Through" to the cut.
 `listen` therefore reads the source's clock and passes up a guess with more than `FINALIZE_UNSEEN` seconds of audio after its window, for the next guess, which has heard more of it.
 `early_finalize = false` sends no `Finalize`, but guesses are requested either way and each one that would have asked is still handed to the sink as `off`, because the words recorded after it say whether that finish would have cut one.
+On the fourth field test the unseen audio never passed 0.22 seconds, and most of the words a finish would have cut had begun inside the guess's own quiet, too little of the word yet to transcribe, which is why the report counts those too and why a longer `FINALIZE_QUIET` does not help.
 Interim results change nothing the recognizer finalizes, and the audio is what is billed.
 
 A local device is wrapped in `Stamped` before it is wrapped in the encoder, and lag is read from its `StreamClock` rather than from when the run began.
